@@ -11,6 +11,7 @@ import type {
   RunState,
   Settings,
 } from "../../shared/types";
+import { cloneFlow, newFlow } from "../../shared/flows";
 import { api, ApiError, subscribeRun } from "./api";
 
 type Section = "blocks" | "flows" | "settings" | "env";
@@ -38,7 +39,8 @@ interface State {
   deleteBlock(id: string): void;
   // flows
   setCurrentFlow(id: string): void;
-  createFlow(name: string): void;
+  /** New empty flow, or a copy of `fromFlowId`. */
+  createFlow(name: string, fromFlowId?: string): void;
   renameFlow(id: string, name: string): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
@@ -155,8 +157,9 @@ export const useStore = create<State>((set, get) => {
     setCurrentFlow(id) {
       set({ currentFlowId: id, selectedNodeId: null });
     },
-    createFlow(name) {
-      const flow: Flow = { id: uid("flow"), name, nodes: [], edges: [] };
+    createFlow(name, fromFlowId) {
+      const source = fromFlowId ? get().data?.flows.find((f) => f.id === fromFlowId) : undefined;
+      const flow: Flow = source ? cloneFlow(source, uid("flow"), name) : newFlow(uid("flow"), name);
       patchData((d) => ({ ...d, flows: [...d.flows, flow] }), "flows");
       set({ currentFlowId: flow.id, selectedNodeId: null });
     },

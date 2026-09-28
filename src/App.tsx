@@ -8,6 +8,7 @@ import { BlockEditor } from "@/components/BlockEditor";
 import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
 import { FlowCanvas } from "@/components/FlowCanvas";
 import { useMissingInputs } from "@/components/InputsPanel";
+import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { Palette } from "@/components/Palette";
 import { SidePanel } from "@/components/SidePanel";
 import { useCurrentFlow, useStore } from "@/lib/store";
@@ -38,10 +39,11 @@ function TopBar() {
   const flows = useStore((s) => s.data?.flows ?? []);
   const flow = useCurrentFlow();
   const run = useStore((s) => s.run);
-  const { setCurrentFlow, createFlow, renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
+  const { setCurrentFlow, renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
   const missing = useMissingInputs();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
+  const [newOpen, setNewOpen] = useState(false);
   const active = run && !run.finishedAt;
   const canRun = !!flow && flow.nodes.length > 0 && missing.length === 0 && !active && !starting;
 
@@ -75,7 +77,7 @@ function TopBar() {
           </SelectContent>
         </Select>
       )}
-      <Button size="sm" variant="ghost" title="New flow" onClick={() => createFlow(`Flow ${flows.length + 1}`)}>
+      <Button size="sm" variant="ghost" title="New pipeline (empty or cloned)" onClick={() => setNewOpen(true)}>
         <Plus /> New
       </Button>
       <Button size="sm" variant="ghost" title="Rename flow" disabled={!flow} onClick={() => setRenaming(flow?.name ?? "")}>
@@ -116,6 +118,7 @@ function TopBar() {
           </Button>
         )}
       </div>
+      <NewFlowDialog open={newOpen} onOpenChange={setNewOpen} />
     </header>
   );
 }
