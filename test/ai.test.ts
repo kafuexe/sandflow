@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFlag, runAi, skillInstallCommand } from "../backend/runners/ai";
+import { agentFlag, runAi, sandboxBranch, skillInstallCommand } from "../backend/runners/ai";
 import { resolveBlock } from "../shared/resolve";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW } from "../shared/library";
 import type { RunContext } from "../backend/engine";
@@ -58,6 +58,18 @@ describe("ai runner helpers", () => {
     expect(skillInstallCommand({ name: "tdd", source: "a/b" }, "pi")).toBe("npx -y skills@latest add a/b --skill tdd -g -y");
     expect(skillInstallCommand({ name: "x; rm -rf /", source: "a/b" }, "claudeCode")).toBeUndefined();
     expect(skillInstallCommand({ name: "x", source: "a/b$(id)" }, "claudeCode")).toBeUndefined();
+  });
+});
+
+describe("sandboxBranch", () => {
+  it("falls back when BRANCH_NAME is blank", () => {
+    const c = ctx(undefined);
+    c.env = { BRANCH_NAME: "  " };
+    expect(sandboxBranch(c)).toBe("sandflow/r");
+    c.env = { BRANCH_NAME: "feat/x" };
+    expect(sandboxBranch(c)).toBe("feat/x");
+    c.branch = "from-task";
+    expect(sandboxBranch(c)).toBe("from-task");
   });
 });
 

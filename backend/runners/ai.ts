@@ -40,6 +40,11 @@ export function skillInstallCommand(skill: SkillRef, provider: AgentProvider): s
 const MAX_QUESTION_ROUNDS = 5;
 const COMPLETE = "<promise>COMPLETE</promise>";
 
+/** Branch for the run's shared sandbox: Create task's branch, else BRANCH_NAME, else a per-run branch. */
+export function sandboxBranch(ctx: RunContext): string {
+  return ctx.branch || ctx.env.BRANCH_NAME?.trim() || `sandflow/${ctx.run.id}`;
+}
+
 async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   if (ctx.sandbox) return ctx.sandbox as SandboxLike;
   const sc = await import("@ai-hero/sandcastle");
@@ -52,7 +57,7 @@ async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
   const repo = ctx.env.REPO_PATH?.trim();
   if (!repo) throw new Error("Missing env var REPO_PATH");
-  const branch = ctx.branch ?? ctx.env.BRANCH_NAME?.trim() ?? `sandflow/${ctx.run.id}`;
+  const branch = sandboxBranch(ctx);
   ctx.log("info", `Creating ${kind} sandbox on branch ${branch}…`);
   const sandbox = await sc.createSandbox({
     branch,

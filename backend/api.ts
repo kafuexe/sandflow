@@ -55,6 +55,10 @@ export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: Nod
     if (!url.pathname.startsWith("/api/")) return next();
     const parts = url.pathname.slice(5).split("/").filter(Boolean);
     const method = req.method ?? "GET";
+    // Writes must be JSON: cross-site pages can only send JSON after a CORS preflight, which Vite rejects.
+    if (method !== "GET" && !req.headers["content-type"]?.startsWith("application/json")) {
+      throw new HttpError(415, "Content-Type must be application/json");
+    }
     const route = `${method} /${parts.map((p, i) => (parts[0] === "runs" && i === 1 ? ":id" : p)).join("/")}`;
 
     switch (route) {

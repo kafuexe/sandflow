@@ -26,7 +26,7 @@ export const api = {
   startRun: (flowId: string) => request<{ runId: string }>("POST", "/runs", { flowId }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
-  cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`),
+  cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
 };
 
 /** Subscribe to live run state; returns an unsubscribe function. */

@@ -73,6 +73,18 @@ describe("api", () => {
     expect((await fetch(`${base}/runs/nope`)).status).toBe(404);
   });
 
+  it("rejects non-JSON writes (blocks cross-site simple requests)", async () => {
+    await fetch(`${base}/env`, json("PUT", env));
+    await fetch(`${base}/settings`, json("PUT", { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 }));
+    const res = await fetch(`${base}/runs`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ flowId: "feature-pipeline" }),
+    });
+    expect(res.status).toBe(415);
+    expect((await fetch(`${base}/runs/x/cancel`, { method: "POST" })).status).toBe(415);
+  });
+
   it("streams run state over SSE", async () => {
     await fetch(`${base}/env`, json("PUT", env));
     await fetch(`${base}/settings`, json("PUT", { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 }));
