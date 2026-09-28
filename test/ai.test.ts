@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentFlag, runAi, sandboxBranch, skillInstallCommand } from "../backend/runners/ai";
+import { agentEnv, agentFlag, runAi, sandboxBranch, skillInstallCommand } from "../backend/runners/ai";
 import { resolveBlock } from "../shared/resolve";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW } from "../shared/library";
 import type { RunContext } from "../backend/engine";
@@ -58,6 +58,25 @@ describe("ai runner helpers", () => {
     expect(skillInstallCommand({ name: "tdd", source: "a/b" }, "pi")).toBe("npx -y skills@latest add a/b --skill tdd -g -y");
     expect(skillInstallCommand({ name: "x; rm -rf /", source: "a/b" }, "claudeCode")).toBeUndefined();
     expect(skillInstallCommand({ name: "x", source: "a/b$(id)" }, "claudeCode")).toBeUndefined();
+  });
+});
+
+describe("agentEnv", () => {
+  const base = resolveBlock("plan", BUILTIN_BLOCKS);
+  it("passes block env through unchanged when no endpoint is set", () => {
+    expect(agentEnv(base, { A: "1" })).toEqual({ A: "1" });
+  });
+  it("maps the endpoint to the provider's base-URL variable", () => {
+    const claude = { ...base, agent: { ...base.agent, endpoint: "https://llm.corp.local/anthropic" } };
+    expect(agentEnv(claude, { A: "1" })).toEqual({ A: "1", ANTHROPIC_BASE_URL: "https://llm.corp.local/anthropic" });
+    const codex = { ...base, agent: { ...base.agent, provider: "codex" as const, endpoint: "http://h:8080/v1" } };
+    expect(agentEnv(codex, {})).toEqual({ OPENAI_BASE_URL: "http://h:8080/v1" });
+  });
+  it("uses an explicit env var name, and requires one for providers without a default", () => {
+    const custom = { ...base, agent: { ...base.agent, provider: "opencode" as const, endpoint: "http://h", endpointEnv: "MY_URL" } };
+    expect(agentEnv(custom, {})).toEqual({ MY_URL: "http://h" });
+    const missing = { ...base, agent: { ...base.agent, provider: "opencode" as const, endpoint: "http://h" } };
+    expect(() => agentEnv(missing, {})).toThrow(/env var/i);
   });
 });
 

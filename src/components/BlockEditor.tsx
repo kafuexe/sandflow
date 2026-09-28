@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { BlockIcon, ICONS } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { SKILL_CATALOG } from "../../shared/library";
+import { ENDPOINT_ENV } from "../../shared/agents";
 import { applyConfig, ENV_NAME_RE, resolveInherited, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
@@ -103,7 +104,7 @@ export function BlockEditor() {
     if (value === undefined) delete next[key];
     setCfg({ [which]: Object.keys(next).length ? next : undefined });
   };
-  const setAgent = (key: "provider" | "model" | "effort", value: string | undefined) => {
+  const setAgent = (key: "provider" | "model" | "effort" | "endpoint" | "endpointEnv", value: string | undefined) => {
     const next: Record<string, string | undefined> = { ...c.agent, [key]: value };
     if (value === undefined) delete next[key];
     setCfg({ agent: Object.keys(next).length ? (next as BlockConfig["agent"]) : undefined });
@@ -430,6 +431,35 @@ export function BlockEditor() {
                   </Select>
                 </Field>
               </div>
+              <div className="grid grid-cols-[2fr_1fr] gap-4">
+                <Field label="Endpoint (on-prem / proxy — empty = provider default)" overridden={c.agent?.endpoint !== undefined} onReset={() => setAgent("endpoint", undefined)} inheritable>
+                  <Input
+                    value={c.agent?.endpoint ?? ""}
+                    placeholder={inherited.agent.endpoint || "https://llm.internal.corp/anthropic"}
+                    onChange={(e) => setAgent("endpoint", e.target.value || undefined)}
+                    aria-invalid={!!cfg.agent.endpoint && !/^https?:\/\/\S+$/i.test(cfg.agent.endpoint)}
+                    className="font-mono text-xs"
+                  />
+                </Field>
+                <Field label="Endpoint env var" overridden={c.agent?.endpointEnv !== undefined} onReset={() => setAgent("endpointEnv", undefined)} inheritable>
+                  <Input
+                    value={c.agent?.endpointEnv ?? ""}
+                    placeholder={inherited.agent.endpointEnv || ENDPOINT_ENV[cfg.agent.provider] || "required for this agent"}
+                    onChange={(e) => setAgent("endpointEnv", e.target.value.toUpperCase() || undefined)}
+                    aria-invalid={
+                      (!!cfg.agent.endpoint && !cfg.agent.endpointEnv && !ENDPOINT_ENV[cfg.agent.provider]) ||
+                      (!!c.agent?.endpointEnv && !ENV_NAME_RE.test(c.agent.endpointEnv))
+                    }
+                    className="font-mono text-xs"
+                  />
+                </Field>
+              </div>
+              {cfg.agent.endpoint && (
+                <p className="-mt-2 text-[11px] text-muted-foreground">
+                  Inside a Docker/Podman sandbox, <code>localhost</code> is the container — use <code>host.docker.internal</code> for a
+                  service on this machine. For auth, add e.g. <code>ANTHROPIC_AUTH_TOKEN</code> to the block's env vars above.
+                </p>
+              )}
               <Field label="Instructions" overridden={c.instructions !== undefined} onReset={() => setCfg({ instructions: undefined })} inheritable>
                 <Textarea
                   rows={6}

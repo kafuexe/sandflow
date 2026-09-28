@@ -16,6 +16,14 @@ export function validateBlocks(blocks: BlockDef[]): string[] {
       if (!parent) errors.push(`"${b.name}" extends unknown block "${b.extends}"`);
       else if (!parent.isTemplate) errors.push(`"${b.name}" extends "${parent.name}", which is not a template`);
     }
+    const endpoint = b.config.agent?.endpoint?.trim();
+    if (endpoint && !/^https?:\/\/[^\s]+$/i.test(endpoint)) {
+      errors.push(`"${b.name}" has an invalid endpoint "${endpoint}" (must be an http(s) URL)`);
+    }
+    const endpointEnv = b.config.agent?.endpointEnv?.trim();
+    if (endpointEnv && !ENV_NAME_RE.test(endpointEnv)) {
+      errors.push(`"${b.name}" has invalid endpoint env var name "${endpointEnv}"`);
+    }
     for (const name of b.config.env ?? []) {
       if (!ENV_NAME_RE.test(name)) errors.push(`"${b.name}" has invalid env var name "${name}"`);
     }

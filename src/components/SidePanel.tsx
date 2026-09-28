@@ -62,6 +62,7 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
           <Row k="Agent">
             {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
             {cfg.maxIterations > 1 && ` · ≤${cfg.maxIterations} iterations`}
+            {cfg.agent.endpoint && <div className="truncate font-mono text-muted-foreground" title={cfg.agent.endpoint}>→ {cfg.agent.endpoint}</div>}
           </Row>
           <Row k="Instructions">
             <div className="line-clamp-6 whitespace-pre-wrap text-muted-foreground">

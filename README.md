@@ -50,6 +50,10 @@ Open http://localhost:5173.
 - **Skills**: each block lists recommended skills, installed in the sandbox with
   `npx skills add <owner/repo> --skill <name>` before the block first runs.
 - **Manager**: sees its outgoing connections and routes the task to exactly one of them.
+- **Custom endpoint** (AI / manager blocks): point the agent at an on-prem gateway or proxy. The URL is passed as
+  `ANTHROPIC_BASE_URL` (Claude Code) or `OPENAI_BASE_URL` (Codex); for other agents set *Endpoint env var*.
+  Set it on *AI Agent (template)* to apply it to every agent block. Add auth vars (e.g. `ANTHROPIC_AUTH_TOKEN`)
+  to the block's env list. Inside Docker, reach a service on your machine via `host.docker.internal`, not `localhost`.
 
 ## Data
 

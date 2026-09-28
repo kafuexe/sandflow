@@ -21,6 +21,10 @@ export interface AgentConfig {
   provider: AgentProvider;
   model: string;
   effort?: Effort;
+  /** Custom API endpoint (e.g. an on-prem gateway). Empty = the provider's default. */
+  endpoint?: string;
+  /** Env var the endpoint is passed in. Defaults per provider (ANTHROPIC_BASE_URL / OPENAI_BASE_URL). */
+  endpointEnv?: string;
 }
 
 /** A skill installed into the sandbox with `npx skills add <source> --skill <name>`. */

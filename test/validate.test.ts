@@ -21,6 +21,15 @@ describe("validateBlocks", () => {
     const c: BlockDef = { id: "c", name: "C", isTemplate: false, extends: "nope", config: {} };
     expect(validateBlocks([c]).join()).toMatch(/unknown/i);
   });
+  it("validates the agent endpoint and its env var name", () => {
+    const ok: BlockDef = { id: "e", name: "E", isTemplate: false, config: { agent: { endpoint: "https://llm.corp:8443/v1" } } };
+    expect(validateBlocks([ok])).toEqual([]);
+    const badUrl: BlockDef = { id: "e", name: "E", isTemplate: false, config: { agent: { endpoint: "ftp://x" } } };
+    expect(validateBlocks([badUrl]).join()).toMatch(/endpoint/i);
+    const badVar: BlockDef = { id: "e", name: "E", isTemplate: false, config: { agent: { endpointEnv: "bad-name" } } };
+    expect(validateBlocks([badVar]).join()).toMatch(/bad-name/);
+  });
+
   it("rejects invalid env names", () => {
     const d: BlockDef = { id: "d", name: "D", isTemplate: false, config: { env: ["BAD-NAME"] } };
     expect(validateBlocks([d]).join()).toMatch(/BAD-NAME/);

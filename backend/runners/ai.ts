@@ -1,4 +1,5 @@
 import path from "node:path";
+import { ENDPOINT_ENV } from "../../shared/agents";
 import { nodeLabel, resolveNode } from "../../shared/resolve";
 import type { AgentProvider, FlowNode, NodeIO, QaPair, ResolvedConfig, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
@@ -75,6 +76,17 @@ async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   return sandbox as unknown as SandboxLike;
 }
 
+/** The block's env plus the custom endpoint (if any) under the provider's base-URL variable. */
+export function agentEnv(cfg: ResolvedConfig, blockEnv: Record<string, string>): Record<string, string> {
+  const endpoint = cfg.agent.endpoint?.trim();
+  if (!endpoint) return blockEnv;
+  const name = cfg.agent.endpointEnv?.trim() || ENDPOINT_ENV[cfg.agent.provider];
+  if (!name) {
+    throw new Error(`Set "Endpoint env var" — ${cfg.agent.provider} has no default variable for a custom endpoint`);
+  }
+  return { ...blockEnv, [name]: endpoint };
+}
+
 async function makeAgent(cfg: ResolvedConfig, env: Record<string, string>) {
   const sc = (await import("@ai-hero/sandcastle")) as unknown as Record<string, unknown>;
   const factory = sc[cfg.agent.provider];
@@ -139,7 +151,8 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     ctx.installedSkills.add(key);
   }
 
-  const agent = await makeAgent(cfg, env);
+  const agent = await makeAgent(cfg, agentEnv(cfg, env));
+  if (cfg.agent.endpoint?.trim()) ctx.log("info", `Agent endpoint: ${cfg.agent.endpoint.trim()}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
   const qa: QaPair[] = [];
   const baseOptions = {
