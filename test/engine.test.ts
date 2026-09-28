@@ -1,0 +1,124 @@
+import { describe, expect, it } from "vitest";
+import { startRun, type NodeRunner } from "../backend/engine";
+import { BUILTIN_BLOCKS, DEFAULT_FLOW } from "../shared/library";
+import type { Flow, RunState, Settings } from "../shared/types";
+
+const settings: Settings = { startingPrompt: "Add login", sandbox: "none", maxSteps: 40 };
+const env = { REPO_PATH: "/r", ANTHROPIC_API_KEY: "k", BRANCH_NAME: "feat/x", BASE_BRANCH: "main", MR_PROVIDER: "github" };
+
+function run(runner: NodeRunner, flow: Flow = DEFAULT_FLOW, s: Settings = settings) {
+  const states: RunState[] = [];
+  const h = startRun({
+    flow,
+    blocks: BUILTIN_BLOCKS,
+    env,
+    settings: s,
+    runners: { auto: runner, ai: runner },
+    onChange: (st) => states.push(structuredClone(st)),
+  });
+  return { h, states };
+}
+
+describe("engine", () => {
+  it("runs the default flow through a CR loop and routes to Create MR", async () => {
+    let crCount = 0;
+    const order: string[] = [];
+    const seen: Record<string, unknown> = {};
+    const runner: NodeRunner = async (ctx, node, cfg, inputs) => {
+      order.push(node.id);
+      seen[node.id] = { inputs, env: ctx.blockEnv(cfg) };
+      if (node.id === "n-cr") {
+        crCount++;
+        return { outputs: { artifact: crCount === 1 ? "VERDICT: CHANGES_REQUESTED" : "VERDICT: APPROVED", steer: "fix x" } };
+      }
+      if (node.id === "n-manager") {
+        const approved = inputs.artifact?.includes("APPROVED") && !inputs.artifact.includes("CHANGES");
+        return { outputs: { artifact: inputs.artifact, steer: "go" }, route: approved ? "n-create-mr" : "n-cr-fix" };
+      }
+      return { outputs: { artifact: `${node.id}-art`, steer: `${node.id}-steer` } };
+    };
+    const { h } = run(runner);
+    const final = await h.done;
+    expect(final.status).toBe("done");
+    expect(order).toEqual([
+      "n-create-task", "n-plan", "n-implement", "n-cr", "n-manager", "n-cr-fix", "n-cr", "n-manager", "n-create-mr",
+    ]);
+    expect(final.nodes["n-cr"].executions).toBe(2);
+    expect(final.nodes["n-manager"].routedTo).toBe("n-create-mr");
+    // create-task outputs artifact only → steer dropped
+    expect((seen["n-plan"] as any).inputs).toEqual({ artifact: "n-create-task-art" });
+    // implement received both handles
+    expect((seen["n-implement"] as any).inputs).toEqual({ artifact: "n-plan-art", steer: "n-plan-steer" });
+    // create-mr only accepts artifact; wired artifact only
+    expect((seen["n-create-mr"] as any).inputs).toEqual({ artifact: "VERDICT: APPROVED" });
+    // env limited to what the block declares
+    expect(Object.keys((seen["n-plan"] as any).env).sort()).toEqual(["ANTHROPIC_API_KEY", "REPO_PATH"]);
+  });
+
+  it("fails when max steps is exceeded", async () => {
+    const runner: NodeRunner = async (_c, node) =>
+      node.id === "n-manager" ? { outputs: { artifact: "a" }, route: "n-cr-fix" } : { outputs: { artifact: "a", steer: "s" } };
+    const final = await run(runner, DEFAULT_FLOW, { ...settings, maxSteps: 10 }).h.done;
+    expect(final.status).toBe("failed");
+    expect(final.error).toMatch(/max steps/i);
+  });
+
+  it("falls back to the first target on an invalid manager route and warns", async () => {
+    const runner: NodeRunner = async (_c, node) =>
+      node.id === "n-manager" ? { outputs: { artifact: "a" }, route: "bogus" } : { outputs: { artifact: "a", steer: "s" } };
+    const final = await run(runner, DEFAULT_FLOW, { ...settings, maxSteps: 12 }).h.done;
+    expect(final.logs.some((l) => l.level === "warn" && /route/i.test(l.msg))).toBe(true);
+  });
+
+  it("marks the node and run failed when a runner throws", async () => {
+    const runner: NodeRunner = async (_c, node) => {
+      if (node.id === "n-plan") throw new Error("boom");
+      return { outputs: { artifact: "a" } };
+    };
+    const final = await run(runner).h.done;
+    expect(final.status).toBe("failed");
+    expect(final.nodes["n-plan"]).toMatchObject({ status: "failed", error: "boom" });
+  });
+
+  it("pauses on a question and continues after an answer", async () => {
+    const runner: NodeRunner = async (ctx, node) => {
+      if (node.id === "n-plan") {
+        const a = await ctx.ask(node.id, "Which DB?");
+        return { outputs: { artifact: `plan with ${a}` } };
+      }
+      if (node.id === "n-manager") return { outputs: {}, route: "n-create-mr" };
+      return { outputs: { artifact: "a" } };
+    };
+    const { h, states } = run(runner);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.state.status).toBe("waiting");
+    expect(h.state.pendingQuestion).toEqual({ nodeId: "n-plan", question: "Which DB?" });
+    expect(h.answer("Postgres")).toBe(true);
+    const final = await h.done;
+    expect(final.status).toBe("done");
+    expect(final.nodes["n-plan"].outputs?.artifact).toBe("plan with Postgres");
+    expect(states.some((s) => s.nodes["n-plan"]?.status === "waiting")).toBe(true);
+  });
+
+  it("cancels a waiting run", async () => {
+    const runner: NodeRunner = async (ctx, node) => {
+      if (node.id === "n-plan") await ctx.ask(node.id, "?");
+      return { outputs: { artifact: "a" } };
+    };
+    const { h } = run(runner);
+    await new Promise((r) => setTimeout(r, 20));
+    h.cancel();
+    const final = await h.done;
+    expect(final.status).toBe("cancelled");
+  });
+
+  it("fails a flow with no start nodes", async () => {
+    const flow: Flow = { ...DEFAULT_FLOW, nodes: DEFAULT_FLOW.nodes.slice(0, 2), edges: [
+      { id: "1", source: "n-create-task", target: "n-plan", sourceHandle: "artifact", targetHandle: "artifact" },
+      { id: "2", source: "n-plan", target: "n-create-task", sourceHandle: "artifact", targetHandle: "artifact" },
+    ] };
+    const final = await run(async () => ({ outputs: {} }), flow).h.done;
+    expect(final.status).toBe("failed");
+    expect(final.error).toMatch(/start/i);
+  });
+});
