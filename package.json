@@ -13,7 +13,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist-electron/main.js --external:electron --external:electron-updater --external:@ai-hero/sandcastle --external:@ai-hero/sandcastle/*",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist-electron/main.js --external:electron --external:electron-updater --external:@ai-hero/sandcastle --external:@ai-hero/sandcastle/* && esbuild electron/preload.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist-electron/preload.cjs --external:electron",
     "app": "npm run build && npm run build:electron && electron .",
     "app:dist": "npm run build && npm run build:electron && electron-builder --publish never",
     "start": "vite preview --port 5173",

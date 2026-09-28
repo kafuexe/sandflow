@@ -1,12 +1,14 @@
 // Electron main process: runs the Sandflow backend in-process and shows the UI in a window.
 
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
-import { app, BrowserWindow, dialog, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import electronUpdater from "electron-updater";
 import { runAi } from "../backend/runners/ai";
 import { runAuto } from "../backend/runners/auto";
 import { startAppServer, type AppServer } from "../backend/server";
+import type { UpdateSettings } from "../shared/types";
 
 const { autoUpdater } = electronUpdater;
 
@@ -39,7 +41,12 @@ function createWindow(url: string) {
     title: "Sandflow",
     backgroundColor: "#0a0a0a",
     autoHideMenuBar: true,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(import.meta.dirname, "preload.cjs"),
+    },
   });
   // Links (skill docs etc.) open in the real browser; the window never navigates away from the app.
   win.webContents.setWindowOpenHandler(({ url: target }) => {
@@ -56,8 +63,38 @@ function createWindow(url: string) {
   void win.loadURL(url);
 }
 
-function setupAutoUpdate() {
+/** Native pickers for the UI (see preload.ts) — the web UI can't learn local file paths otherwise. */
+function registerIpc() {
+  ipcMain.handle("sandflow:pick-file", async (_e, title: string, extensions: string[]) => {
+    const r = await dialog.showOpenDialog(win!, {
+      title,
+      properties: ["openFile"],
+      filters: [{ name: title, extensions }, { name: "All files", extensions: ["*"] }],
+    });
+    return r.canceled ? null : (r.filePaths[0] ?? null);
+  });
+  ipcMain.handle("sandflow:pick-folder", async (_e, title: string) => {
+    const r = await dialog.showOpenDialog(win!, { title, properties: ["openDirectory"] });
+    return r.canceled ? null : (r.filePaths[0] ?? null);
+  });
+  ipcMain.handle("sandflow:version", () => app.getVersion());
+}
+
+/** Settings → Updates: GitHub releases (default), an internal URL (air-gapped), or off. */
+function readUpdateSettings(dataDir: string): UpdateSettings {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(dataDir, "settings.json"), "utf8")) as { updates?: UpdateSettings };
+    return s.updates ?? { mode: "github" };
+  } catch {
+    return { mode: "github" };
+  }
+}
+
+function setupAutoUpdate(dataDir: string) {
   if (!app.isPackaged) return;
+  const cfg = readUpdateSettings(dataDir);
+  if (cfg.mode === "off") return console.log("[update] disabled in settings");
+  if (cfg.mode === "url" && cfg.url) autoUpdater.setFeedURL({ provider: "generic", url: cfg.url });
   autoUpdater.on("error", (e) => console.warn("[update]", e.message));
   autoUpdater.on("update-downloaded", async (info) => {
     const { response } = await dialog.showMessageBox({
@@ -75,16 +112,18 @@ function setupAutoUpdate() {
 
 async function start() {
   loadShellPath();
+  registerIpc();
   const appRoot = app.getAppPath();
+  const dataDir = path.join(app.getPath("userData"), "data");
   server = await startAppServer({
-    dataDir: path.join(app.getPath("userData"), "data"),
+    dataDir,
     webRoot: path.join(appRoot, "dist"),
     bundledSkillsDir: app.isPackaged ? path.join(process.resourcesPath, "skills") : path.join(appRoot, "skills"),
     runners: { auto: runAuto, ai: runAi },
   });
   console.log(`Sandflow backend listening on ${server.url}`);
   createWindow(server.url);
-  setupAutoUpdate();
+  setupAutoUpdate(dataDir);
 }
 
 if (!app.requestSingleInstanceLock()) {

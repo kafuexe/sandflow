@@ -10,12 +10,19 @@ import type { NodeRunner } from "../backend/engine";
 import type { AppData, RunState } from "../shared/types";
 
 let dir: string;
+const execCalls: string[][] = [];
+const fakeExec = async (cmd: string, args: string[]) => {
+  execCalls.push([cmd, ...args]);
+  if (args[0] === "image") return { code: 1, stdout: "", stderr: "No such image" };
+  if (args[0] === "load") return { code: 0, stdout: "Loaded image: sandflow-agent:9.9.9\n", stderr: "" };
+  return { code: 0, stdout: "27", stderr: "" };
+};
 let server: Server;
 let base: string;
 
 async function start(runner: NodeRunner) {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-api-"));
-  const api = createApi(createStorage(dir), { auto: runner, ai: runner });
+  const api = createApi(createStorage(dir), { auto: runner, ai: runner }, { exec: fakeExec });
   server = createServer((req, res) => api(req, res, () => ((res.statusCode = 404), res.end())));
   server.listen(0);
   await new Promise((r) => server.once("listening", r));
@@ -81,6 +88,21 @@ describe("api", () => {
     expect(bad.status).toBe(400);
     const list = (await (await fetch(`${base}/skills`)).json()) as { name: string }[];
     expect(list.map((s) => s.name)).toEqual(expect.arrayContaining(["mine", "tdd", "writing-plans"]));
+  });
+
+  it("validates settings and exposes sandbox image status + import", async () => {
+    const bad = await fetch(`${base}/settings`, json("PUT", { startingPrompt: "", sandbox: "docker", maxSteps: 40, sandboxImage: "x; rm -rf /" }));
+    expect(bad.status).toBe(400);
+    await fetch(`${base}/settings`, json("PUT", { startingPrompt: "", sandbox: "docker", maxSteps: 40, sandboxImage: "acme/agent:1" }));
+    const st = await (await fetch(`${base}/sandbox/status`)).json();
+    expect(st).toMatchObject({ runtime: "docker", runtimeAvailable: true, image: "acme/agent:1", imagePresent: false });
+    const file = path.join(dir, "bundle.tar.gz");
+    fs.writeFileSync(file, "x");
+    const imp = await fetch(`${base}/sandbox/import`, json("POST", { path: file }));
+    expect(await imp.json()).toEqual({ output: "Loaded image: sandflow-agent:9.9.9" });
+    expect(execCalls.at(-1)).toEqual(["docker", "load", "-i", file]);
+    const missing = await fetch(`${base}/sandbox/import`, json("POST", { path: path.join(dir, "nope.tar") }));
+    expect(missing.status).toBe(400);
   });
 
   it("rejects non-JSON writes (blocks cross-site simple requests)", async () => {

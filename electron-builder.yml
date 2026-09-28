@@ -39,7 +39,9 @@ mac:
 
 linux:
   category: Development
-  target: AppImage # the Linux format electron-updater can update
+  target:
+    - AppImage # auto-updatable; needs FUSE (libfuse2)
+    - tar.gz # no FUSE needed — for locked-down / air-gapped hosts
 
 # CI creates a draft release per tag, every platform uploads into it, then it's published.
 publish:

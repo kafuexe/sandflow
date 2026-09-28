@@ -9,6 +9,7 @@ import { useCurrentFlow, useStore } from "@/lib/store";
 import { nodeLabel } from "../../shared/resolve";
 import type { SandboxKind } from "../../shared/types";
 import { AnswerBox } from "./RunPanel";
+import { SandboxImageSettings, UpdateSettingsField } from "./SandboxSettings";
 
 export function SettingsDialog() {
   const open = useStore((s) => s.settingsOpen);
@@ -17,7 +18,7 @@ export function SettingsDialog() {
   if (!settings) return null;
   return (
     <Dialog open={open} onOpenChange={setSettingsOpen}>
-      <DialogContent>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
           <DialogDescription>Global for every flow. Saved automatically.</DialogDescription>
@@ -36,6 +37,7 @@ export function SettingsDialog() {
               </SelectContent>
             </Select>
           </div>
+          {settings.sandbox !== "none" && <SandboxImageSettings settings={settings} />}
           <div className="space-y-1.5">
             <Label>Max steps per run (loop safety valve)</Label>
             <Input
@@ -54,6 +56,7 @@ export function SettingsDialog() {
               onChange={(e) => updateSettings({ startingPrompt: e.target.value })}
             />
           </div>
+          <UpdateSettingsField settings={settings} />
         </div>
       </DialogContent>
     </Dialog>

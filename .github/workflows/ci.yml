@@ -27,3 +27,15 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run build:electron
+
+  sandbox-image:
+    name: Sandbox image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t sandflow-agent:ci sandbox
+      - name: Smoke test (any UID, tools on PATH, no agent bundled)
+        run: |
+          mkdir -p tools && printf '#!/bin/sh\necho fake-agent ok\n' > tools/claude && chmod +x tools/claude
+          docker run --rm --user 4242:4242 -v "$PWD/tools:/opt/sandflow/tools:ro" --entrypoint sh sandflow-agent:ci -c \
+            'git --version && node --version && touch "$HOME/probe" && claude'

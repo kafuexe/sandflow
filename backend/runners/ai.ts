@@ -7,6 +7,7 @@ import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, FlowNode, NodeIO, QaPair, ResolvedConfig, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
+import { ensureSandboxReady, sandboxProviderOptions } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
 
 /** The subset of sandcastle's `Sandbox` / `SandboxRunResult` this runner relies on. */
@@ -101,11 +102,13 @@ async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   if (ctx.sandbox) return ctx.sandbox as SandboxLike;
   const sc = await import("@ai-hero/sandcastle");
   const kind = ctx.settings.sandbox;
+  // Docker/Podman: the image must already be loaded (offline bundle) — never let `docker run` try to pull it.
+  await ensureSandboxReady(ctx.settings);
   const provider =
     kind === "docker"
-      ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker()
+      ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxProviderOptions(ctx.settings))
       : kind === "podman"
-        ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman()
+        ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(ctx.settings))
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
   const repo = ctx.env.REPO_PATH?.trim();
   if (!repo) throw new Error("Missing env var REPO_PATH");

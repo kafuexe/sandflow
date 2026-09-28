@@ -157,6 +157,18 @@ export interface Settings {
   sandbox: SandboxKind;
   /** Safety valve for loops (e.g. CR → CR fix → CR …). */
   maxSteps: number;
+  /** Local image for Docker/Podman sandboxes (never pulled). Default: sandflow-agent:<app version>. */
+  sandboxImage?: string;
+  /** Host folder with agent CLIs (e.g. a Linux `claude` binary), mounted read-only at /opt/sandflow/tools. */
+  agentToolsDir?: string;
+  /** Desktop app update source. Default: GitHub releases. */
+  updates?: UpdateSettings;
+}
+
+export interface UpdateSettings {
+  mode: "github" | "url" | "off";
+  /** For mode "url": base URL serving latest.yml + installers (e.g. an internal file server). */
+  url?: string;
 }
 
 export type EnvValues = Record<string, string>;

@@ -58,8 +58,35 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npx electron-builder --publish always
 
+  sandbox-image:
+    needs: prepare
+    name: Offline sandbox image (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build sandflow-agent image
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker buildx build --platform "linux/${{ matrix.arch }}" --load -t "sandflow-agent:${VERSION}" sandbox
+          docker run --rm --platform "linux/${{ matrix.arch }}" --entrypoint sh "sandflow-agent:${VERSION}" -c 'git --version && node --version'
+      - name: Save as offline bundle and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FILE="sandflow-sandbox-image-${VERSION}-linux-${{ matrix.arch }}.tar.gz"
+          docker save "sandflow-agent:${VERSION}" | gzip -9 > "$FILE"
+          sha256sum "$FILE" > "$FILE.sha256"
+          gh release upload "$GITHUB_REF_NAME" "$FILE" "$FILE.sha256" --clobber
+
   publish:
-    needs: build
+    needs: [build, sandbox-image]
     runs-on: ubuntu-latest
     steps:
       - name: Publish the release

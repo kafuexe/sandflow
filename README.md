@@ -30,6 +30,36 @@ needs right-click → Open the first time. macOS auto-update only works for sign
   ```
 - For **Create MR**: `gh` (GitHub) or `glab` (GitLab) installed and authenticated, and an `origin` remote.
 
+## Air-gapped / on-prem install
+
+The installers are self-contained: the Node runtime, backend, UI, sandcastle and the base skills are all inside, and
+the app makes no network calls of its own. The target machine only needs **git** and a **container runtime**
+(Docker or Podman) — or neither runtime if you use *Sandbox: None*.
+
+Each release also ships an **offline bundle** for the sandbox — `sandflow-sandbox-image-<version>-linux-amd64.tar.gz`
+(or `-arm64`, plus a `.sha256`). It's the `sandflow-agent:<version>` image (Node 22, git, jq), built from
+[`sandbox/Dockerfile`](sandbox/Dockerfile). Sandflow **never pulls images**: before a run it checks the image is
+loaded and stops with a clear message if it isn't.
+
+1. On a connected machine, download from the release: the installer for your OS, the sandbox bundle for your CPU
+   architecture (and its `.sha256`). Copy them across.
+2. Install Sandflow. On Linux use the `.tar.gz` if the AppImage can't run (it needs FUSE / `libfuse2`).
+3. **Settings → Sandbox → Import offline bundle**: pick the `.tar.gz` (runs `docker load` / `podman load`).
+   Or from a terminal: `docker load -i sandflow-sandbox-image-<version>-linux-amd64.tar.gz`.
+4. **Agent CLI.** The image contains no agent — Claude Code is proprietary, so Sandflow doesn't redistribute it. Put
+   the **Linux** `claude` executable (or another agent CLI) you obtained through your own channels in a folder and set
+   **Settings → Sandbox → Agent tools folder**. It's mounted read-only at `/opt/sandflow/tools`, which is on `PATH`.
+   The image already sets `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and friends so the CLI
+   doesn't try to reach the internet.
+5. Point agents at your internal LLM gateway with the block **Endpoint** (see *Custom endpoint* below).
+6. **Settings → App updates**: *Off*, or *Internal server* — host a release's `latest*.yml` files and installers on
+   an internal web server and enter its URL.
+7. Skills: use bundled or uploaded **file** skills; GitHub skills need internet (`npx skills add`).
+
+Using your own image? Set **Settings → Sandbox image** to its name (e.g. `registry.corp:5000/team/agent:1`); it must
+already be present locally. It should keep `ENTRYPOINT ["sleep", "infinity"]`, a writable `HOME=/home/agent`, and
+work for any UID, like `sandbox/Dockerfile`.
+
 ## Run from source
 
 ```bash

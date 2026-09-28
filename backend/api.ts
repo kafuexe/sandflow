@@ -3,9 +3,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { ENV_NAME_RE } from "../shared/resolve";
+import { validateSettings } from "../shared/settings";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import type { BlockDef, EnvValues, Flow, RunState, Settings } from "../shared/types";
 import { startRun, type NodeRunner, type RunHandle } from "./engine";
+import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
 import type { Storage } from "./storage";
 
@@ -46,9 +48,10 @@ export type Api = Handler & { shutdown(timeoutMs?: number): Promise<void> };
 export function createApi(
   storage: Storage,
   runners: { auto: NodeRunner; ai: NodeRunner },
-  opts: { bundledSkillsDir?: string } = {},
+  opts: { bundledSkillsDir?: string; exec?: Exec } = {},
 ): Api {
   const skills = createSkillStore(storage.dir, opts.bundledSkillsDir);
+  const exec = opts.exec ?? execCli;
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
 
@@ -91,11 +94,24 @@ export function createApi(
 
       case "PUT /settings": {
         const s = await readJson<Settings>(req);
-        if (!s || typeof s !== "object") throw new HttpError(400, "Expected settings");
-        if (!["docker", "podman", "none"].includes(s.sandbox)) throw new HttpError(400, "Invalid sandbox");
-        const maxSteps = Math.max(1, Math.min(1000, Math.floor(Number(s.maxSteps) || 40)));
-        storage.saveSettings({ startingPrompt: String(s.startingPrompt ?? ""), sandbox: s.sandbox, maxSteps });
+        try {
+          storage.saveSettings(validateSettings(s));
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
         return send(res, 200, { ok: true });
+      }
+
+      case "GET /sandbox/status":
+        return send(res, 200, await sandboxImageStatus(storage.load().settings, exec));
+
+      case "POST /sandbox/import": {
+        const { path: file } = (await readJson<{ path?: string }>(req)) ?? {};
+        try {
+          return send(res, 200, { output: await importSandboxImage(storage.load().settings, String(file ?? ""), exec) });
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
       }
 
       case "PUT /env": {
