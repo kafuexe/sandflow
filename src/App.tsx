@@ -1,0 +1,157 @@
+import { useEffect, useState } from "react";
+import { ReactFlowProvider } from "@xyflow/react";
+import { Check, CloudUpload, Loader2, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { BlockEditor } from "@/components/BlockEditor";
+import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
+import { FlowCanvas } from "@/components/FlowCanvas";
+import { useMissingInputs } from "@/components/InputsPanel";
+import { Palette } from "@/components/Palette";
+import { SidePanel } from "@/components/SidePanel";
+import { useCurrentFlow, useStore } from "@/lib/store";
+
+function SaveIndicator() {
+  const status = useStore((s) => s.saveStatus);
+  const error = useStore((s) => s.saveError);
+  if (status === "error")
+    return (
+      <span className="flex items-center gap-1 text-xs text-red-400" title={error}>
+        <TriangleAlert className="size-3.5" /> Save failed: {error}
+      </span>
+    );
+  if (status === "saved")
+    return (
+      <span className="flex items-center gap-1 text-xs text-muted-foreground">
+        <Check className="size-3.5" /> Saved
+      </span>
+    );
+  return (
+    <span className="flex items-center gap-1 text-xs text-muted-foreground">
+      {status === "saving" ? <Loader2 className="size-3.5 animate-spin" /> : <CloudUpload className="size-3.5" />} Saving…
+    </span>
+  );
+}
+
+function TopBar() {
+  const flows = useStore((s) => s.data?.flows ?? []);
+  const flow = useCurrentFlow();
+  const run = useStore((s) => s.run);
+  const { setCurrentFlow, createFlow, renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
+  const missing = useMissingInputs();
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const active = run && !run.finishedAt;
+  const canRun = !!flow && flow.nodes.length > 0 && missing.length === 0 && !active && !starting;
+
+  return (
+    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+      <div className="mr-2 flex items-center gap-1.5 font-semibold">
+        <Waves className="size-5 text-amber-400" /> Sandflow
+      </div>
+
+      {renaming !== null && flow ? (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (renaming.trim()) renameFlow(flow.id, renaming.trim());
+            setRenaming(null);
+          }}
+        >
+          <Input autoFocus value={renaming} onChange={(e) => setRenaming(e.target.value)} onBlur={() => setRenaming(null)} className="h-8 w-56" />
+        </form>
+      ) : (
+        <Select value={flow?.id ?? ""} onValueChange={setCurrentFlow}>
+          <SelectTrigger size="sm" className="w-56">
+            <SelectValue placeholder="No flows" />
+          </SelectTrigger>
+          <SelectContent>
+            {flows.map((f) => (
+              <SelectItem key={f.id} value={f.id}>
+                {f.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      <Button size="sm" variant="ghost" title="New flow" onClick={() => createFlow(`Flow ${flows.length + 1}`)}>
+        <Plus /> New
+      </Button>
+      <Button size="sm" variant="ghost" title="Rename flow" disabled={!flow} onClick={() => setRenaming(flow?.name ?? "")}>
+        <Pencil />
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        title="Delete flow"
+        disabled={!flow}
+        onClick={() => flow && confirm(`Delete flow "${flow.name}"?`) && deleteFlow(flow.id)}
+      >
+        <Trash2 />
+      </Button>
+
+      <div className="ml-auto flex items-center gap-3">
+        <SaveIndicator />
+        <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
+          <Settings /> Settings
+        </Button>
+        {active ? (
+          <Button size="sm" variant="destructive" onClick={() => void cancelRun()}>
+            <Square /> Cancel
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            disabled={!canRun}
+            title={missing.length ? `Missing: ${missing.join(", ")}` : undefined}
+            onClick={async () => {
+              setStarting(true);
+              await startRun();
+              setStarting(false);
+            }}
+            onMouseEnter={() => missing.length && setSideTab("inputs")}
+          >
+            {starting ? <Loader2 className="animate-spin" /> : <Play />} Run
+          </Button>
+        )}
+      </div>
+    </header>
+  );
+}
+
+export default function App() {
+  const data = useStore((s) => s.data);
+  const loadError = useStore((s) => s.loadError);
+  const editor = useStore((s) => s.editor);
+
+  useEffect(() => {
+    void useStore.getState().load();
+  }, []);
+
+  if (!data) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        {loadError ? <span className="text-red-400">Failed to load: {loadError}</span> : <Loader2 className="animate-spin" />}
+      </div>
+    );
+  }
+
+  return (
+    <ReactFlowProvider>
+      <div className="flex h-full flex-col">
+        <TopBar />
+        <div className="flex min-h-0 flex-1">
+          <Palette />
+          <main className="min-w-0 flex-1">
+            <FlowCanvas />
+          </main>
+          <SidePanel />
+        </div>
+      </div>
+      {editor && <BlockEditor />}
+      <SettingsDialog />
+      <QuestionDialog />
+    </ReactFlowProvider>
+  );
+}
