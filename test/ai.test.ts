@@ -101,6 +101,15 @@ describe("file skills", () => {
     expect(execs.some((e) => e.cmd.includes("chmod +x") && e.cmd.includes("scripts/run.sh"))).toBe(true);
   });
 
+  it("converts CRLF to LF in scripts so they run in a Linux container", async () => {
+    const execs: { cmd: string; stdin?: string }[] = [];
+    const sandbox = { exec: async (cmd: string, o?: { stdin?: string }) => (execs.push({ cmd, stdin: o?.stdin }), { exitCode: 0 }) };
+    const c = ctx(sandbox);
+    const crlf = [{ path: "SKILL.md", content: "a\r\nb" }, { path: "run.sh", content: "#!/bin/sh\r\necho hi\r\n" }];
+    await installFileSkill(c, sandbox as never, "claudeCode", { name: "p", file: { store: "user", dir: "p" } }, crlf, "n");
+    expect(execs.find((e) => e.cmd.includes("run.sh"))?.stdin).toBe("#!/bin/sh\necho hi\n");
+  });
+
   it("writes to the host home dir when there is no sandbox", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-home-"));
     try {

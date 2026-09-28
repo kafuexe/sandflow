@@ -65,6 +65,8 @@ export async function installFileSkill(
   }
   if (!SKILL_NAME_RE.test(skill.name)) throw new Error(`Invalid skill name "${skill.name}"`);
   for (const f of files) if (!SKILL_FILE_PATH_RE.test(f.path)) throw new Error(`Invalid skill file path "${f.path}"`);
+  // Scripts saved with Windows line endings fail with "/bin/sh^M: bad interpreter" — normalise them.
+  files = files.map((f) => (f.content.startsWith("#!") ? { ...f, content: f.content.replace(/\r\n/g, "\n") } : f));
 
   if (ctx.settings.sandbox === "none") {
     const dest = path.join(home, ...rel.split("/"), skill.name);
