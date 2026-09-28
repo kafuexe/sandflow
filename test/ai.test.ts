@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { agentEnv, agentFlag, runAi, sandboxBranch, skillInstallCommand } from "../backend/runners/ai";
+import { agentEnv, agentFlag, installFileSkill, runAi, sandboxBranch, skillInstallCommand } from "../backend/runners/ai";
 import { resolveBlock } from "../shared/resolve";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW } from "../shared/library";
 import type { RunContext } from "../backend/engine";
@@ -18,7 +21,7 @@ function fakeSandbox(outputs: string[]) {
   return {
     calls,
     sandbox: {
-      exec: async (cmd: string) => (calls.exec.push(cmd), { exitCode: 0, stdout: "", stderr: "" }),
+      exec: async (cmd: string, _o?: { stdin?: string }) => (calls.exec.push(cmd), { exitCode: 0, stdout: "", stderr: "" }),
       run: async (opts: any) => (calls.run.push(opts), result(outputs.shift() ?? "")),
       close: async () => ({}),
     },
@@ -28,7 +31,7 @@ function fakeSandbox(outputs: string[]) {
 function ctx(sandbox: unknown, answers: string[] = []): RunContext {
   const env = { REPO_PATH: "/r", ANTHROPIC_API_KEY: "k" };
   return {
-    settings: { startingPrompt: "Build it", sandbox: "none", maxSteps: 10 },
+    settings: { startingPrompt: "Build it", sandbox: "docker", maxSteps: 10 },
     env,
     flow: DEFAULT_FLOW,
     blocks: BUILTIN_BLOCKS,
@@ -40,6 +43,7 @@ function ctx(sandbox: unknown, answers: string[] = []): RunContext {
     abort: new AbortController(),
     installedSkills: new Set(),
     cleanup: [],
+    loadSkill: async () => [{ path: "SKILL.md", content: "skill" }],
   } as unknown as RunContext;
 }
 
@@ -80,6 +84,55 @@ describe("agentEnv", () => {
   });
 });
 
+describe("file skills", () => {
+  const files = [
+    { path: "SKILL.md", content: "---\nname: pack\n---\nbody" },
+    { path: "scripts/run.sh", content: "#!/bin/sh\necho hi" },
+  ];
+
+  it("copies files into ~/.claude/skills inside a container sandbox via stdin", async () => {
+    const execs: { cmd: string; stdin?: string }[] = [];
+    const sandbox = { exec: async (cmd: string, o?: { stdin?: string }) => (execs.push({ cmd, stdin: o?.stdin }), { exitCode: 0 }) };
+    const c = ctx(sandbox);
+    c.settings = { ...c.settings, sandbox: "docker" };
+    await installFileSkill(c, sandbox as never, "claudeCode", { name: "pack", file: { store: "user", dir: "pack" } }, files, "n");
+    expect(execs.find((e) => e.stdin === "---\nname: pack\n---\nbody")?.cmd).toContain('"$HOME/.claude/skills/pack/SKILL.md"');
+    expect(execs.find((e) => e.stdin?.startsWith("#!"))?.cmd).toContain("mkdir -p \"$HOME/.claude/skills/pack/scripts\"");
+    expect(execs.some((e) => e.cmd.includes("chmod +x") && e.cmd.includes("scripts/run.sh"))).toBe(true);
+  });
+
+  it("writes to the host home dir when there is no sandbox", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-home-"));
+    try {
+      const c = ctx({});
+      c.settings = { ...c.settings, sandbox: "none" };
+      await installFileSkill(c, {} as never, "claudeCode", { name: "pack", file: { store: "user", dir: "pack" } }, files, "n", home);
+      expect(fs.readFileSync(path.join(home, ".claude", "skills", "pack", "scripts", "run.sh"), "utf8")).toBe("#!/bin/sh\necho hi");
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("skips file skills for agents without a known skills dir", async () => {
+    const logs: string[] = [];
+    const c = ctx({});
+    c.log = (_l, m) => void logs.push(m);
+    await installFileSkill(c, {} as never, "codex", { name: "pack", file: { store: "user", dir: "pack" } }, files, "n");
+    expect(logs.join()).toMatch(/only supported for claudeCode/i);
+  });
+
+  it("runAi installs file skills through the context loader instead of npx", async () => {
+    const { sandbox, calls } = fakeSandbox(["<artifact>A</artifact>"]);
+    const c = ctx(sandbox);
+    c.settings = { ...c.settings, sandbox: "docker" };
+    c.loadSkill = async () => files;
+    const cfg = resolveBlock("plan", BUILTIN_BLOCKS);
+    await runAi(c, node("n-plan", "plan"), cfg, {});
+    expect(calls.exec.some((cmd) => cmd.includes("npx"))).toBe(false);
+    expect(calls.exec.some((cmd) => cmd.includes(".claude/skills/writing-plans/SKILL.md"))).toBe(true);
+  });
+});
+
 describe("sandboxBranch", () => {
   it("falls back when BRANCH_NAME is blank", () => {
     const c = ctx(undefined);
@@ -99,12 +152,13 @@ describe("runAi", () => {
     const cfg = resolveBlock("plan", BUILTIN_BLOCKS);
     const res = await runAi(c, node("n-plan", "plan"), cfg, { artifact: "task" });
     expect(res.outputs).toEqual({ artifact: "PLAN", steer: "S" });
-    expect(calls.exec).toHaveLength(2);
+    const installs = calls.exec.length;
+    expect(installs).toBeGreaterThanOrEqual(2);
     expect(calls.run[0].prompt).toContain("# Input artifact\ntask");
     expect(calls.run[0].promptFile).toBeUndefined();
     expect(calls.run[0].promptArgs).toBeUndefined();
     await runAi(c, node("n-plan", "plan"), cfg, {});
-    expect(calls.exec).toHaveLength(2);
+    expect(calls.exec).toHaveLength(installs);
   });
 
   it("falls back to stdout tail when no artifact tag", async () => {

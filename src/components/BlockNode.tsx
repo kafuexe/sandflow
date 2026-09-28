@@ -7,6 +7,7 @@ import { BlockIcon } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { resolveNode } from "../../shared/resolve";
+import { skillKey } from "../../shared/skills";
 import type { FlowNodeData, NodeRunStatus, ResolvedConfig } from "../../shared/types";
 
 type BlockNodeType = Node<FlowNodeData, "block">;
@@ -155,7 +156,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
         {cfg.skills.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {cfg.skills.slice(0, 2).map((s) => (
-              <span key={`${s.source}/${s.name}`} className="rounded border px-1.5 py-0.5 text-muted-foreground">
+              <span key={skillKey(s)} className="rounded border px-1.5 py-0.5 text-muted-foreground">
                 {s.name}
               </span>
             ))}

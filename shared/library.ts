@@ -2,18 +2,19 @@
 
 import type { BlockDef, Flow, FlowEdge, SkillRef } from "./types";
 
-const SUPERPOWERS = "obra/superpowers";
-const POCOCK = "mattpocock/skills";
+// The base skills are vendored into `skills/` (see skills/*/SOURCE.md) and copied into the sandbox as files.
 const sp = (name: string, why: string): SkillRef => ({
   name,
-  source: SUPERPOWERS,
+  source: "obra/superpowers",
+  file: { store: "bundled", dir: `obra-superpowers/${name}` },
   url: `https://github.com/obra/superpowers/tree/main/skills/${name}`,
   why,
 });
 const mp = (name: string, why: string): SkillRef => ({
   name,
-  source: POCOCK,
-  url: "https://github.com/mattpocock/skills",
+  source: "mattpocock/skills",
+  file: { store: "bundled", dir: `mattpocock-skills/${name}` },
+  url: `https://github.com/mattpocock/skills/tree/main/skills/engineering/${name}`,
   why,
 });
 
@@ -154,7 +155,7 @@ export const BUILTIN_BLOCKS: BlockDef[] = [
         "or `git diff $BASE_BRANCH...HEAD` if there is no remote). Compare it with the plan/summary in the input artifact. " +
         "The artifact is your review and MUST end with a line that is exactly `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`. " +
         "The steer is a concrete, numbered list of fixes (empty if approved).",
-      skills: [mp("code-review", "Matt Pocock's code-review checklist")],
+      skills: [skill("code-review")],
     },
   },
   {

@@ -11,7 +11,9 @@ import type {
   ResolvedConfig,
   RunState,
   Settings,
+  SkillFileRef,
 } from "../shared/types";
+import type { SkillFile } from "./skills";
 
 export interface NodeResult {
   outputs: NodeIO;
@@ -47,6 +49,8 @@ export interface RunContext {
   cleanup: Array<() => Promise<unknown>>;
   /** Where agent logs are written (per node). */
   logDir?: string;
+  /** Reads the files of a file skill (bundled or uploaded). */
+  loadSkill?: (ref: SkillFileRef) => Promise<SkillFile[]>;
 }
 
 export interface StartRunOptions {
@@ -59,6 +63,7 @@ export interface StartRunOptions {
   saveArtifact?: (runId: string, nodeId: string, n: number, text: string) => void;
   /** Base directory for per-run agent logs (`<logRoot>/<runId>/<nodeId>.log`). */
   logRoot?: string;
+  loadSkill?: (ref: SkillFileRef) => Promise<SkillFile[]>;
 }
 
 export interface RunHandle {
@@ -95,6 +100,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     installedSkills: new Set(),
     cleanup: [],
     logDir: opts.logRoot ? path.join(opts.logRoot, run.id) : undefined,
+    loadSkill: opts.loadSkill,
     blockEnv: (cfg) =>
       Object.fromEntries(cfg.env.filter((k) => env[k] !== undefined).map((k) => [k, env[k]])),
     log(level, msg, nodeId) {

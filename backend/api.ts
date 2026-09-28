@@ -6,6 +6,7 @@ import { ENV_NAME_RE } from "../shared/resolve";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import type { BlockDef, EnvValues, Flow, RunState, Settings } from "../shared/types";
 import { startRun, type NodeRunner, type RunHandle } from "./engine";
+import { createSkillStore, type SkillFile } from "./skills";
 import type { Storage } from "./storage";
 
 type Next = (err?: unknown) => void;
@@ -41,6 +42,7 @@ function send(res: ServerResponse, status: number, body: unknown) {
 }
 
 export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: NodeRunner }): Handler {
+  const skills = createSkillStore(storage.dir);
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
 
@@ -115,6 +117,7 @@ export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: Nod
           runners,
           logRoot: path.join(storage.dir, "runs"),
           saveArtifact: storage.saveArtifact,
+          loadSkill: skills.read,
           onChange: (s) => {
             listeners.get(s.id)?.forEach((fn) => fn(s));
             if (s.finishedAt || Date.now() - lastSave > 2000) {
@@ -129,6 +132,18 @@ export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: Nod
           setTimeout(() => runs.delete(s.id), 10 * 60_000);
         });
         return send(res, 200, { runId: handle.state.id });
+      }
+
+      case "GET /skills":
+        return send(res, 200, await skills.list());
+
+      case "POST /skills": {
+        const body = await readJson<{ name?: string; files?: SkillFile[] }>(req);
+        try {
+          return send(res, 200, await skills.save(String(body?.name ?? ""), body?.files ?? []));
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
       }
 
       case "GET /runs/:id":

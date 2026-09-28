@@ -30,6 +30,15 @@ describe("validateBlocks", () => {
     expect(validateBlocks([badVar]).join()).toMatch(/bad-name/);
   });
 
+  it("requires every skill to have a valid GitHub source or a file", () => {
+    const mk = (skills: BlockDef["config"]["skills"]): BlockDef[] => [{ id: "s", name: "S", isTemplate: false, config: { skills } }];
+    expect(validateBlocks(mk([{ name: "a", source: "o/r" }]))).toEqual([]);
+    expect(validateBlocks(mk([{ name: "a", file: { store: "user", dir: "a" } }]))).toEqual([]);
+    expect(validateBlocks(mk([{ name: "a" }])).join()).toMatch(/skill "a"/i);
+    expect(validateBlocks(mk([{ name: "a", source: "bad source" }])).join()).toMatch(/skill "a"/i);
+    expect(validateBlocks(mk([{ name: "a", file: { store: "user", dir: "../x" } }])).join()).toMatch(/skill "a"/i);
+  });
+
   it("rejects invalid env names", () => {
     const d: BlockDef = { id: "d", name: "D", isTemplate: false, config: { env: ["BAD-NAME"] } };
     expect(validateBlocks([d]).join()).toMatch(/BAD-NAME/);

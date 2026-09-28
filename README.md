@@ -47,8 +47,16 @@ Open http://localhost:5173.
 - **Outputs**: `artifact` (blue edges) and `steer` (dashed amber edges).
 - **Templates**: any block or template can *extend* a template. Env vars and skills are merged down the chain,
   everything else is overridden. Edit via the palette (click an item) or **Edit block definition**.
-- **Skills**: each block lists recommended skills, installed in the sandbox with
-  `npx skills add <owner/repo> --skill <name>` before the block first runs.
+- **Skills** (block editor → Skills) are installed into the sandbox before a block first runs. Three kinds:
+  - **Bundled** — the base skills the built-in blocks use ship in [`skills/`](skills/) (vendored from
+    [obra/superpowers](https://github.com/obra/superpowers) and [mattpocock/skills](https://github.com/mattpocock/skills),
+    MIT; see each `SOURCE.md`). Pick them from **Add skill**.
+  - **From file / From folder** — upload a `SKILL.md` or a skill folder; it's stored in `.sandflow/skills/<name>/` and
+    becomes available to every block under **Add skill → Uploaded**.
+  - **GitHub** — `owner/repo` + name, installed with `npx skills add <owner/repo> --skill <name>`.
+
+  File skills are copied to `~/.claude/skills/<name>/` for Claude Code agents (other agents skip them with a warning).
+  With **Sandbox: None** that is *your own* home directory.
 - **Manager**: sees its outgoing connections and routes the task to exactly one of them.
 - **Custom endpoint** (AI / manager blocks): point the agent at an on-prem gateway or proxy. The URL is passed as
   `ANTHROPIC_BASE_URL` (Claude Code) or `OPENAI_BASE_URL` (Codex); for other agents set *Endpoint env var*.

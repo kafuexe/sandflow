@@ -11,11 +11,11 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { BlockIcon, ICONS } from "@/lib/icons";
 import { useStore } from "@/lib/store";
-import { SKILL_CATALOG } from "../../shared/library";
 import { ENDPOINT_ENV } from "../../shared/agents";
 import { applyConfig, ENV_NAME_RE, resolveInherited, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
+import { SkillsEditor } from "./SkillsEditor";
 
 const PROVIDERS: AgentProvider[] = ["claudeCode", "codex", "pi", "opencode", "cursor", "copilot"];
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -119,11 +119,7 @@ export function BlockEditor() {
     ...extendedBy.map((n) => `"${n}" extends it`),
   ];
 
-  const inheritedSkillKeys = new Set(inherited.skills.map((s) => `${s.source}/${s.name}`));
   const ownSkills = c.skills ?? [];
-  const allSkillKeys = new Set(cfg.skills.map((s) => `${s.source}/${s.name}`));
-  const setSkill = (i: number, patch: Partial<SkillRef>) =>
-    setCfg({ skills: ownSkills.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
 
   const addEnv = () => {
     const name = envInput.trim().toUpperCase();
@@ -312,58 +308,7 @@ export function BlockEditor() {
 
           <Separator />
 
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-xs">Skills (installed into the sandbox before the block runs)</Label>
-              <div className="flex gap-2">
-                <Select
-                  value=""
-                  onValueChange={(v) => {
-                    const s = SKILL_CATALOG.find((x) => `${x.source}/${x.name}` === v);
-                    if (s) setCfg({ skills: [...ownSkills, s] });
-                  }}
-                >
-                  <SelectTrigger size="sm">
-                    <SelectValue placeholder="Add recommended" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SKILL_CATALOG.filter((s) => !allSkillKeys.has(`${s.source}/${s.name}`)).map((s) => (
-                      <SelectItem key={`${s.source}/${s.name}`} value={`${s.source}/${s.name}`}>
-                        {s.name} <span className="text-muted-foreground">({s.source})</span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" variant="outline" onClick={() => setCfg({ skills: [...ownSkills, { name: "", source: "" }] })}>
-                  <Plus /> Custom
-                </Button>
-              </div>
-            </div>
-            {inherited.skills.map((s) => (
-              <div key={`${s.source}/${s.name}`} className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Lock className="size-3" /> {s.name} <span>({s.source})</span>
-                {s.url && (
-                  <a href={s.url} target="_blank" rel="noreferrer">
-                    <ExternalLink className="size-3" />
-                  </a>
-                )}
-                <span className="truncate">{s.why}</span>
-              </div>
-            ))}
-            {ownSkills.map((s, i) =>
-              inheritedSkillKeys.has(`${s.source}/${s.name}`) ? null : (
-                <div key={i} className="grid grid-cols-[1fr_1fr_1.4fr_1.4fr_auto] gap-1.5">
-                  <Input className="h-7 text-xs" placeholder="name" value={s.name} onChange={(e) => setSkill(i, { name: e.target.value })} />
-                  <Input className="h-7 text-xs" placeholder="owner/repo" value={s.source} onChange={(e) => setSkill(i, { source: e.target.value })} />
-                  <Input className="h-7 text-xs" placeholder="url" value={s.url ?? ""} onChange={(e) => setSkill(i, { url: e.target.value || undefined })} />
-                  <Input className="h-7 text-xs" placeholder="why" value={s.why ?? ""} onChange={(e) => setSkill(i, { why: e.target.value || undefined })} />
-                  <Button size="icon" variant="ghost" className="size-7" onClick={() => setCfg({ skills: ownSkills.filter((_, j) => j !== i) })}>
-                    <Trash2 className="size-3.5" />
-                  </Button>
-                </div>
-              ),
-            )}
-          </div>
+          <SkillsEditor inherited={inherited.skills} own={ownSkills} onChange={(skills) => setCfg({ skills })} />
 
           <Separator />
 

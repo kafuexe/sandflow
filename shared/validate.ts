@@ -1,4 +1,5 @@
 import { ENV_NAME_RE, flowRequirements, templateChain } from "./resolve";
+import { skillProblem } from "./skills";
 import type { BlockDef, EnvValues, Flow } from "./types";
 
 /** Problems with a block library (empty when valid). */
@@ -23,6 +24,10 @@ export function validateBlocks(blocks: BlockDef[]): string[] {
     const endpointEnv = b.config.agent?.endpointEnv?.trim();
     if (endpointEnv && !ENV_NAME_RE.test(endpointEnv)) {
       errors.push(`"${b.name}" has invalid endpoint env var name "${endpointEnv}"`);
+    }
+    for (const s of b.config.skills ?? []) {
+      const problem = skillProblem(s);
+      if (problem) errors.push(`"${b.name}": skill "${s.name}" — ${problem}`);
     }
     for (const name of b.config.env ?? []) {
       if (!ENV_NAME_RE.test(name)) errors.push(`"${b.name}" has invalid env var name "${name}"`);

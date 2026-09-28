@@ -27,11 +27,22 @@ export interface AgentConfig {
   endpointEnv?: string;
 }
 
-/** A skill installed into the sandbox with `npx skills add <source> --skill <name>`. */
+/** A skill stored as files: `bundled` = shipped in this codebase (`skills/`), `user` = uploaded (`.sandflow/skills/`). */
+export interface SkillFileRef {
+  store: "bundled" | "user";
+  /** Directory inside the store, e.g. `obra-superpowers/writing-plans`. */
+  dir: string;
+}
+
+/**
+ * A skill installed into the sandbox before a block runs: either copied from files (`file`)
+ * or fetched from GitHub with `npx skills add <source> --skill <name>`.
+ */
 export interface SkillRef {
   name: string;
-  /** GitHub `owner/repo` the skill lives in. */
-  source: string;
+  /** GitHub `owner/repo` the skill lives in (for file skills: where it originally came from). */
+  source?: string;
+  file?: SkillFileRef;
   /** Link to read the skill online. */
   url?: string;
   /** Why this skill is recommended for the block. */

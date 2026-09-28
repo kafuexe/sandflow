@@ -73,6 +73,16 @@ describe("api", () => {
     expect((await fetch(`${base}/runs/nope`)).status).toBe(404);
   });
 
+  it("uploads and lists skills", async () => {
+    const up = await fetch(`${base}/skills`, json("POST", { name: "mine", files: [{ path: "SKILL.md", content: "---\nname: mine\n---" }] }));
+    expect(up.status).toBe(200);
+    expect(await up.json()).toMatchObject({ name: "mine", file: { store: "user", dir: "mine" } });
+    const bad = await fetch(`${base}/skills`, json("POST", { name: "x", files: [{ path: "../SKILL.md", content: "" }] }));
+    expect(bad.status).toBe(400);
+    const list = (await (await fetch(`${base}/skills`)).json()) as { name: string }[];
+    expect(list.map((s) => s.name)).toEqual(expect.arrayContaining(["mine", "tdd", "writing-plans"]));
+  });
+
   it("rejects non-JSON writes (blocks cross-site simple requests)", async () => {
     await fetch(`${base}/env`, json("PUT", env));
     await fetch(`${base}/settings`, json("PUT", { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 }));

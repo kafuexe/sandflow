@@ -1,9 +1,13 @@
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { ENDPOINT_ENV } from "../../shared/agents";
 import { nodeLabel, resolveNode } from "../../shared/resolve";
+import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, FlowNode, NodeIO, QaPair, ResolvedConfig, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
+import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
 
 /** The subset of sandcastle's `Sandbox` / `SandboxRunResult` this runner relies on. */
 interface RunResultLike {
@@ -13,7 +17,7 @@ interface RunResultLike {
   resume?: (prompt: string, options?: Record<string, unknown>) => Promise<RunResultLike>;
 }
 interface SandboxLike {
-  exec(command: string): Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
+  exec(command: string, options?: { stdin?: string }): Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
   run(options: Record<string, unknown>): Promise<RunResultLike>;
   close(): Promise<unknown>;
 }
@@ -28,18 +32,63 @@ const AGENT_FLAGS: Partial<Record<AgentProvider, string>> = {
 
 export const agentFlag = (p: AgentProvider) => AGENT_FLAGS[p];
 
-const SOURCE_RE = /^[\w.-]+\/[\w.-]+$/;
-const NAME_RE = /^[\w.-]+$/;
-
 /** `npx skills add …` command for a skill, or undefined when the ref isn't safe to put on a command line. */
 export function skillInstallCommand(skill: SkillRef, provider: AgentProvider): string | undefined {
-  if (!SOURCE_RE.test(skill.source) || !NAME_RE.test(skill.name)) return undefined;
+  if (!skill.source || !SKILL_SOURCE_RE.test(skill.source) || !SKILL_NAME_RE.test(skill.name)) return undefined;
   const flag = agentFlag(provider);
   return `npx -y skills@latest add ${skill.source} --skill ${skill.name} -g${flag ? ` -a ${flag}` : ""} -y`;
 }
 
 const MAX_QUESTION_ROUNDS = 5;
 const COMPLETE = "<promise>COMPLETE</promise>";
+
+/** Where each agent reads user-level skills from (relative to $HOME). Only Claude Code for now. */
+const SKILL_HOME: Partial<Record<AgentProvider, string>> = { claudeCode: ".claude/skills" };
+
+/**
+ * Copy a file skill into the agent's user-level skills dir: inside the container via `exec` + stdin,
+ * or straight onto this machine when running without a sandbox.
+ */
+export async function installFileSkill(
+  ctx: RunContext,
+  sandbox: SandboxLike,
+  provider: AgentProvider,
+  skill: SkillRef,
+  files: SkillFile[],
+  nodeId: string,
+  home = os.homedir(),
+) {
+  const rel = SKILL_HOME[provider];
+  if (!rel) {
+    ctx.log("warn", `Skill ${skill.name} skipped: file skills are only supported for claudeCode agents (this block uses ${provider})`, nodeId);
+    return;
+  }
+  if (!SKILL_NAME_RE.test(skill.name)) throw new Error(`Invalid skill name "${skill.name}"`);
+  for (const f of files) if (!SKILL_FILE_PATH_RE.test(f.path)) throw new Error(`Invalid skill file path "${f.path}"`);
+
+  if (ctx.settings.sandbox === "none") {
+    const dest = path.join(home, ...rel.split("/"), skill.name);
+    for (const f of files) {
+      const p = path.join(dest, ...f.path.split("/"));
+      await fs.mkdir(path.dirname(p), { recursive: true });
+      await fs.writeFile(p, f.content, { mode: f.content.startsWith("#!") ? 0o755 : 0o644 });
+    }
+    ctx.log("info", `Installed skill ${skill.name} to ${dest} (no sandbox — this is your own home directory)`, nodeId);
+    return;
+  }
+
+  const base = `"$HOME/${rel}/${skill.name}`;
+  const clear = await sandbox.exec(`rm -rf ${base}"`);
+  if (clear.exitCode !== 0) throw new Error(`could not clear old copy (exit ${clear.exitCode})`);
+  for (const f of files) {
+    const dir = f.path.includes("/") ? `/${f.path.slice(0, f.path.lastIndexOf("/"))}` : "";
+    const target = `${base}/${f.path}"`;
+    const chmod = f.content.startsWith("#!") ? ` && chmod +x ${target}` : "";
+    const r = await sandbox.exec(`mkdir -p ${base}${dir}" && cat > ${target}${chmod}`, { stdin: f.content });
+    if (r.exitCode !== 0) throw new Error(`writing ${f.path} failed (exit ${r.exitCode}): ${tail(r.stderr ?? "", 300)}`);
+  }
+  ctx.log("info", `Installed skill ${skill.name} (${files.length} file${files.length === 1 ? "" : "s"})`, nodeId);
+}
 
 /** Branch for the run's shared sandbox: Create task's branch, else BRANCH_NAME, else a per-run branch. */
 export function sandboxBranch(ctx: RunContext): string {
@@ -138,8 +187,19 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const label = nodeLabel(node, ctx.blocks);
 
   for (const skill of cfg.skills) {
-    const key = `${skill.source}#${skill.name}`;
+    const key = skillKey(skill);
     if (ctx.installedSkills.has(key)) continue;
+    ctx.installedSkills.add(key);
+    if (skill.file) {
+      try {
+        if (!ctx.loadSkill) throw new Error("no skill store configured");
+        const files = await ctx.loadSkill(skill.file);
+        await installFileSkill(ctx, sandbox, cfg.agent.provider, skill, files, node.id);
+      } catch (e) {
+        ctx.log("warn", `Skill ${skill.name} failed to install: ${(e as Error).message}`, node.id);
+      }
+      continue;
+    }
     const cmd = skillInstallCommand(skill, cfg.agent.provider);
     if (!cmd) {
       ctx.log("warn", `Skipping skill with unsafe name/source: ${skill.source} ${skill.name}`, node.id);
@@ -148,7 +208,6 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     ctx.log("info", `Installing skill ${skill.name} (${skill.source})`, node.id);
     const r = await sandbox.exec(cmd);
     if (r.exitCode !== 0) ctx.log("warn", `Skill ${skill.name} failed to install (exit ${r.exitCode}): ${tail(r.stderr ?? "", 500)}`, node.id);
-    ctx.installedSkills.add(key);
   }
 
   const agent = await makeAgent(cfg, agentEnv(cfg, env));

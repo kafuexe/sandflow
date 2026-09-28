@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore, type SideTab } from "@/lib/store";
 import { resolveNode } from "../../shared/resolve";
+import { skillKey } from "../../shared/skills";
 import type { BlockDef, ResolvedConfig } from "../../shared/types";
 import { InputsPanel } from "./InputsPanel";
 import { RunPanel } from "./RunPanel";
@@ -43,7 +44,7 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
         <div className="space-y-0.5">
           {cfg.skills.length
             ? cfg.skills.map((s) => (
-                <div key={`${s.source}/${s.name}`} className="flex items-center gap-1">
+                <div key={skillKey(s)} className="flex items-center gap-1">
                   {s.url ? (
                     <a href={s.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 hover:underline">
                       {s.name} <ExternalLink className="size-3" />
@@ -51,7 +52,7 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
                   ) : (
                     s.name
                   )}
-                  <span className="truncate text-muted-foreground">({s.source})</span>
+                  <span className="truncate text-muted-foreground">({s.file ? (s.file.store === "bundled" ? "bundled file" : "uploaded file") : s.source})</span>
                 </div>
               ))
             : "—"}

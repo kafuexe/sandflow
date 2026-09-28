@@ -1,4 +1,4 @@
-import type { AppData, BlockDef, EnvValues, Flow, RunState, Settings } from "../../shared/types";
+import type { AppData, BlockDef, EnvValues, Flow, RunState, Settings, SkillRef } from "../../shared/types";
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public body: Record<string, unknown>) {
@@ -26,6 +26,9 @@ export const api = {
   startRun: (flowId: string) => request<{ runId: string }>("POST", "/runs", { flowId }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
+  listSkills: () => request<SkillRef[]>("GET", "/skills"),
+  uploadSkill: (name: string, files: { path: string; content: string }[]) =>
+    request<SkillRef>("POST", "/skills", { name, files }),
   cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
 };
 

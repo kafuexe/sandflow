@@ -6,6 +6,7 @@ import type {
   ResolvedConfig,
   SkillRef,
 } from "./types";
+import { skillKey } from "./skills";
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
   kind: "ai",
@@ -30,7 +31,7 @@ const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
 function mergeSkills(a: SkillRef[], b: SkillRef[] = []): SkillRef[] {
   const out = [...a];
   for (const s of b) {
-    const i = out.findIndex((x) => x.name === s.name && x.source === s.source);
+    const i = out.findIndex((x) => skillKey(x) === skillKey(s));
     if (i >= 0) out[i] = { ...out[i], ...s };
     else out.push(s);
   }
