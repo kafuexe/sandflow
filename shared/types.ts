@@ -9,10 +9,114 @@ export type EdgeInputKind = "artifact" | "steer";
  * auto    – deterministic logic run on the host (git, CLI, shell).
  * ai      – an agent run inside a sandcastle sandbox.
  * manager – an agent that decides which outgoing connection receives the task.
+ * trigger – starts the flow on an event (schedule, GitHub/GitLab webhook or poll, or manually).
+ * condition – deterministic If: evaluates rules and continues out of its `true` or `false` handle.
  */
-export type BlockKind = "auto" | "ai" | "manager";
+export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition";
 
-export type AutoAction = "create-task" | "create-mr" | "shell";
+export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment";
+
+/** Where a condition's result leaves the block. */
+export type BranchHandle = "true" | "false";
+export type SourceHandle = OutputKind | BranchHandle;
+
+// ---------- Triggers ----------
+
+export type TriggerType = "manual" | "schedule" | "github" | "gitlab";
+
+export type IntervalUnit = "seconds" | "minutes" | "hours" | "days" | "weeks" | "months";
+
+export type ScheduleSpec =
+  /** Once, at a local date-time (`2026-10-01T09:00`) or an ISO timestamp. */
+  | { kind: "once"; at: string }
+  /** Every N units, counted from `start` (local date-time; defaults to 2026-01-05T00:00, a Monday). */
+  | { kind: "interval"; every: number; unit: IntervalUnit; start?: string }
+  /** Cron with optional seconds field (croner syntax, e.g. `0 30 9 * * 1-5`), in `timezone` (IANA) or local time. */
+  | { kind: "cron"; expr: string; timezone?: string };
+
+/** Normalised git-host events a trigger can listen for. */
+export type GitEventType =
+  | "issue.opened"
+  | "issue.comment"
+  | "merge_request.opened"
+  | "merge_request.comment"
+  | "push";
+
+export interface TriggerConfig {
+  type: TriggerType;
+  schedule?: ScheduleSpec;
+  /** github/gitlab: which events fire the flow (empty = all supported). */
+  events?: GitEventType[];
+  /** github: `owner/repo`; gitlab: `group/subgroup/project`. */
+  repo?: string;
+  /** GitHub Enterprise / self-hosted GitLab host (e.g. `gitlab.corp.local`). Empty = github.com / gitlab.com. */
+  host?: string;
+  /** webhook = the host pushes to Sandflow's webhook listener; poll = Sandflow asks the API every N seconds. */
+  mode?: "webhook" | "poll";
+  pollSeconds?: number;
+  /** Env var holding the webhook secret (GitHub HMAC secret / GitLab secret token). */
+  secretEnv?: string;
+  /** What to do if this flow is still running when the trigger fires again. */
+  overlap?: "queue" | "skip";
+}
+
+// ---------- Conditions ----------
+
+export type ConditionOp =
+  | "equals"
+  | "not_equals"
+  | "contains"
+  | "not_contains"
+  | "starts_with"
+  | "ends_with"
+  | "matches"
+  | "in"
+  | "exists"
+  | "not_exists"
+  | "gt"
+  | "lt"
+  | "is_true"
+  | "is_false";
+
+export interface ConditionRule {
+  /** Dotted path: `text` (input artifact), `steer`, `json.<path>` (artifact parsed as JSON), `trigger.<path>`. */
+  field: string;
+  op: ConditionOp;
+  /** Comparison value; for `in`, a comma- or newline-separated list; for `matches`, a regex. */
+  value?: string;
+  caseSensitive?: boolean;
+}
+
+export interface ConditionSpec {
+  match: "all" | "any";
+  rules: ConditionRule[];
+}
+
+/** A normalised trigger event; every block of the run can see it (e.g. `trigger.author` in an If block). */
+export interface TriggerEvent {
+  source: TriggerType;
+  /** e.g. `merge_request.comment`, `schedule`, `manual`. */
+  type: string;
+  /** Raw provider action (`opened`, `created`, …). */
+  action?: string;
+  repo?: string;
+  host?: string;
+  author?: string;
+  title?: string;
+  /** Comment / issue / MR description text. */
+  body?: string;
+  url?: string;
+  /** Issue / PR / MR number (GitLab: iid). */
+  number?: number;
+  /** What `number` refers to — used by Post comment. */
+  target?: "issue" | "merge_request";
+  branch?: string;
+  targetBranch?: string;
+  labels?: string[];
+  firedAt: number;
+  /** Provider payload, for advanced conditions (`trigger.raw.…`). */
+  raw?: unknown;
+}
 
 export type AgentProvider = "claudeCode" | "codex" | "pi" | "opencode" | "cursor" | "copilot";
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -87,6 +191,10 @@ export interface BlockConfig {
   shellCommand?: string;
   agent?: Partial<AgentConfig>;
   maxIterations?: number;
+  /** trigger blocks. */
+  trigger?: TriggerConfig;
+  /** condition blocks. */
+  condition?: ConditionSpec;
 }
 
 export interface BlockDef {
@@ -116,6 +224,8 @@ export interface ResolvedConfig {
   shellCommand: string;
   agent: AgentConfig;
   maxIterations: number;
+  trigger: TriggerConfig;
+  condition: ConditionSpec;
 }
 
 export interface FlowNodeData {
@@ -138,7 +248,8 @@ export interface FlowEdge {
   id: string;
   source: string;
   target: string;
-  sourceHandle: OutputKind;
+  /** artifact/steer, or `true`/`false` out of a condition block (carries the condition's input along). */
+  sourceHandle: SourceHandle;
   targetHandle: EdgeInputKind;
 }
 
@@ -147,6 +258,8 @@ export interface Flow {
   name: string;
   nodes: FlowNode[];
   edges: FlowEdge[];
+  /** When true, the flow's trigger blocks (schedule / git) fire runs automatically. */
+  active?: boolean;
 }
 
 export type SandboxKind = "docker" | "podman" | "none";
@@ -163,6 +276,17 @@ export interface Settings {
   agentToolsDir?: string;
   /** Desktop app update source. Default: GitHub releases. */
   updates?: UpdateSettings;
+  /** Listener for GitHub/GitLab webhooks — separate port that only serves /hooks/*. */
+  webhooks?: WebhookSettings;
+}
+
+export interface WebhookSettings {
+  enabled: boolean;
+  /** Bind address: 127.0.0.1 (behind a reverse proxy / tunnel) or 0.0.0.0 (reachable on the network). */
+  host: string;
+  port: number;
+  /** How the git host reaches this listener (shown as the webhook URL), e.g. `https://sandflow.corp.local`. */
+  publicUrl?: string;
 }
 
 export interface UpdateSettings {
@@ -198,6 +322,8 @@ export interface NodeRunState {
   error?: string;
   /** manager: id of the node it routed to. */
   routedTo?: string;
+  /** condition: which way it went. */
+  branch?: BranchHandle;
 }
 
 export interface QaPair {
@@ -229,4 +355,19 @@ export interface RunState {
   pendingQuestion?: PendingQuestion;
   logs: LogLine[];
   error?: string;
+  /** The event that started the run (manual runs get `{ source: "manual" }`). */
+  trigger?: TriggerEvent;
+  /** Trigger node that fired (absent for manual runs). */
+  triggerNodeId?: string;
+}
+
+/** Row of the runs list. */
+export interface RunSummary {
+  id: string;
+  flowId: string;
+  flowName: string;
+  status: RunStatus;
+  startedAt: number;
+  finishedAt?: number;
+  trigger?: { source: TriggerType; type: string; author?: string; title?: string };
 }

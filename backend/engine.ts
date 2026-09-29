@@ -1,8 +1,12 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { describeCondition, evaluateCondition } from "../shared/conditions";
+import { eventMarkdown } from "../shared/events";
 import { nodeLabel, resolveNode } from "../shared/resolve";
 import type {
   BlockDef,
+  BranchHandle,
+  TriggerEvent,
   EnvValues,
   Flow,
   FlowNode,
@@ -64,6 +68,10 @@ export interface StartRunOptions {
   /** Base directory for per-run agent logs (`<logRoot>/<runId>/<nodeId>.log`). */
   logRoot?: string;
   loadSkill?: (ref: SkillFileRef) => Promise<SkillFile[]>;
+  /** The event that started the run (default: a manual event). */
+  trigger?: TriggerEvent;
+  /** Start only from this (trigger) node — used for triggered runs. Default: every node without inputs. */
+  startNodeId?: string;
 }
 
 export interface RunHandle {
@@ -85,6 +93,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
     startedAt: Date.now(),
     nodes: Object.fromEntries(flow.nodes.map((n) => [n.id, { status: "idle", executions: 0 }])),
     logs: [],
+    trigger: opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
+    triggerNodeId: opts.startNodeId,
   };
   const emit = () => opts.onChange?.(run);
 
@@ -142,8 +152,14 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
   async function execute() {
     const incoming = new Set(flow.edges.map((e) => e.target));
-    const starts = flow.nodes.filter((n) => !incoming.has(n.id));
-    if (!starts.length) throw new Error("Flow has no start node (every node has an incoming edge)");
+    const starts = opts.startNodeId
+      ? flow.nodes.filter((n) => n.id === opts.startNodeId)
+      : flow.nodes.filter((n) => !incoming.has(n.id));
+    if (!starts.length) {
+      throw new Error(
+        opts.startNodeId ? `Trigger node ${opts.startNodeId} not found` : "Flow has no start node (every node has an incoming edge)",
+      );
+    }
 
     const queue: { nodeId: string; inputs: NodeIO }[] = starts.map((n) => ({ nodeId: n.id, inputs: {} }));
     for (const q of queue) run.nodes[q.nodeId].status = "queued";
@@ -166,8 +182,20 @@ export function startRun(opts: StartRunOptions): RunHandle {
       ctx.log("info", `▶ ${label(nodeId)} (${cfg.kind}) — execution ${ns.executions}`, nodeId);
 
       let result: NodeResult;
+      let branch: BranchHandle | undefined;
       try {
-        result = await (cfg.kind === "auto" ? runners.auto : runners.ai)(ctx, node, cfg, inputs);
+        if (cfg.kind === "trigger") {
+          result = { outputs: { artifact: eventMarkdown(run.trigger!) } };
+        } else if (cfg.kind === "condition") {
+          const r = evaluateCondition(cfg.condition, { text: inputs.artifact, steer: inputs.steer, trigger: run.trigger });
+          branch = r.result ? "true" : "false";
+          for (const x of r.rules) {
+            ctx.log("info", `${x.passed ? "✓" : "✗"} ${describeCondition({ match: "all", rules: [x.rule] })} (got ${JSON.stringify(x.actual) ?? "nothing"})`, nodeId);
+          }
+          result = { outputs: {} };
+        } else {
+          result = await (cfg.kind === "auto" ? runners.auto : runners.ai)(ctx, node, cfg, inputs);
+        }
       } catch (e) {
         if (ctx.abort.signal.aborted) {
           ns.status = "failed";
@@ -186,7 +214,16 @@ export function startRun(opts: StartRunOptions): RunHandle {
       ns.status = "done";
       if (outputs.artifact !== undefined) opts.saveArtifact?.(run.id, nodeId, ns.executions, outputs.artifact);
 
-      const outEdges = flow.edges.filter((e) => e.source === nodeId);
+      // A condition only follows the edges of the branch it took, carrying its own input along.
+      const outEdges = flow.edges.filter(
+        (e) => e.source === nodeId && (branch ? e.sourceHandle === branch : e.sourceHandle !== "true" && e.sourceHandle !== "false"),
+      );
+      if (branch) {
+        ns.branch = branch;
+        ns.outputs = inputs;
+        ctx.log("info", outEdges.length ? `↪ ${branch}` : `↪ ${branch} — nothing connected, this path ends`, nodeId);
+      }
+      const passOn: NodeIO = branch ? inputs : outputs;
       const successors = [...new Set(outEdges.map((e) => e.target))];
       let targets = successors;
       if (cfg.kind === "manager" && successors.length) {
@@ -204,7 +241,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
         const tCfg = resolveNode(byId.get(t)!, blocks);
         const tInputs: NodeIO = {};
         for (const e of outEdges.filter((e) => e.target === t)) {
-          const value = outputs[e.sourceHandle];
+          const value =
+            e.sourceHandle === "true" || e.sourceHandle === "false"
+              ? e.targetHandle === "steer"
+                ? (passOn.steer ?? passOn.artifact)
+                : passOn.artifact
+              : passOn[e.sourceHandle];
           if (value !== undefined && tCfg.inputs[e.targetHandle]) tInputs[e.targetHandle] = value;
         }
         queue.push({ nodeId: t, inputs: tInputs });

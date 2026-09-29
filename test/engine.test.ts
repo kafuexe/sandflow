@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { startRun, type NodeRunner } from "../backend/engine";
-import { BUILTIN_BLOCKS, DEFAULT_FLOW } from "../shared/library";
-import type { Flow, RunState, Settings } from "../shared/types";
+import { BUILTIN_BLOCKS, DEFAULT_FLOW, EXAMPLE_FLOWS } from "../shared/library";
+import type { Flow, NodeIO, RunState, Settings, TriggerEvent } from "../shared/types";
 
 const settings: Settings = { startingPrompt: "Add login", sandbox: "none", maxSteps: 40 };
 const env = { REPO_PATH: "/r", ANTHROPIC_API_KEY: "k", BRANCH_NAME: "feat/x", BASE_BRANCH: "main", MR_PROVIDER: "github" };
@@ -18,6 +18,68 @@ function run(runner: NodeRunner, flow: Flow = DEFAULT_FLOW, s: Settings = settin
   });
   return { h, states };
 }
+
+describe("engine: triggers and conditions", () => {
+  const flow = EXAMPLE_FLOWS.find((f) => f.id === "example-mr-comment-assistant")!;
+  const event = (author: string, body: string): TriggerEvent => ({
+    source: "gitlab", type: "merge_request.comment", author, body, repo: "grp/app", number: 9, target: "merge_request", firedAt: 1,
+  });
+
+  function triggered(ev: TriggerEvent) {
+    const seen: Record<string, NodeIO> = {};
+    const runner: NodeRunner = async (_c, node, _cfg, inputs) => {
+      seen[node.id] = inputs;
+      return { outputs: { artifact: `${node.id}-out` } };
+    };
+    const h = startRun({
+      flow, blocks: BUILTIN_BLOCKS, env, settings, runners: { auto: runner, ai: runner }, trigger: ev, startNodeId: "t",
+    });
+    return { h, seen };
+  }
+
+  it("true branch: trigger event reaches the AI block, reply is posted", async () => {
+    const { h, seen } = triggered(event("your-username", "hey @sandflow why?"));
+    const final = await h.done;
+    expect(final.status).toBe("done");
+    expect(final.trigger?.author).toBe("your-username");
+    expect(final.triggerNodeId).toBe("t");
+    expect(final.nodes.if.branch).toBe("true");
+    expect(seen.answer.artifact).toContain("@sandflow why?");
+    expect(seen.answer.artifact).toContain("Author: your-username");
+    expect(seen.post).toEqual({ artifact: "answer-out" });
+  });
+
+  it("false branch with nothing connected ends the run cleanly", async () => {
+    const { h, seen } = triggered(event("mallory", "hey @sandflow why?"));
+    const final = await h.done;
+    expect(final.status).toBe("done");
+    expect(final.nodes.if.branch).toBe("false");
+    expect(seen.answer).toBeUndefined();
+    expect(final.logs.some((l) => /nothing connected/.test(l.msg))).toBe(true);
+  });
+
+  it("manual runs get a manual event and start from every input-less node", async () => {
+    const f: Flow = {
+      id: "m", name: "M",
+      nodes: [
+        { id: "t", type: "block", position: { x: 0, y: 0 }, data: { blockId: "manual-trigger" } },
+        { id: "c", type: "block", position: { x: 0, y: 0 }, data: { blockId: "if", overrides: { condition: { match: "all", rules: [{ field: "trigger.type", op: "equals", value: "manual" }] } } } },
+        { id: "yes", type: "block", position: { x: 0, y: 0 }, data: { blockId: "shell" } },
+        { id: "no", type: "block", position: { x: 0, y: 0 }, data: { blockId: "shell" } },
+      ],
+      edges: [
+        { id: "1", source: "t", target: "c", sourceHandle: "artifact", targetHandle: "artifact" },
+        { id: "2", source: "c", target: "yes", sourceHandle: "true", targetHandle: "artifact" },
+        { id: "3", source: "c", target: "no", sourceHandle: "false", targetHandle: "artifact" },
+      ],
+    };
+    const ran: string[] = [];
+    const final = await run(async (_c, n) => (ran.push(n.id), { outputs: { artifact: "x" } }), f).h.done;
+    expect(final.trigger?.source).toBe("manual");
+    expect(ran).toEqual(["yes"]);
+    expect(final.nodes.yes.inputs?.artifact).toContain("# Manual: manual");
+  });
+});
 
 describe("engine", () => {
   it("runs the default flow through a CR loop and routes to Create MR", async () => {

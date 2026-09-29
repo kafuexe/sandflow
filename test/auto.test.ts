@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { mrTitle, runAuto } from "../backend/runners/auto";
+import { commentCommand, mrTitle, runAuto } from "../backend/runners/auto";
 import { resolveBlock } from "../shared/resolve";
 import { BUILTIN_BLOCKS } from "../shared/library";
 import type { RunContext } from "../backend/engine";
@@ -67,6 +67,31 @@ describe("auto runner", () => {
     const { d } = repo();
     const cfg = { ...resolveBlock("shell", BUILTIN_BLOCKS), shellCommand: "node -e \"process.exit(3)\"" };
     await expect(runAuto(ctx({ REPO_PATH: d }), node, cfg, {})).rejects.toThrow(/exit/i);
+  });
+
+  it("commentCommand posts to the right GitHub / GitLab endpoint, with host and without a shell", () => {
+    const base = { firedAt: 0, type: "merge_request.comment", number: 9, target: "merge_request" as const };
+    expect(commentCommand({ ...base, source: "github", repo: "acme/app" }, "Answer")).toEqual({
+      cmd: "gh",
+      args: ["api", "--method", "POST", "repos/acme/app/issues/9/comments", "-f", "body=Answer"],
+    });
+    expect(commentCommand({ ...base, source: "gitlab", repo: "grp/sub/app", host: "gitlab.corp.local" }, "Answer; rm -rf /")).toEqual({
+      cmd: "glab",
+      args: ["api", "--hostname", "gitlab.corp.local", "--method", "POST", "projects/grp%2Fsub%2Fapp/merge_requests/9/notes", "-f", "body=Answer; rm -rf /"],
+    });
+    expect(commentCommand({ ...base, source: "gitlab", repo: "g/a", target: "issue" }, "x").args[3]).toBe("projects/g%2Fa/issues/9/notes");
+  });
+
+  it("commentCommand refuses runs without a git event, target or body", () => {
+    expect(() => commentCommand({ source: "manual", type: "manual", firedAt: 0 }, "x")).toThrow(/GitHub or GitLab trigger/);
+    expect(() => commentCommand({ source: "github", type: "push", repo: "a/b", firedAt: 0 }, "x")).toThrow(/nothing to comment on|no issue/i);
+    expect(() => commentCommand({ source: "github", type: "issue.opened", repo: "a/b", number: 1, target: "issue", firedAt: 0 }, "  ")).toThrow(/empty/);
+  });
+
+  it("post-comment doesn't need REPO_PATH", async () => {
+    const c = ctx({});
+    const cfg = resolveBlock("post-comment", BUILTIN_BLOCKS);
+    await expect(runAuto(c, { ...node, data: { blockId: "post-comment" } }, cfg, { artifact: "x" })).rejects.toThrow(/trigger event/);
   });
 
   it("mrTitle uses the first heading/line, capped at 72 chars", () => {
