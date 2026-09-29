@@ -1,4 +1,4 @@
-import { useCallback, useMemo, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, type DragEvent } from "react";
 import {
   Background,
   Controls,
@@ -10,6 +10,7 @@ import {
   type IsValidConnection,
   type Node,
 } from "@xyflow/react";
+import { useAssistantEditing, useChatStore } from "@/lib/chatStore";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { resolveNode } from "../../shared/resolve";
 import type { EdgeInputKind, FlowNodeData, SourceHandle } from "../../shared/types";
@@ -26,7 +27,23 @@ export function FlowCanvas() {
   const run = useStore((s) => (s.run?.flowId === flow?.id ? s.run : undefined));
   const selectedNodeId = useStore((s) => s.selectedNodeId);
   const { onNodesChange, onEdgesChange, addEdge, addNode, selectNode } = useStore.getState();
-  const { screenToFlowPosition } = useReactFlow();
+  const { screenToFlowPosition, fitView } = useReactFlow();
+  const assistantEditing = useAssistantEditing(flow?.id);
+
+  // Keep the assistant's new nodes in view as it adds them.
+  const nodeCount = flow?.nodes.length ?? 0;
+  useEffect(() => {
+    if (!assistantEditing || !nodeCount) return;
+    const t = setTimeout(() => void fitView({ padding: 0.2, duration: 400 }), 60);
+    return () => clearTimeout(t);
+  }, [assistantEditing, nodeCount, fitView]);
+
+  // Opening/closing the assistant panel resizes the canvas — refit so the flow stays in view.
+  const chatOpen = useChatStore((s) => s.open);
+  useEffect(() => {
+    const t = setTimeout(() => void fitView({ padding: 0.2, duration: 250 }), 60);
+    return () => clearTimeout(t);
+  }, [chatOpen, fitView]);
 
   const nodes = useMemo<Node<FlowNodeData, "block">[]>(
     () => (flow?.nodes ?? []).map((n) => ({ ...n, selected: n.id === selectedNodeId })),
@@ -108,31 +125,46 @@ export function FlowCanvas() {
   }
 
   return (
-    <ReactFlow
-      key={flow.id}
-      nodes={nodes}
-      edges={edges}
-      nodeTypes={nodeTypes}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onConnect={onConnect}
-      isValidConnection={isValidConnection}
-      onNodeClick={(_, n) => selectNode(n.id)}
-      onPaneClick={() => selectNode(null)}
-      onDrop={onDrop}
-      onDragOver={(ev) => {
-        ev.preventDefault();
-        ev.dataTransfer.dropEffect = "move";
-      }}
-      deleteKeyCode={["Backspace", "Delete"]}
-      colorMode="dark"
-      fitView
-      fitViewOptions={{ padding: 0.2 }}
-      proOptions={{ hideAttribution: true }}
-    >
-      <Background gap={20} />
-      <Controls />
-      <MiniMap pannable zoomable className="!bg-card" />
-    </ReactFlow>
+    <div className="relative h-full">
+      <ReactFlow
+        key={flow.id}
+        nodes={nodes}
+        edges={edges}
+        nodeTypes={nodeTypes}
+        onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onConnect={onConnect}
+        isValidConnection={isValidConnection}
+        onNodeClick={(_, n) => selectNode(n.id)}
+        onPaneClick={() => selectNode(null)}
+        onDrop={assistantEditing ? undefined : onDrop}
+        onDragOver={(ev) => {
+          ev.preventDefault();
+          ev.dataTransfer.dropEffect = assistantEditing ? "none" : "move";
+        }}
+        // While the assistant edits, the canvas is view-only so the two don't overwrite each other.
+        nodesDraggable={!assistantEditing}
+        nodesConnectable={!assistantEditing}
+        deleteKeyCode={assistantEditing ? null : ["Backspace", "Delete"]}
+        colorMode="dark"
+        fitView
+        fitViewOptions={{ padding: 0.2 }}
+        proOptions={{ hideAttribution: true }}
+      >
+        <Background gap={20} />
+        <Controls />
+        <MiniMap pannable zoomable className="!bg-card" />
+      </ReactFlow>
+      {assistantEditing && (
+        <div
+          role="status"
+          title="The canvas is view-only until the assistant finishes, so your edits and its edits don't overwrite each other."
+          className="pointer-events-none absolute top-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full border border-violet-500/40 bg-background/90 px-3 py-1.5 text-xs shadow-lg backdrop-blur"
+        >
+          <span className="size-2 animate-pulse rounded-full bg-violet-400 motion-reduce:animate-none" />
+          Assistant is editing, view only
+        </div>
+      )}
+    </div>
   );
 }

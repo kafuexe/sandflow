@@ -274,6 +274,8 @@ export interface Settings {
   sandboxImage?: string;
   /** Host folder with agent CLIs (e.g. a Linux `claude` binary), mounted read-only at /opt/sandflow/tools. */
   agentToolsDir?: string;
+  /** Default agent for new "Edit with AI" chats (the last one picked). */
+  assistantAgent?: AssistantAgent;
   /** Desktop app update source. Default: GitHub releases. */
   updates?: UpdateSettings;
   /** Listener for GitHub/GitLab webhooks — separate port that only serves /hooks/*. */
@@ -373,6 +375,69 @@ export interface RunState {
   trigger?: TriggerEvent;
   /** Trigger node that fired (absent for manual runs). */
   triggerNodeId?: string;
+}
+
+// ---------- "Edit with AI" chats ----------
+
+export interface ChatToolCall {
+  id: string;
+  /** MCP tool name without the `mcp__sandflow__` prefix, e.g. `edit_flow`. */
+  name: string;
+  input: unknown;
+  /** Tool output text; for edits it starts with a `Changes:` list (`+ node …`, `- edge …`, `~ …`). */
+  result?: string;
+  isError?: boolean;
+}
+
+export type ChatPart = { type: "text"; text: string } | { type: "tool"; call: ChatToolCall };
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  ts: number;
+  parts: ChatPart[];
+  /** Assistant turns only. */
+  status?: "running" | "done" | "error" | "cancelled";
+  /** Assistant turns: which agent answered. */
+  agent?: AgentProvider;
+  error?: string;
+}
+
+/** A conversation with the assistant about one flow. A flow can have many. */
+export interface Chat {
+  id: string;
+  flowId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  /** Agent that answers in this chat (can be switched between turns). */
+  agent: AssistantAgent;
+  /** Agent session to resume, per agent — switching agents starts a new session primed with the conversation so far. */
+  sessions: Partial<Record<AgentProvider, string>>;
+  messages: ChatMessage[];
+}
+
+export interface AssistantAgent {
+  provider: AgentProvider;
+  /** Empty = the CLI's default model. */
+  model?: string;
+}
+
+export interface ChatSummary {
+  id: string;
+  flowId: string;
+  title: string;
+  updatedAt: number;
+  running: boolean;
+}
+
+/** Sent on /api/data/events whenever flows or blocks change on the server. */
+export interface DataChange {
+  rev: number;
+  source: "ui" | "assistant";
+  flowId?: string;
+  /** Nodes the assistant added or edited. */
+  touched?: string[];
 }
 
 /** Row of the runs list. */
