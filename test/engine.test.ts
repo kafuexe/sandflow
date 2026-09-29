@@ -154,7 +154,8 @@ describe("engine", () => {
     const { h, states } = run(runner);
     await new Promise((r) => setTimeout(r, 20));
     expect(h.state.status).toBe("waiting");
-    expect(h.state.pendingQuestion).toEqual({ nodeId: "n-plan", question: "Which DB?" });
+    expect(h.state.pendingQuestion).toMatchObject({ nodeId: "n-plan", question: "Which DB?" });
+    expect(h.state.pendingQuestion?.askedAt).toBeTypeOf("number");
     expect(h.answer("Postgres")).toBe(true);
     const final = await h.done;
     expect(final.status).toBe("done");
@@ -182,5 +183,46 @@ describe("engine", () => {
     const final = await run(async () => ({ outputs: {} }), flow).h.done;
     expect(final.status).toBe("failed");
     expect(final.error).toMatch(/start/i);
+  });
+
+  it("keeps the question history with answers", async () => {
+    const runner: NodeRunner = async (ctx, node) => {
+      if (node.id === "n-plan") {
+        const db = await ctx.ask(node.id, "Which DB?");
+        const orm = await ctx.ask(node.id, "Which ORM?");
+        return { outputs: { artifact: `${db}+${orm}` } };
+      }
+      if (node.id === "n-manager") return { outputs: {}, route: "n-create-mr" };
+      return { outputs: { artifact: "a" } };
+    };
+    const { h } = run(runner);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.state.questions).toHaveLength(1);
+    expect(h.state.questions?.[0].answer).toBeUndefined();
+    h.answer("Postgres");
+    await new Promise((r) => setTimeout(r, 20));
+    h.answer("Drizzle");
+    const final = await h.done;
+    expect(final.questions).toMatchObject([
+      { nodeId: "n-plan", question: "Which DB?", answer: "Postgres" },
+      { nodeId: "n-plan", question: "Which ORM?", answer: "Drizzle" },
+    ]);
+    expect(final.questions?.every((q) => q.answeredAt! >= q.askedAt)).toBe(true);
+  });
+
+  it("uses a per-run prompt instead of the global starting prompt", async () => {
+    const prompts: string[] = [];
+    const runner: NodeRunner = async (ctx, node) => {
+      prompts.push(ctx.settings.startingPrompt);
+      if (node.id === "n-manager") return { outputs: {}, route: "n-create-mr" };
+      return { outputs: { artifact: "a" } };
+    };
+    const h = startRun({
+      flow: DEFAULT_FLOW, blocks: BUILTIN_BLOCKS, env, settings, runners: { auto: runner, ai: runner }, prompt: "Fix the cache",
+    });
+    const final = await h.done;
+    expect(final.prompt).toBe("Fix the cache");
+    expect(new Set(prompts)).toEqual(new Set(["Fix the cache"]));
+    expect(run(async () => ({ outputs: {} })).h.state.prompt).toBe("Add login");
   });
 });
