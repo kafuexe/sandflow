@@ -227,9 +227,141 @@ export const BUILTIN_BLOCKS: BlockDef[] = [
       outputs: { artifact: true },
     },
   },
+
+  // ---------- Triggers ----------
+  {
+    id: "tpl-trigger",
+    name: "Trigger (template)",
+    isTemplate: true,
+    builtin: true,
+    config: {
+      kind: "trigger",
+      description: "Starts the flow when something happens. Its artifact describes the event.",
+      color: "#eab308",
+      icon: "zap",
+      inputs: { artifact: false, steer: false, startingPrompt: false },
+      outputs: { artifact: true, steer: false },
+      trigger: { type: "manual", overlap: "queue" },
+    },
+  },
+  {
+    id: "manual-trigger",
+    name: "Manual start",
+    isTemplate: false,
+    extends: "tpl-trigger",
+    builtin: true,
+    config: { description: "Starts the flow only when you press Run.", icon: "play", trigger: { type: "manual" } },
+  },
+  {
+    id: "schedule-trigger",
+    name: "Schedule",
+    isTemplate: false,
+    extends: "tpl-trigger",
+    builtin: true,
+    config: {
+      description: "Runs the flow on a timer — once, every N minutes/hours/days/…, or a cron expression.",
+      icon: "clock",
+      trigger: { type: "schedule", schedule: { kind: "interval", every: 1, unit: "days", start: "2026-01-05T09:00" } },
+    },
+  },
+  {
+    id: "github-trigger",
+    name: "GitHub trigger",
+    isTemplate: false,
+    extends: "tpl-trigger",
+    builtin: true,
+    config: {
+      description: "Fires on GitHub events (issues, comments, PRs, pushes) via webhook or polling (gh).",
+      icon: "github",
+      color: "#a3a3a3",
+      trigger: {
+        type: "github",
+        mode: "webhook",
+        events: ["issue.opened", "merge_request.comment"],
+        pollSeconds: 60,
+        secretEnv: "GITHUB_WEBHOOK_SECRET",
+      },
+    },
+  },
+  {
+    id: "gitlab-trigger",
+    name: "GitLab trigger",
+    isTemplate: false,
+    extends: "tpl-trigger",
+    builtin: true,
+    config: {
+      description: "Fires on GitLab events (issues, notes, MRs, pushes) via webhook or polling (glab).",
+      icon: "gitlab",
+      color: "#f97316",
+      trigger: {
+        type: "gitlab",
+        mode: "webhook",
+        events: ["issue.opened", "merge_request.comment"],
+        pollSeconds: 60,
+        secretEnv: "GITLAB_WEBHOOK_SECRET",
+      },
+    },
+  },
+
+  // ---------- Logic ----------
+  {
+    id: "if",
+    name: "If",
+    isTemplate: false,
+    builtin: true,
+    config: {
+      kind: "condition",
+      description: "Deterministic check: continues out of `true` or `false`. An unconnected branch ends the path.",
+      color: "#14b8a6",
+      icon: "git-fork",
+      inputs: { artifact: true, steer: true, startingPrompt: false },
+      outputs: { artifact: false, steer: false },
+      condition: { match: "all", rules: [{ field: "trigger.body", op: "contains", value: "@sandflow" }] },
+    },
+  },
+
+  // ---------- Git host replies ----------
+  {
+    id: "answer-comment",
+    name: "Answer comment",
+    isTemplate: false,
+    extends: "tpl-ai-agent",
+    builtin: true,
+    config: {
+      description: "Reads a comment/issue from the trigger event (with the repo as context) and drafts a reply.",
+      icon: "message-square-reply",
+      color: "#0ea5e9",
+      inputs: { startingPrompt: false },
+      outputs: { steer: false },
+      instructions:
+        "You answer questions and requests left on issues and merge requests. The input artifact describes the event " +
+        "(who wrote what, where). Explore the repository as needed to answer accurately. Do not modify or commit code. " +
+        "The artifact is ONLY the reply to post, in GitHub/GitLab markdown — concise, specific, citing files and lines.",
+    },
+  },
+  {
+    id: "post-comment",
+    name: "Post comment",
+    isTemplate: false,
+    extends: "tpl-auto-git",
+    builtin: true,
+    config: {
+      description: "Posts its input artifact as a comment on the issue / MR / PR the trigger came from (gh / glab).",
+      icon: "message-square-reply",
+      autoAction: "post-comment",
+      env: [],
+      inputs: { artifact: true },
+      outputs: { artifact: true },
+    },
+  },
 ];
 
-const edge = (source: string, target: string, sourceHandle: FlowEdge["sourceHandle"], targetHandle = sourceHandle): FlowEdge => ({
+const edge = (
+  source: string,
+  target: string,
+  sourceHandle: FlowEdge["sourceHandle"],
+  targetHandle: FlowEdge["targetHandle"] = sourceHandle as FlowEdge["targetHandle"],
+): FlowEdge => ({
   id: `e-${source}-${sourceHandle}-${target}-${targetHandle}`,
   source,
   target,
@@ -270,3 +402,47 @@ export const DEFAULT_FLOW: Flow = {
     edge("n-manager", "n-create-mr", "artifact"),
   ],
 };
+
+/**
+ * Starting points offered in "New pipeline". Example: answer questions left on GitLab MRs by a given user that
+ * contain a magic word — GitLab trigger → If → Answer comment → Post comment (false branch: nothing, path ends).
+ */
+export const EXAMPLE_FLOWS: Flow[] = [
+  {
+    id: "example-mr-comment-assistant",
+    name: "MR comment assistant",
+    nodes: [
+      node("t", "gitlab-trigger", 0),
+      {
+        ...node("if", "if", 1),
+        data: {
+          blockId: "if",
+          label: "From me + @sandflow?",
+          overrides: {
+            condition: {
+              match: "all",
+              rules: [
+                { field: "trigger.type", op: "equals", value: "merge_request.comment" },
+                { field: "trigger.author", op: "equals", value: "your-username" },
+                { field: "trigger.body", op: "contains", value: "@sandflow" },
+              ],
+            },
+          },
+        },
+      },
+      node("answer", "answer-comment", 2),
+      node("post", "post-comment", 3),
+    ],
+    edges: [
+      edge("t", "if", "artifact"),
+      edge("if", "answer", "true", "artifact"),
+      edge("answer", "post", "artifact"),
+    ],
+  },
+  {
+    id: "example-daily-report",
+    name: "Daily repo report",
+    nodes: [node("t", "schedule-trigger", 0), node("sh", "shell", 1)],
+    edges: [edge("t", "sh", "artifact")],
+  },
+];

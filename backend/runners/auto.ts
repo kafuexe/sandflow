@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { nodeLabel } from "../../shared/resolve";
-import type { FlowNode, NodeIO, ResolvedConfig } from "../../shared/types";
+import type { FlowNode, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 
 const execFileP = promisify(execFile);
@@ -31,11 +31,67 @@ export function mrTitle(startingPrompt: string): string {
   return (line || "Sandflow changes").slice(0, 72);
 }
 
+const MAX_COMMENT = 60_000;
+
+/**
+ * gh/glab command that posts `body` on the issue / MR / PR the trigger event came from.
+ * Uses the REST API through the CLI so it works for issues and PRs alike and on self-hosted hosts.
+ */
+export function commentCommand(event: TriggerEvent | undefined, body: string): { cmd: string; args: string[] } {
+  if (!event || (event.source !== "github" && event.source !== "gitlab")) {
+    throw new Error("Post comment needs a GitHub or GitLab trigger event (this run wasn't started by one)");
+  }
+  if (!event.repo || event.number === undefined || !event.target) {
+    throw new Error(`The ${event.type} event has no issue / merge request to comment on`);
+  }
+  if (!body.trim()) throw new Error("Nothing to post — the input artifact is empty");
+  const text = body.length > MAX_COMMENT ? `${body.slice(0, MAX_COMMENT)}\n\n…(truncated)` : body;
+  const hostArgs = event.host ? ["--hostname", event.host] : [];
+  if (event.source === "github") {
+    // PRs are issues in the REST API, so one endpoint covers both.
+    return {
+      cmd: "gh",
+      args: ["api", ...hostArgs, "--method", "POST", `repos/${event.repo}/issues/${event.number}/comments`, "-f", `body=${text}`],
+    };
+  }
+  const kind = event.target === "merge_request" ? "merge_requests" : "issues";
+  return {
+    cmd: "glab",
+    args: ["api", ...hostArgs, "--method", "POST", `projects/${encodeURIComponent(event.repo)}/${kind}/${event.number}/notes`, "-f", `body=${text}`],
+  };
+}
+
 export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
   const env = ctx.blockEnv(cfg);
   const signal = ctx.abort.signal;
-  const repo = requireEnv(env, "REPO_PATH");
 
+  if (cfg.autoAction === "post-comment") {
+    const { cmd, args } = commentCommand(ctx.run.trigger, inputs.artifact ?? "");
+    let out: string;
+    try {
+      const r = await execFileP(cmd, args, {
+        signal,
+        windowsHide: true,
+        maxBuffer: 5 * 1024 * 1024,
+        env: { ...process.env, ...env }, // e.g. GH_TOKEN / GITLAB_TOKEN if the block declares them
+      });
+      out = r.stdout;
+    } catch (e) {
+      const err = e as Error & { stderr?: string };
+      throw new Error(`${cmd} api failed: ${(err.stderr || err.message).trim()}`);
+    }
+    let url: string | undefined;
+    try {
+      const j = JSON.parse(out) as { html_url?: string; id?: number };
+      url = j.html_url ?? (j.id !== undefined ? `${ctx.run.trigger?.url ?? ""}#note_${j.id}` : undefined);
+    } catch {
+      /* non-JSON output */
+    }
+    ctx.log("info", `Posted comment on ${ctx.run.trigger?.repo} ${ctx.run.trigger?.target === "merge_request" ? "MR" : "issue"} ${ctx.run.trigger?.number}`, node.id);
+    return { outputs: { artifact: url ?? out.trim() } };
+  }
+
+  const repo = requireEnv(env, "REPO_PATH");
   switch (cfg.autoAction) {
     case "create-task": {
       const branch = requireEnv(env, "BRANCH_NAME");

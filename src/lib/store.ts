@@ -9,10 +9,12 @@ import type {
   FlowEdge,
   FlowNode,
   RunState,
+  RunSummary,
   Settings,
 } from "../../shared/types";
 import { cloneFlow, newFlow } from "../../shared/flows";
-import { api, ApiError, subscribeRun } from "./api";
+import { EXAMPLE_FLOWS } from "../../shared/library";
+import { api, ApiError, subscribeRun, type TriggersInfo } from "./api";
 
 type Section = "blocks" | "flows" | "settings" | "env";
 export type SaveStatus = "saved" | "pending" | "saving" | "error";
@@ -29,6 +31,9 @@ interface State {
   settingsOpen: boolean;
   sideTab: SideTab;
   run?: RunState;
+  /** Recent runs (manual + triggered), newest first. */
+  runs: RunSummary[];
+  triggers?: TriggersInfo;
   runError?: string;
   saveStatus: SaveStatus;
   saveError?: string;
@@ -42,6 +47,8 @@ interface State {
   /** New empty flow, or a copy of `fromFlowId`. */
   createFlow(name: string, fromFlowId?: string): void;
   renameFlow(id: string, name: string): void;
+  /** Turn a flow's triggers on/off. */
+  setFlowActive(id: string, active: boolean): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
   addNode(blockId: string, position: { x: number; y: number }): void;
@@ -62,6 +69,10 @@ interface State {
   setSideTab(tab: SideTab): void;
   // runs
   startRun(): Promise<void>;
+  /** Show this run in the Run tab (and on the canvas if it belongs to the current flow). */
+  watch(runId: string): Promise<void>;
+  /** Refresh the runs list + trigger status (polled while the app is open). */
+  refreshActivity(): Promise<void>;
   cancelRun(): Promise<void>;
   answer(text: string): Promise<void>;
 }
@@ -129,6 +140,7 @@ export const useStore = create<State>((set, get) => {
     settingsOpen: false,
     sideTab: "inputs",
     saveStatus: "saved",
+    runs: [],
 
     async load() {
       try {
@@ -158,10 +170,35 @@ export const useStore = create<State>((set, get) => {
       set({ currentFlowId: id, selectedNodeId: null });
     },
     createFlow(name, fromFlowId) {
-      const source = fromFlowId ? get().data?.flows.find((f) => f.id === fromFlowId) : undefined;
+      const source = fromFlowId
+        ? (get().data?.flows.find((f) => f.id === fromFlowId) ?? EXAMPLE_FLOWS.find((f) => f.id === fromFlowId))
+        : undefined;
       const flow: Flow = source ? cloneFlow(source, uid("flow"), name) : newFlow(uid("flow"), name);
       patchData((d) => ({ ...d, flows: [...d.flows, flow] }), "flows");
       set({ currentFlowId: flow.id, selectedNodeId: null });
+    },
+    setFlowActive(id, active) {
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, active } : f)) }), "flows");
+    },
+    async watch(runId) {
+      try {
+        set({ run: await api.getRun(runId), sideTab: "run" });
+        watchRun(runId);
+      } catch (e) {
+        set({ runError: (e as Error).message });
+      }
+    },
+    async refreshActivity() {
+      try {
+        const [runs, triggers] = await Promise.all([api.listRuns(), api.triggers()]);
+        set({ runs, triggers });
+        // Follow a new triggered run of the flow on screen, unless you're watching one that's still going.
+        const { run, currentFlowId } = get();
+        const fresh = runs.find((r) => r.flowId === currentFlowId && !r.finishedAt && r.id !== run?.id);
+        if (fresh && (!run || run.finishedAt) && fresh.startedAt > (run?.startedAt ?? 0)) void get().watch(fresh.id);
+      } catch {
+        /* server restarting — try again next tick */
+      }
     },
     renameFlow(id, name) {
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, name } : f)) }), "flows");

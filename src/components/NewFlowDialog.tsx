@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useStore } from "@/lib/store";
+import { EXAMPLE_FLOWS } from "../../shared/library";
 
 const EMPTY = "__empty__";
 
@@ -25,11 +26,12 @@ export function NewFlowDialog({ open, onOpenChange }: { open: boolean; onOpenCha
 
   useEffect(() => {
     if (nameTouched) return;
-    const src = flows.find((f) => f.id === from);
-    setName(src ? `${src.name} (copy)` : `Flow ${flows.length + 1}`);
+    const own = flows.find((f) => f.id === from);
+    const example = EXAMPLE_FLOWS.find((f) => f.id === from);
+    setName(own ? `${own.name} (copy)` : example ? example.name : `Flow ${flows.length + 1}`);
   }, [from, flows, nameTouched]);
 
-  const source = flows.find((f) => f.id === from);
+  const source = flows.find((f) => f.id === from) ?? EXAMPLE_FLOWS.find((f) => f.id === from);
   const submit = () => {
     if (!name.trim()) return;
     createFlow(name.trim(), source?.id);
@@ -62,6 +64,12 @@ export function NewFlowDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                 {flows.map((f) => (
                   <SelectItem key={f.id} value={f.id}>
                     Clone “{f.name}” <span className="text-muted-foreground">({f.nodes.length} blocks)</span>
+                  </SelectItem>
+                ))}
+                <SelectSeparator />
+                {EXAMPLE_FLOWS.map((f) => (
+                  <SelectItem key={f.id} value={f.id}>
+                    Example: {f.name}
                   </SelectItem>
                 ))}
               </SelectContent>

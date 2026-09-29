@@ -39,6 +39,17 @@ describe("validateBlocks", () => {
     expect(validateBlocks(mk([{ name: "a", file: { store: "user", dir: "../x" } }])).join()).toMatch(/skill "a"/i);
   });
 
+  it("validates trigger and condition settings", () => {
+    const mk = (config: BlockDef["config"]): BlockDef[] => [{ id: "x", name: "X", isTemplate: false, config }];
+    expect(validateBlocks(mk({ kind: "trigger", trigger: { type: "schedule", schedule: { kind: "cron", expr: "nope" } } })).join()).toMatch(/cron/i);
+    expect(validateBlocks(mk({ trigger: { type: "github", repo: "not a repo" } })).join()).toMatch(/repository/i);
+    expect(validateBlocks(mk({ trigger: { type: "gitlab", repo: "grp/sub/app", mode: "poll", pollSeconds: 5 } })).join()).toMatch(/15/);
+    expect(validateBlocks(mk({ trigger: { type: "gitlab", secretEnv: "bad-name" } })).join()).toMatch(/bad-name/);
+    expect(validateBlocks(mk({ trigger: { type: "github", events: ["issue.deleted" as never] } })).join()).toMatch(/event/i);
+    expect(validateBlocks(mk({ condition: { match: "all", rules: [{ field: "text", op: "matches", value: "(" }] } })).join()).toMatch(/regex/i);
+    expect(validateBlocks(mk({ kind: "trigger", trigger: { type: "gitlab", repo: "grp/sub/app", host: "gitlab.corp.local", mode: "poll", pollSeconds: 30 } }))).toEqual([]);
+  });
+
   it("rejects invalid env names", () => {
     const d: BlockDef = { id: "d", name: "D", isTemplate: false, config: { env: ["BAD-NAME"] } };
     expect(validateBlocks([d]).join()).toMatch(/BAD-NAME/);

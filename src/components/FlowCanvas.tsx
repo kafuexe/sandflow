@@ -12,7 +12,8 @@ import {
 } from "@xyflow/react";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { resolveNode } from "../../shared/resolve";
-import type { EdgeInputKind, FlowNodeData, OutputKind } from "../../shared/types";
+import type { EdgeInputKind, FlowNodeData, SourceHandle } from "../../shared/types";
+import { edgeAllowed } from "../../shared/validate";
 import { BlockNode } from "./BlockNode";
 
 export const DRAG_MIME = "application/sandflow-block";
@@ -36,9 +37,12 @@ export function FlowCanvas() {
     if (!flow) return [];
     return flow.edges.map((e) => {
       const steer = e.sourceHandle === "steer";
+      const branch = e.sourceHandle === "true" || e.sourceHandle === "false";
       const src = run?.nodes[e.source];
-      const routed = src?.routedTo === e.target;
-      const color = routed ? "#22c55e" : steer ? "#f59e0b" : "#3b82f6";
+      const routed = src?.routedTo === e.target || (branch && src?.branch === e.sourceHandle);
+      const color = branch
+        ? e.sourceHandle === "true" ? "#10b981" : "#ef4444"
+        : routed ? "#22c55e" : steer ? "#f59e0b" : "#3b82f6";
       return {
         id: e.id,
         source: e.source,
@@ -54,10 +58,16 @@ export function FlowCanvas() {
   const isValidConnection = useCallback<IsValidConnection>(
     (c) => {
       if (!flow || c.source === c.target) return false;
+      const source = flow.nodes.find((n) => n.id === c.source);
       const target = flow.nodes.find((n) => n.id === c.target);
-      if (!target || !c.targetHandle) return false;
+      if (!source || !target || !c.sourceHandle || !c.targetHandle) return false;
       try {
-        return resolveNode(target, blocks).inputs[c.targetHandle as EdgeInputKind] === true;
+        return edgeAllowed(
+          resolveNode(source, blocks),
+          c.sourceHandle as SourceHandle,
+          resolveNode(target, blocks),
+          c.targetHandle as EdgeInputKind,
+        );
       } catch {
         return false;
       }
@@ -71,7 +81,7 @@ export function FlowCanvas() {
       addEdge({
         source: c.source,
         target: c.target,
-        sourceHandle: c.sourceHandle as OutputKind,
+        sourceHandle: c.sourceHandle as SourceHandle,
         targetHandle: c.targetHandle as EdgeInputKind,
       });
     },

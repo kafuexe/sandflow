@@ -24,6 +24,8 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   shellCommand: "",
   agent: { provider: "claudeCode", model: "claude-opus-4-8", effort: "high" },
   maxIterations: 1,
+  trigger: { type: "manual", overlap: "queue" },
+  condition: { match: "all", rules: [] },
 };
 
 const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
@@ -60,6 +62,9 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
     shellCommand: def(patch.shellCommand, base.shellCommand),
     agent: { ...base.agent, ...stripUndef(patch.agent) },
     maxIterations: def(patch.maxIterations, base.maxIterations),
+    // Trigger settings merge field by field; a condition's rule list is replaced as a whole.
+    trigger: { ...base.trigger, ...stripUndef(patch.trigger) },
+    condition: def(patch.condition, base.condition),
   };
 }
 
@@ -135,7 +140,12 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[]): FlowRequiremen
     }
     const label = nodeLabel(node, blocks);
     if (cfg.inputs.startingPrompt) startingPromptNodes.push({ id: node.id, label });
-    for (const name of cfg.env) {
+    const names = [...cfg.env];
+    // Webhook triggers need their secret (to verify the git host's signature).
+    if (cfg.kind === "trigger" && cfg.trigger.mode === "webhook" && cfg.trigger.secretEnv?.trim()) {
+      names.push(cfg.trigger.secretEnv.trim());
+    }
+    for (const name of new Set(names)) {
       const e = env.get(name) ?? { name, nodes: [] };
       e.nodes.push({ id: node.id, label });
       env.set(name, e);

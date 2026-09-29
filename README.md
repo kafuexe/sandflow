@@ -107,6 +107,43 @@ npm run app
   Set it on *AI Agent (template)* to apply it to every agent block. Add auth vars (e.g. `ANTHROPIC_AUTH_TOKEN`)
   to the block's env list. Inside Docker, reach a service on your machine via `host.docker.internal`, not `localhost`.
 
+## Triggers & logic
+
+Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar).
+
+- **Schedule**:
+  - once at a date and time
+  - every N seconds / minutes / hours / days / weeks / months from a start time (keeps the wall-clock time; month ends are clamped)
+  - a cron expression with an optional seconds field and a timezone, e.g. `0 9 * * 1-5` (weekdays 09:00) or `0 17 * * 5L` (last Friday 17:00)
+
+  The Block tab previews the next runs. Missed runs while the app is closed are not caught up.
+- **GitHub trigger / GitLab trigger**:
+  - Events: issue opened, comment on an issue, MR/PR opened, comment on an MR/PR, push.
+  - Scope: repository and optional self-hosted host.
+  - How events arrive:
+    - **Webhook**: enable **Settings → Webhooks**, which starts a separate listener that only serves `POST /hooks/…`, so the app API is never exposed. Copy the trigger's webhook URL from its Block tab into the repo's webhook settings. Use the value of the trigger's secret env var as the GitHub *secret* or GitLab *secret token*; requests are verified (HMAC-SHA256 or token).
+    - **Polling**: reads the repo's events API every N seconds through `gh api` / `glab api` (must be logged in). Works behind NAT. Only events after the first poll fire, and the position survives restarts.
+- **Manual start**: only the Run button.
+
+The event is available to every block. A trigger's artifact is a readable summary, and in an **If** block the fields are
+`trigger.author`, `trigger.body`, `trigger.title`, `trigger.type`, `trigger.labels`, `trigger.branch`, `trigger.number`, `trigger.url`,
+and `trigger.raw.…` for the full provider payload.
+
+**If** checks rules on the trigger event, the input artifact (`text`, or `json.…` when it's JSON) or `steer`. Operators:
+equals, contains, starts/ends with, regex, one-of, exists, >, <, true/false, each optionally case-sensitive. Rules
+combine with ALL or ANY. The block continues out of **true** or **false**; a branch with nothing connected ends that path.
+Each If / trigger node can override its block's defaults in the Block tab.
+
+**Post comment** replies on the issue / MR / PR that triggered the run (`gh api` / `glab api` on this machine, so
+agents never get git-host credentials).
+
+If a trigger fires while its flow is still running, the event is **queued** (default) or **skipped**. The Run tab
+lists recent runs (manual and triggered) and the trigger activity log; a new triggered run of the flow on screen is
+followed live on the canvas.
+
+Example (**New → Example: MR comment assistant**): *GitLab trigger* (comment on MR) → *If* (`trigger.author` =
+you AND `trigger.body` contains `@sandflow`) → **true** → *Answer comment* (AI reads the comment + repo) → *Post comment*.
+
 ## Data
 
 Everything is stored in a data folder — desktop app: `%APPDATA%\Sandflow\data` (Windows),

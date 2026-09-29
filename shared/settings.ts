@@ -28,6 +28,16 @@ export function validateSettings(s: Settings): Settings {
   }
   const tools = s.agentToolsDir?.trim();
   if (tools) out.agentToolsDir = tools;
+  if (s.webhooks) {
+    const w = s.webhooks;
+    const port = Math.floor(Number(w.port));
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Webhook port must be 1–65535");
+    const host = String(w.host ?? "").trim() || "127.0.0.1";
+    if (!/^[\w.:-]+$/.test(host)) throw new Error(`Invalid webhook listen address "${host}"`);
+    const publicUrl = w.publicUrl?.trim();
+    if (publicUrl && !/^https?:\/\/\S+$/i.test(publicUrl)) throw new Error("Webhook public URL must be an http(s) URL");
+    out.webhooks = { enabled: !!w.enabled, host, port, ...(publicUrl ? { publicUrl } : {}) };
+  }
   if (s.updates) {
     const mode = s.updates.mode;
     if (!["github", "url", "off"].includes(mode)) throw new Error("Invalid update mode");
