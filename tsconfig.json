@@ -18,5 +18,5 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "backend", "shared", "test", "vite.config.ts"]
+  "include": ["src", "backend", "shared", "test", "electron", "vite.config.ts"]
 }

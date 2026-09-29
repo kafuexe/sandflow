@@ -26,6 +26,9 @@ export const api = {
   startRun: (flowId: string) => request<{ runId: string }>("POST", "/runs", { flowId }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
+  sandboxStatus: () =>
+    request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean }>("GET", "/sandbox/status"),
+  importSandbox: (path: string) => request<{ output: string }>("POST", "/sandbox/import", { path }),
   listSkills: () => request<SkillRef[]>("GET", "/skills"),
   uploadSkill: (name: string, files: { path: string; content: string }[]) =>
     request<SkillRef>("POST", "/skills", { name, files }),

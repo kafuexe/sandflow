@@ -1,0 +1,51 @@
+appId: com.kafuexe.sandflow
+productName: Sandflow
+copyright: Copyright © 2026 Ofek Tal
+
+directories:
+  output: release
+  buildResources: build
+
+# The UI is bundled by Vite (dist/) and the main process by esbuild (dist-electron/);
+# only the runtime deps in package.json "dependencies" are packed from node_modules.
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+
+# Base skills ship next to the app (copied into sandboxes at run time).
+extraResources:
+  - from: skills
+    to: skills
+
+# sandcastle spawns processes / reads templates from its own package dir.
+asarUnpack:
+  - node_modules/@ai-hero/sandcastle/**
+
+win:
+  target: nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip # required for auto-update on macOS
+      arch: [arm64, x64]
+
+linux:
+  category: Development
+  target:
+    - AppImage # auto-updatable; needs FUSE (libfuse2)
+    - tar.gz # no FUSE needed — for locked-down / air-gapped hosts
+
+# CI creates a draft release per tag, every platform uploads into it, then it's published.
+publish:
+  provider: github
+  owner: kafuexe
+  repo: sandflow
+  releaseType: draft

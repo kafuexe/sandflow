@@ -4,15 +4,27 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Visual flow builder for sandboxed coding agents (auto + AI blocks) powered by @ai-hero/sandcastle",
+  "author": "Ofek Tal",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kafuexe/sandflow.git"
+  },
+  "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist-electron/main.js --external:electron --external:electron-updater --external:@ai-hero/sandcastle --external:@ai-hero/sandcastle/* && esbuild electron/preload.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist-electron/preload.cjs --external:electron",
+    "app": "npm run build && npm run build:electron && electron .",
+    "app:dist": "npm run build && npm run build:electron && electron-builder --publish never",
     "start": "vite preview --port 5173",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
   "dependencies": {
     "@ai-hero/sandcastle": ">=0.5.4",
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
     "@radix-ui/react-dialog": "^1.1.14",
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-scroll-area": "^1.2.9",
@@ -21,25 +33,26 @@
     "@radix-ui/react-slot": "^1.2.3",
     "@radix-ui/react-switch": "^1.2.5",
     "@radix-ui/react-tabs": "^1.1.12",
-    "@xyflow/react": "^12.8.2",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.525.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "tailwind-merge": "^3.3.1",
-    "zustand": "^5.0.6"
-  },
-  "devDependencies": {
     "@tailwindcss/vite": "^4.1.11",
     "@types/node": "^24.0.14",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.7.0",
+    "@xyflow/react": "^12.8.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
+    "lucide-react": "^0.525.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "tailwind-merge": "^3.3.1",
     "tailwindcss": "^4.1.11",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5.8.3",
     "vite": "^7.0.4",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.2",
+    "zustand": "^5.0.6"
   }
 }

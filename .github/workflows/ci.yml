@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run build:electron
+
+  sandbox-image:
+    name: Sandbox image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t sandflow-agent:ci sandbox
+      - name: Smoke test (any UID, tools on PATH, no agent bundled)
+        run: |
+          mkdir -p tools && printf '#!/bin/sh\necho fake-agent ok\n' > tools/claude && chmod +x tools/claude
+          docker run --rm --user 4242:4242 -v "$PWD/tools:/opt/sandflow/tools:ro" --entrypoint sh sandflow-agent:ci -c \
+            'git --version && node --version && touch "$HOME/probe" && claude'

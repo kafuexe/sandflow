@@ -3,9 +3,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { ENV_NAME_RE } from "../shared/resolve";
+import { validateSettings } from "../shared/settings";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import type { BlockDef, EnvValues, Flow, RunState, Settings } from "../shared/types";
 import { startRun, type NodeRunner, type RunHandle } from "./engine";
+import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
 import type { Storage } from "./storage";
 
@@ -41,8 +43,15 @@ function send(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: NodeRunner }): Handler {
-  const skills = createSkillStore(storage.dir);
+export type Api = Handler & { shutdown(timeoutMs?: number): Promise<void> };
+
+export function createApi(
+  storage: Storage,
+  runners: { auto: NodeRunner; ai: NodeRunner },
+  opts: { bundledSkillsDir?: string; exec?: Exec } = {},
+): Api {
+  const skills = createSkillStore(storage.dir, opts.bundledSkillsDir);
+  const exec = opts.exec ?? execCli;
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
 
@@ -85,11 +94,24 @@ export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: Nod
 
       case "PUT /settings": {
         const s = await readJson<Settings>(req);
-        if (!s || typeof s !== "object") throw new HttpError(400, "Expected settings");
-        if (!["docker", "podman", "none"].includes(s.sandbox)) throw new HttpError(400, "Invalid sandbox");
-        const maxSteps = Math.max(1, Math.min(1000, Math.floor(Number(s.maxSteps) || 40)));
-        storage.saveSettings({ startingPrompt: String(s.startingPrompt ?? ""), sandbox: s.sandbox, maxSteps });
+        try {
+          storage.saveSettings(validateSettings(s));
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
         return send(res, 200, { ok: true });
+      }
+
+      case "GET /sandbox/status":
+        return send(res, 200, await sandboxImageStatus(storage.load().settings, exec));
+
+      case "POST /sandbox/import": {
+        const { path: file } = (await readJson<{ path?: string }>(req)) ?? {};
+        try {
+          return send(res, 200, { output: await importSandboxImage(storage.load().settings, String(file ?? ""), exec) });
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
       }
 
       case "PUT /env": {
@@ -192,11 +214,22 @@ export function createApi(storage: Storage, runners: { auto: NodeRunner; ai: Nod
     throw new HttpError(404, `No route ${method} ${url.pathname}`);
   }
 
-  return (req, res, next) => {
+  const handler: Api = (req, res, next) => {
     handle(req, res, next).catch((e) => {
       if (res.headersSent) return res.end();
       if (e instanceof HttpError) send(res, e.status, { error: e.message, ...e.extra });
       else send(res, 500, { error: (e as Error).message });
     });
   };
+  /** Cancel every active run and wait (bounded) for its cleanup — sandboxes/containers get closed. */
+  handler.shutdown = async (timeoutMs = 15_000) => {
+    const active = [...runs.values()].filter((h) => !h.state.finishedAt);
+    active.forEach((h) => h.cancel());
+    await Promise.race([
+      Promise.allSettled(active.map((h) => h.done)),
+      new Promise((r) => setTimeout(r, timeoutMs)),
+    ]);
+    for (const h of active) storage.saveRun(h.state);
+  };
+  return handler;
 }
