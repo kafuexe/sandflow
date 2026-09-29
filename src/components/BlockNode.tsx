@@ -6,13 +6,43 @@ import { Switch } from "@/components/ui/switch";
 import { BlockIcon } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { describeCondition } from "../../shared/conditions";
 import { resolveNode } from "../../shared/resolve";
+import { describeSchedule } from "../../shared/schedule";
 import { skillKey } from "../../shared/skills";
 import type { FlowNodeData, NodeRunStatus, ResolvedConfig } from "../../shared/types";
 
 type BlockNodeType = Node<FlowNodeData, "block">;
 
-const KIND_LABEL = { auto: "AUTO", ai: "AI", manager: "MANAGER" } as const;
+const KIND_LABEL: Record<ResolvedConfig["kind"], string> = { auto: "AUTO", ai: "AI", manager: "MANAGER", trigger: "TRIGGER", condition: "IF" };
+
+const TRIGGER_WHAT: Record<string, string> = { manual: "Run button", schedule: "", github: "GitHub", gitlab: "GitLab" };
+
+/** One-line summary of what starts a trigger node / what an If checks. */
+function summary(cfg: ResolvedConfig): string | undefined {
+  if (cfg.kind === "condition") return describeCondition(cfg.condition);
+  if (cfg.kind !== "trigger") return undefined;
+  const t = cfg.trigger;
+  if (t.type === "schedule") return describeSchedule(t.schedule);
+  if (t.type === "manual") return "Starts when you press Run";
+  const events = t.events?.length ? t.events.join(", ") : "all events";
+  return `${TRIGGER_WHAT[t.type]} ${t.repo ?? "(set repo)"} · ${events} · ${t.mode ?? "webhook"}`;
+}
+
+/** true/false outputs of an If block. */
+function BranchHandles({ taken }: { taken?: "true" | "false" }) {
+  return (
+    <>
+      {(["true", "false"] as const).map((b, i) => (
+        <Handle key={b} id={b} type="source" position={Position.Right} className={`handle-${b}`} style={{ top: `${((i + 1) / 3) * 100}%` }}>
+          <span className={cn("pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-[9px] font-medium", b === "true" ? "text-emerald-400" : "text-red-400", taken === b && "underline")}>
+            {b}
+          </span>
+        </Handle>
+      ))}
+    </>
+  );
+}
 
 const STATUS_RING: Record<NodeRunStatus, string> = {
   idle: "",
@@ -84,6 +114,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const blocks = useStore((s) => s.data?.blocks ?? []);
   const runNode = useStore((s) => s.run?.nodes[id]);
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
+  const flowActive = useStore((s) => !!s.data?.flows.find((f) => f.id === s.currentFlowId)?.active);
   const block = blocks.find((b) => b.id === data.blockId);
 
   let cfg: ResolvedConfig | undefined;
@@ -115,8 +146,8 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
       )}
     >
       <StatusBadge status={status} executions={runNode?.executions ?? 0} />
-      <HandleRow cfg={cfg} side="in" />
-      <HandleRow cfg={cfg} side="out" />
+      {cfg.kind !== "trigger" && <HandleRow cfg={cfg} side="in" />}
+      {cfg.kind === "condition" ? <BranchHandles taken={runNode?.branch} /> : <HandleRow cfg={cfg} side="out" />}
 
       <div className="flex items-center gap-2 rounded-t-lg border-b px-3 py-2" style={{ borderTop: `3px solid ${cfg.color}` }}>
         <span className="flex size-6 items-center justify-center rounded" style={{ background: `${cfg.color}33`, color: cfg.color }}>
@@ -139,6 +170,10 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
       </div>
 
       <div className="space-y-1.5 px-7 py-2 text-[10px]">
+        {summary(cfg) && <div className="line-clamp-3 font-mono text-muted-foreground" title={summary(cfg)}>{summary(cfg)}</div>}
+        {cfg.kind === "trigger" && flowActive && cfg.trigger.type !== "manual" && (
+          <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-400">● listening</span>
+        )}
         {(cfg.inputs.startingPrompt || cfg.env.length > 0) && (
           <div className="flex flex-wrap gap-1">
             {cfg.inputs.startingPrompt && (
@@ -167,7 +202,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
             )}
           </div>
         )}
-        {cfg.kind !== "auto" && (
+        {(cfg.kind === "ai" || cfg.kind === "manager") && (
           <label className="nodrag flex items-center justify-between gap-2 pt-0.5 text-muted-foreground">
             Allow questions
             <Switch

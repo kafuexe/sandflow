@@ -98,3 +98,10 @@
   height: 10px;
   border: 2px solid var(--card);
 }
+
+.react-flow__handle.handle-true {
+  background: #10b981;
+}
+.react-flow__handle.handle-false {
+  background: #ef4444;
+}

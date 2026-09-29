@@ -11,7 +11,9 @@ import { useMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { Palette } from "@/components/Palette";
 import { SidePanel } from "@/components/SidePanel";
+import { Switch } from "@/components/ui/switch";
 import { useCurrentFlow, useStore } from "@/lib/store";
+import { resolveNode } from "../shared/resolve";
 
 function SaveIndicator() {
   const status = useStore((s) => s.saveStatus);
@@ -32,6 +34,36 @@ function SaveIndicator() {
     <span className="flex items-center gap-1 text-xs text-muted-foreground">
       {status === "saving" ? <Loader2 className="size-3.5 animate-spin" /> : <CloudUpload className="size-3.5" />} Saving…
     </span>
+  );
+}
+
+/** Arms the flow's schedule / GitHub / GitLab triggers. Shown only when the flow has such a trigger. */
+function ActiveSwitch({ flowId }: { flowId: string }) {
+  const flow = useStore((s) => s.data?.flows.find((f) => f.id === flowId));
+  const blocks = useStore((s) => s.data?.blocks);
+  const triggers = useStore((s) => s.triggers?.triggers);
+  const setFlowActive = useStore((s) => s.setFlowActive);
+  const hasTriggers = !!flow?.nodes.some((n) => {
+    try {
+      const cfg = resolveNode(n, blocks ?? []);
+      return cfg.kind === "trigger" && cfg.trigger.type !== "manual";
+    } catch {
+      return false;
+    }
+  });
+  if (!flow || !hasTriggers) return null;
+  const armed = (triggers ?? []).filter((t) => t.flowId === flowId);
+  const errors = armed.filter((t) => t.lastError).length;
+  return (
+    <label
+      className="flex items-center gap-2 text-xs"
+      title={flow.active ? `${armed.length} trigger(s) listening${errors ? `, ${errors} with errors` : ""}` : "Triggers are off"}
+    >
+      <Switch checked={!!flow.active} onCheckedChange={(v) => setFlowActive(flowId, v)} />
+      <span className={flow.active ? (errors ? "text-amber-400" : "text-emerald-400") : "text-muted-foreground"}>
+        {flow.active ? (errors ? "Active (errors)" : "Active") : "Inactive"}
+      </span>
+    </label>
   );
 }
 
@@ -94,6 +126,7 @@ function TopBar() {
       </Button>
 
       <div className="ml-auto flex items-center gap-3">
+        {flow && <ActiveSwitch flowId={flow.id} />}
         <SaveIndicator />
         <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
           <Settings /> Settings
@@ -130,6 +163,11 @@ export default function App() {
 
   useEffect(() => {
     void useStore.getState().load();
+    // Runs can start on their own (triggers), so keep the runs list + trigger status fresh.
+    const tick = () => void useStore.getState().refreshActivity();
+    tick();
+    const timer = setInterval(tick, 4000);
+    return () => clearInterval(timer);
   }, []);
 
   if (!data) {

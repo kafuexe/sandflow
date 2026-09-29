@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { desktop } from "@/lib/desktop";
 import { useStore } from "@/lib/store";
@@ -142,6 +143,73 @@ export function SandboxImageSettings({ settings }: { settings: Settings }) {
           put the <strong>Linux</strong> build of <code>claude</code> (or another agent CLI) in it.
         </p>
       </div>
+    </div>
+  );
+}
+
+/** Listener for GitHub/GitLab webhooks (separate port, only /hooks/*). */
+export function WebhookSettingsField({ settings }: { settings: Settings }) {
+  const updateSettings = useStore((s) => s.updateSettings);
+  const info = useStore((s) => s.triggers?.webhooks);
+  const w = settings.webhooks ?? { enabled: false, host: "127.0.0.1", port: 8787 };
+  const set = (patch: Partial<typeof w>) => updateSettings({ webhooks: { ...w, ...patch } });
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <label className="flex items-center justify-between text-sm">
+        <span>Webhook listener (GitHub / GitLab triggers)</span>
+        <Switch checked={w.enabled} onCheckedChange={(v) => set({ enabled: v })} />
+      </label>
+      {w.enabled && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            <div className="space-y-1">
+              <Label className="text-xs">Listen on</Label>
+              <Select value={w.host === "0.0.0.0" ? "0.0.0.0" : "127.0.0.1"} onValueChange={(host) => set({ host })}>
+                <SelectTrigger className="w-56">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="127.0.0.1">This machine only (behind a proxy / tunnel)</SelectItem>
+                  <SelectItem value="0.0.0.0">All network interfaces</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Port</Label>
+              <Input
+                type="number"
+                min={1}
+                max={65535}
+                value={w.port}
+                onChange={(e) => set({ port: Math.min(65535, Math.max(1, Math.floor(Number(e.target.value) || 8787))) })}
+                className="w-24"
+              />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs">Public URL (how GitHub / GitLab reach this listener)</Label>
+            <Input
+              className="font-mono text-xs"
+              value={w.publicUrl ?? ""}
+              placeholder={`http://sandflow.corp.local:${w.port}`}
+              onChange={(e) => set({ publicUrl: e.target.value || undefined })}
+            />
+          </div>
+          <div className="text-[11px]">
+            {info?.listening ? (
+              <span className="text-emerald-400">● Listening on port {info.port}</span>
+            ) : info?.error ? (
+              <span className="text-red-400">{info.error}</span>
+            ) : (
+              <span className="text-muted-foreground">Starting…</span>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            Only <code>POST /hooks/…</code> is served on this port — the app and your secrets are never exposed. Every request is
+            verified with the trigger's secret. Copy each trigger's webhook URL from its Block tab.
+          </p>
+        </>
+      )}
     </div>
   );
 }

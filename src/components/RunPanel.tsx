@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, CircleDashed, HelpCircle, Loader2, Send, X } from "lucide-react";
+import { Check, CircleDashed, HelpCircle, Loader2, Send, X, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -7,7 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { nodeLabel } from "../../shared/resolve";
-import type { NodeRunStatus, RunStatus } from "../../shared/types";
+import type { NodeRunStatus, RunStatus, TriggerEvent } from "../../shared/types";
 
 const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
   idle: <CircleDashed className="size-3.5 text-muted-foreground" />,
@@ -70,9 +70,14 @@ export function RunPanel() {
 
   if (!run) {
     return (
-      <div className="p-4 text-sm text-muted-foreground">
-        {runError ? <div className="text-red-400">{runError}</div> : "No run yet. Fill the inputs and press Run."}
-      </div>
+      <ScrollArea className="h-full">
+        <div className="space-y-4 p-3">
+          <div className="text-sm text-muted-foreground">
+            {runError ? <div className="text-red-400">{runError}</div> : "No run selected. Press Run, or pick a recent run below."}
+          </div>
+          <RecentRuns />
+        </div>
+      </ScrollArea>
     );
   }
 
@@ -92,6 +97,17 @@ export function RunPanel() {
             <span className={cn("rounded px-2 py-0.5 text-xs font-medium capitalize", RUN_BADGE[run.status])}>{run.status}</span>
             <span className="truncate text-sm font-medium">{run.flowName}</span>
           </div>
+          {run.trigger && run.trigger.source !== "manual" && (
+            <div className="text-xs text-muted-foreground">
+              <Zap className="mr-1 inline size-3 text-yellow-400" />
+              {triggerText(run.trigger)}
+              {run.trigger.url && (
+                <a href={run.trigger.url} target="_blank" rel="noreferrer" className="ml-1 underline">
+                  open
+                </a>
+              )}
+            </div>
+          )}
           {run.branch && <div className="font-mono text-xs text-muted-foreground">branch: {run.branch}</div>}
           {run.error && <div className="text-xs text-red-400">{run.error}</div>}
           {runError && <div className="text-xs text-red-400">{runError}</div>}
@@ -161,7 +177,60 @@ export function RunPanel() {
             ))}
           </div>
         </div>
+        <RecentRuns />
       </div>
     </ScrollArea>
+  );
+}
+
+function triggerText(t: TriggerEvent): string {
+  const where = t.number !== undefined ? ` ${t.target === "merge_request" ? (t.source === "gitlab" ? "!" : "#") : "#"}${t.number}` : "";
+  return [t.source === "schedule" ? "Scheduled" : `${t.source}: ${t.type}${where}`, t.author && `by ${t.author}`].filter(Boolean).join(" ");
+}
+
+/** Recent runs across all flows — including ones started by triggers. */
+function RecentRuns() {
+  const runs = useStore((s) => s.runs);
+  const current = useStore((s) => s.run?.id);
+  const watch = useStore((s) => s.watch);
+  const log = useStore((s) => s.triggers?.log);
+  if (!runs.length && !log?.length) return null;
+  return (
+    <div className="space-y-3">
+      {runs.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-muted-foreground">Recent runs</div>
+          {runs.slice(0, 15).map((r) => (
+            <button
+              key={r.id}
+              type="button"
+              onClick={() => void watch(r.id)}
+              className={cn("flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-accent", r.id === current && "bg-accent")}
+            >
+              <span className={cn("rounded px-1.5 py-0.5 text-[10px] capitalize", RUN_BADGE[r.status])}>{r.status}</span>
+              <span className="min-w-0 flex-1 truncate">
+                {r.flowName}
+                {r.trigger && r.trigger.source !== "manual" && (
+                  <span className="text-muted-foreground"> · {triggerText({ ...r.trigger, firedAt: r.startedAt })}</span>
+                )}
+              </span>
+              <span className="shrink-0 text-[10px] text-muted-foreground">{new Date(r.startedAt).toLocaleTimeString()}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {!!log?.length && (
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-muted-foreground">Trigger activity</div>
+          <div className="max-h-40 overflow-auto rounded bg-black/30 p-2 font-mono text-[10px] leading-relaxed">
+            {log.slice(0, 50).map((l, i) => (
+              <div key={i} className={l.level === "info" ? "text-muted-foreground" : l.level === "warn" ? "text-amber-300" : "text-red-400"}>
+                {new Date(l.ts).toLocaleTimeString()} {l.msg}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
