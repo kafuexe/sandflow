@@ -1,12 +1,15 @@
 // /api/* request handler, mounted inside the Vite dev/preview server (see vite.config.ts) — no separate server.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import fs from "node:fs";
 import path from "node:path";
 import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
 import { missingInputs, validateBlocks } from "../shared/validate";
-import type { AppData, BlockDef, EnvValues, Flow, RunState, Settings, TriggerEvent } from "../shared/types";
+import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, RunState, Settings, TriggerEvent } from "../shared/types";
+import { createChatService, type AssistantRunner } from "./chats";
 import { startRun, type NodeRunner, type RunHandle } from "./engine";
+import { createMcp } from "./mcp";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
 import { summarize, type Storage } from "./storage";
@@ -50,12 +53,57 @@ export type Api = Handler & { shutdown(timeoutMs?: number): Promise<void> };
 export function createApi(
   storage: Storage,
   runners: { auto: NodeRunner; ai: NodeRunner },
-  opts: { bundledSkillsDir?: string; exec?: Exec } = {},
+  opts: { bundledSkillsDir?: string; exec?: Exec; assistant?: AssistantRunner } = {},
 ): Api {
   const skills = createSkillStore(storage.dir, opts.bundledSkillsDir);
   const exec = opts.exec ?? execCli;
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
+
+  // ---------- data revisions (UI ↔ assistant edits) ----------
+
+  /** Bumped on every flows/blocks write. The UI sends the rev it last saw; a stale write gets 409. */
+  let rev = 0;
+  const dataListeners = new Set<(c: DataChange) => void>();
+  function changed(c: Omit<DataChange, "rev">) {
+    rev++;
+    dataListeners.forEach((fn) => fn({ rev, ...c }));
+  }
+  function checkRev(url: URL) {
+    const seen = url.searchParams.get("rev");
+    if (seen !== null && Number(seen) !== rev) {
+      throw new HttpError(409, "The flow was changed by the assistant since you last loaded it", { rev });
+    }
+  }
+
+  const mcp = createMcp({
+    load: storage.load,
+    saveFlows(flows, c) {
+      storage.saveFlows(flows);
+      syncTriggers();
+      changed({ source: "assistant", ...c });
+    },
+    saveBlocks(blocks) {
+      storage.saveBlocks(blocks);
+      syncTriggers();
+      changed({ source: "assistant" });
+    },
+  });
+  const chats = createChatService({ dir: storage.dir, load: storage.load, mcp, runner: opts.assistant });
+
+  /** Where agents reach the MCP server — derived from the Host we're being called on (random port in the desktop app). */
+  let mcpUrl = "";
+  function noteHost(host: string | undefined) {
+    if (!host || !/^[\w.-]+:\d+$|^[\w.-]+$/.test(host)) return;
+    const url = `http://${host}/api/mcp`;
+    if (url === mcpUrl) return;
+    mcpUrl = url;
+    try {
+      fs.writeFileSync(path.join(storage.dir, "mcp.json"), JSON.stringify({ mcpServers: { sandflow: { type: "http", url } } }, null, 2));
+    } catch {
+      /* informational only */
+    }
+  }
 
   /** Start a run (manual, or fired by a trigger node). */
   function launch(flow: Flow, data: AppData, extra: { trigger?: TriggerEvent; startNodeId?: string } = {}): RunHandle {
@@ -176,6 +224,17 @@ export function createApi(
     return r;
   }
 
+  function getChat(id: string): Chat {
+    let chat: Chat | undefined;
+    try {
+      chat = chats.get(id);
+    } catch {
+      /* invalid id */
+    }
+    if (!chat) throw new HttpError(404, "Chat not found");
+    return chat;
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse, next: Next) {
     const url = new URL(req.url ?? "/", "http://x");
     if (!url.pathname.startsWith("/api/")) return next();
@@ -185,28 +244,130 @@ export function createApi(
     if (method !== "GET" && !req.headers["content-type"]?.startsWith("application/json")) {
       throw new HttpError(415, "Content-Type must be application/json");
     }
-    const route = `${method} /${parts.map((p, i) => (parts[0] === "runs" && i === 1 ? ":id" : p)).join("/")}`;
+    const route = `${method} /${parts.map((p, i) => ((parts[0] === "runs" || parts[0] === "chats") && i === 1 ? ":id" : p)).join("/")}`;
+    noteHost(req.headers.host);
 
     switch (route) {
       case "GET /data":
-        return send(res, 200, storage.load());
+        return send(res, 200, { ...storage.load(), rev });
+
+      case "GET /data/events": {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        const push = (c: DataChange) => res.write(`event: change\ndata: ${JSON.stringify(c)}\n\n`);
+        push({ rev, source: "ui" });
+        dataListeners.add(push);
+        const beat = setInterval(() => res.write(": ping\n\n"), 15_000);
+        req.on("close", () => {
+          clearInterval(beat);
+          dataListeners.delete(push);
+        });
+        return;
+      }
 
       case "PUT /blocks": {
         const blocks = await readJson<BlockDef[]>(req);
         if (!Array.isArray(blocks)) throw new HttpError(400, "Expected an array of blocks");
+        checkRev(url);
         const errors = validateBlocks(blocks);
         if (errors.length) throw new HttpError(400, errors[0], { errors });
         storage.saveBlocks(blocks);
         syncTriggers();
-        return send(res, 200, { ok: true });
+        changed({ source: "ui" });
+        return send(res, 200, { ok: true, rev });
       }
 
       case "PUT /flows": {
         const flows = await readJson<Flow[]>(req);
         if (!Array.isArray(flows)) throw new HttpError(400, "Expected an array of flows");
+        checkRev(url);
         storage.saveFlows(flows);
         syncTriggers();
+        changed({ source: "ui" });
+        return send(res, 200, { ok: true, rev });
+      }
+
+      // ---------- MCP (agents) ----------
+
+      case "POST /mcp": {
+        const chatId = url.searchParams.get("chat");
+        const out = mcp.handle(await readJson<unknown>(req), {
+          scope: url.searchParams.get("flow") || undefined,
+          // Calls from an in-app chat's agent show up in that chat.
+          onCall: chatId ? (c) => chats.record(chatId, c) : undefined,
+        });
+        if (out === undefined) {
+          res.statusCode = 202;
+          return res.end();
+        }
+        return send(res, 200, out);
+      }
+
+      case "GET /mcp":
+        res.setHeader("allow", "POST");
+        throw new HttpError(405, "This MCP server only answers POST (no server-sent stream)");
+
+      // ---------- "Edit with AI" chats ----------
+
+      case "GET /chats": {
+        const flowId = url.searchParams.get("flowId");
+        if (!flowId) throw new HttpError(400, "flowId is required");
+        return send(res, 200, chats.list(flowId));
+      }
+
+      case "POST /chats": {
+        const { flowId, agent } = (await readJson<{ flowId?: string; agent?: AssistantAgent }>(req)) ?? {};
+        try {
+          return send(res, 200, chats.create(String(flowId ?? ""), agent));
+        } catch (e) {
+          throw new HttpError((e as Error).message === "Flow not found" ? 404 : 400, (e as Error).message);
+        }
+      }
+
+      case "PATCH /chats/:id": {
+        const { agent } = (await readJson<{ agent?: AssistantAgent }>(req)) ?? {};
+        getChat(parts[1]);
+        try {
+          const chat = chats.setAgent(parts[1], agent as AssistantAgent);
+          return send(res, 200, { ...chat, running: chats.running(chat.id) });
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+      }
+
+      case "GET /chats/:id": {
+        const chat = parts.length === 2 ? getChat(parts[1]) : undefined;
+        if (chat) return send(res, 200, { ...chat, running: chats.running(chat.id) });
+        break;
+      }
+
+      case "DELETE /chats/:id":
+        getChat(parts[1]);
+        chats.remove(parts[1]);
         return send(res, 200, { ok: true });
+
+      case "POST /chats/:id/messages": {
+        const { text } = (await readJson<{ text?: string }>(req)) ?? {};
+        getChat(parts[1]);
+        const r = chats.send(parts[1], String(text ?? ""), mcpUrl || `http://${req.headers.host}/api/mcp`);
+        if (r.error) throw new HttpError(r.status ?? 400, r.error);
+        return send(res, 200, { ok: true });
+      }
+
+      case "POST /chats/:id/cancel":
+        return send(res, 200, { ok: chats.cancel(parts[1]) });
+
+      case "GET /chats/:id/events": {
+        const chat = getChat(parts[1]);
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+        const push = (c: Chat) => res.write(`event: chat\ndata: ${JSON.stringify({ ...c, running: chats.running(c.id) })}\n\n`);
+        push(chat);
+        const off = chats.subscribe(chat.id, push);
+        const beat = setInterval(() => res.write(": ping\n\n"), 15_000);
+        req.on("close", () => {
+          clearInterval(beat);
+          off();
+        });
+        return;
       }
 
       case "PUT /settings": {
@@ -336,6 +497,7 @@ export function createApi(
   handler.shutdown = async (timeoutMs = 15_000) => {
     triggers.stop();
     queues.clear();
+    await chats.shutdown();
     await webhookServer?.close();
     webhookServer = undefined;
     const active = [...runs.values()].filter((h) => !h.state.finishedAt);

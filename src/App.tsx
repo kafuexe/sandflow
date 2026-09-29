@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { Check, CloudUpload, Loader2, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves } from "lucide-react";
+import { BotMessageSquare, Check, CloudUpload, Info, Loader2, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves } from "lucide-react";
+import { ChatPanel } from "@/components/ChatPanel";
+import { useChatStore } from "@/lib/chatStore";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -16,6 +19,18 @@ import { useCurrentFlow, useStore } from "@/lib/store";
 function SaveIndicator() {
   const status = useStore((s) => s.saveStatus);
   const error = useStore((s) => s.saveError);
+  const notice = useStore((s) => s.saveNotice);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => useStore.setState({ saveNotice: undefined }), 8000);
+    return () => clearTimeout(t);
+  }, [notice]);
+  if (notice && status === "saved")
+    return (
+      <span className="flex max-w-md items-center gap-1 text-xs text-amber-300" title={notice}>
+        <Info className="size-3.5 shrink-0" /> <span className="truncate">{notice}</span>
+      </span>
+    );
   if (status === "error")
     return (
       <span className="flex items-center gap-1 text-xs text-red-400" title={error}>
@@ -32,6 +47,28 @@ function SaveIndicator() {
     <span className="flex items-center gap-1 text-xs text-muted-foreground">
       {status === "saving" ? <Loader2 className="size-3.5 animate-spin" /> : <CloudUpload className="size-3.5" />} Saving…
     </span>
+  );
+}
+
+function EditWithAiButton() {
+  const flow = useCurrentFlow();
+  const open = useChatStore((s) => s.open);
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={!flow}
+      aria-pressed={open}
+      title="Describe a flow or a change and let the assistant build it"
+      className={cn("ml-1", open && "border-violet-500/60 bg-violet-500/10 dark:bg-violet-500/10")}
+      onClick={() => {
+        const chat = useChatStore.getState();
+        if (open) chat.close();
+        else if (flow) void chat.openPanel(flow.id);
+      }}
+    >
+      <BotMessageSquare className="text-violet-400" /> Edit with AI
+    </Button>
   );
 }
 
@@ -92,6 +129,7 @@ function TopBar() {
       >
         <Trash2 />
       </Button>
+      <EditWithAiButton />
 
       <div className="ml-auto flex items-center gap-3">
         <SaveIndicator />
@@ -127,10 +165,17 @@ export default function App() {
   const data = useStore((s) => s.data);
   const loadError = useStore((s) => s.loadError);
   const editor = useStore((s) => s.editor);
+  const currentFlowId = useStore((s) => s.currentFlowId);
+  const chatOpen = useChatStore((s) => s.open);
 
   useEffect(() => {
     void useStore.getState().load();
   }, []);
+
+  // The assistant panel always talks about the flow on the canvas.
+  useEffect(() => {
+    if (chatOpen) void useChatStore.getState().flowChanged(currentFlowId);
+  }, [chatOpen, currentFlowId]);
 
   if (!data) {
     return (
@@ -145,10 +190,12 @@ export default function App() {
       <div className="flex h-full flex-col">
         <TopBar />
         <div className="flex min-h-0 flex-1">
-          <Palette />
+          {/* The chat takes the palette's room so the canvas stays wide enough to follow the edits. */}
+          {!chatOpen && <Palette />}
           <main className="min-w-0 flex-1">
             <FlowCanvas />
           </main>
+          {chatOpen && <ChatPanel />}
           <SidePanel />
         </div>
       </div>

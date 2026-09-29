@@ -12,7 +12,7 @@ import type {
   Settings,
 } from "../../shared/types";
 import { cloneFlow, newFlow } from "../../shared/flows";
-import { api, ApiError, subscribeRun } from "./api";
+import { api, ApiError, subscribeData, subscribeRun } from "./api";
 
 type Section = "blocks" | "flows" | "settings" | "env";
 export type SaveStatus = "saved" | "pending" | "saving" | "error";
@@ -32,8 +32,14 @@ interface State {
   runError?: string;
   saveStatus: SaveStatus;
   saveError?: string;
+  /** One-off message about a save (e.g. an edit replaced by the assistant's newer version). */
+  saveNotice?: string;
+  /** Node id → when the assistant last touched it (drives the canvas glow). */
+  highlight: Record<string, number>;
 
   load(): Promise<void>;
+  /** Re-read flows/blocks from the server, keeping unsaved settings/env. */
+  reload(): Promise<void>;
   // blocks
   upsertBlock(block: BlockDef): void;
   deleteBlock(id: string): void;
@@ -71,6 +77,9 @@ const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2,
 let dirty = new Set<Section>();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let unsubscribeRun: (() => void) | undefined;
+let unsubscribeData: (() => void) | undefined;
+/** Server revision of flows + blocks this client last saw. */
+let rev = 0;
 
 export const useStore = create<State>((set, get) => {
   async function flush() {
@@ -81,16 +90,46 @@ export const useStore = create<State>((set, get) => {
     set({ saveStatus: "saving", saveError: undefined });
     try {
       for (const s of sections) {
-        if (s === "blocks") await api.saveBlocks(data.blocks);
-        if (s === "flows") await api.saveFlows(data.flows);
+        if (s === "blocks") rev = (await api.saveBlocks(data.blocks, rev)).rev;
+        if (s === "flows") rev = (await api.saveFlows(data.flows, rev)).rev;
         if (s === "settings") await api.saveSettings(data.settings);
         if (s === "env") await api.saveEnv(data.env);
       }
       set({ saveStatus: dirty.size ? "pending" : "saved" });
     } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        // The assistant saved in between: its version wins, the local flow/block edit is dropped.
+        sections.forEach((s) => s !== "flows" && s !== "blocks" && dirty.add(s));
+        await get().reload();
+        set({ saveStatus: "saved", saveNotice: "The assistant changed this flow while you were editing, so your last edit was replaced." });
+        if (dirty.size) persist();
+        return;
+      }
       sections.forEach((s) => dirty.add(s));
       set({ saveStatus: "error", saveError: (e as Error).message });
     }
+  }
+
+  function flash(ids: string[]) {
+    if (!ids.length) return;
+    const now = Date.now();
+    set({ highlight: { ...get().highlight, ...Object.fromEntries(ids.map((id) => [id, now])) } });
+    setTimeout(() => {
+      const h = { ...get().highlight };
+      for (const id of ids) if (h[id] === now) delete h[id];
+      set({ highlight: h });
+    }, 2600);
+  }
+
+  function watchData() {
+    unsubscribeData?.();
+    unsubscribeData = subscribeData((c) => {
+      if (c.rev <= rev) return; // our own save, or already loaded
+      if (dirty.has("flows") || dirty.has("blocks")) return; // the pending save will get a 409 and reload
+      void get().reload().then(() => {
+        if (c.source === "assistant" && c.flowId === get().currentFlowId) flash(c.touched ?? []);
+      });
+    });
   }
 
   function persist(...sections: Section[]) {
@@ -129,13 +168,38 @@ export const useStore = create<State>((set, get) => {
     settingsOpen: false,
     sideTab: "inputs",
     saveStatus: "saved",
+    highlight: {},
 
     async load() {
       try {
-        const data = await api.getData();
+        const { rev: r, ...data } = await api.getData();
+        rev = r;
         set({ data, currentFlowId: data.flows[0]?.id ?? null, loadError: undefined });
+        watchData();
       } catch (e) {
         set({ loadError: (e as Error).message });
+      }
+    },
+    async reload() {
+      try {
+        const { rev: r, ...server } = await api.getData();
+        rev = r;
+        const local = get().data;
+        const data: AppData = {
+          ...server,
+          settings: local && dirty.has("settings") ? local.settings : server.settings,
+          env: local && dirty.has("env") ? local.env : server.env,
+        };
+        const cur = get().currentFlowId;
+        const sel = get().selectedNodeId;
+        const flow = data.flows.find((f) => f.id === cur) ?? data.flows[0];
+        set({
+          data,
+          currentFlowId: flow?.id ?? null,
+          selectedNodeId: flow?.nodes.some((n) => n.id === sel) ? sel : null,
+        });
+      } catch {
+        /* keep what we have; the next change event retries */
       }
     },
 

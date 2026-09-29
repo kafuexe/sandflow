@@ -1,5 +1,6 @@
 import pkg from "../package.json";
-import type { Settings } from "./types";
+import { AGENT_PROVIDERS } from "./agents";
+import type { AssistantAgent, Settings } from "./types";
 
 export const APP_VERSION: string = pkg.version;
 
@@ -11,6 +12,14 @@ export const AGENT_TOOLS_MOUNT = "/opt/sandflow/tools";
 
 /** Docker/OCI image reference: [registry[:port]/]name[:tag][@digest], no spaces or shell characters. */
 const IMAGE_RE = /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(\/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)*(:[\w][\w.-]{0,127})?(@sha256:[a-f0-9]{64})?$/i;
+
+/** An assistant agent choice: a known provider and an optional model name (passed to the CLI as an argument). */
+export function validateAssistantAgent(a: AssistantAgent): AssistantAgent {
+  if (!a || !AGENT_PROVIDERS.includes(a.provider)) throw new Error(`Unknown agent "${a?.provider}"`);
+  const model = a.model?.trim();
+  if (model && !/^[\w.:/@\[\]-]{1,120}$/.test(model)) throw new Error(`Invalid model name "${model}"`);
+  return model ? { provider: a.provider, model } : { provider: a.provider };
+}
 
 /** Validate + normalise settings coming from the UI. Throws with a user-facing message. */
 export function validateSettings(s: Settings): Settings {
@@ -28,6 +37,7 @@ export function validateSettings(s: Settings): Settings {
   }
   const tools = s.agentToolsDir?.trim();
   if (tools) out.agentToolsDir = tools;
+  if (s.assistantAgent) out.assistantAgent = validateAssistantAgent(s.assistantAgent);
   if (s.webhooks) {
     const w = s.webhooks;
     const port = Math.floor(Number(w.port));

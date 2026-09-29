@@ -84,6 +84,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const blocks = useStore((s) => s.data?.blocks ?? []);
   const runNode = useStore((s) => s.run?.nodes[id]);
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
+  const touchedAt = useStore((s) => s.highlight[id]);
   const block = blocks.find((b) => b.id === data.blockId);
 
   let cfg: ResolvedConfig | undefined;
@@ -108,10 +109,13 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
 
   return (
     <div
+      // Remount the glow when the assistant touches the node again so the animation replays.
+      key={touchedAt ?? "idle"}
       className={cn(
         "relative w-[240px] rounded-lg border bg-card text-card-foreground shadow-md transition-shadow",
         selected && "outline-2 outline-offset-2 outline-primary/60",
         STATUS_RING[status],
+        touchedAt && "ai-touched",
       )}
     >
       <StatusBadge status={status} executions={runNode?.executions ?? 0} />

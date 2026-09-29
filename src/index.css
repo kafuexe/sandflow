@@ -98,3 +98,23 @@
   height: 10px;
   border: 2px solid var(--card);
 }
+
+/* A node the assistant just added or changed: a violet halo that fades out (the AI-block colour). */
+@keyframes ai-touched {
+  0% {
+    box-shadow: 0 0 0 2px #8b5cf6, 0 0 22px 4px rgb(139 92 246 / 0.55);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgb(139 92 246 / 0), 0 0 22px 4px rgb(139 92 246 / 0);
+  }
+}
+.ai-touched {
+  animation: ai-touched 2.4s ease-out forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-touched {
+    animation: none;
+    outline: 2px solid #8b5cf6;
+    outline-offset: 2px;
+  }
+}

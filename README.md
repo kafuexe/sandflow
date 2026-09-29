@@ -107,12 +107,34 @@ npm run app
   Set it on *AI Agent (template)* to apply it to every agent block. Add auth vars (e.g. `ANTHROPIC_AUTH_TOKEN`)
   to the block's env list. Inside Docker, reach a service on your machine via `host.docker.internal`, not `localhost`.
 
+## Edit with AI
+
+**Edit with AI** (top bar) opens a chat next to the canvas: describe a flow or a change and an agent builds it; the
+canvas updates live, with the nodes it touched highlighted. A flow can have any number of chats (the header switches
+between them). Pick the agent under the message box: any agent a block can use — Claude Code, Codex, pi, OpenCode,
+Cursor or Copilot — plus an optional model. It runs on this machine with its own login, and can only change the
+chat's flow. While it works, the canvas is view-only.
+
+The agent CLI must be installed on the host (`SANDFLOW_<NAME>_PATH`, e.g. `SANDFLOW_CODEX_PATH`, points at a
+specific executable). Claude Code reaches Sandflow's tools over HTTP MCP; Codex, OpenCode, Cursor and Copilot through
+a small stdio bridge; pi has no MCP support, so it answers with a `sandflow-ops` JSON block that Sandflow validates
+and applies (asking it to fix the block if it doesn't apply).
+
+### Agents outside the app (MCP)
+
+Sandflow serves an MCP server at `http://<host>:<port>/api/mcp` with tools to list blocks, read, create, edit and
+validate flows, and save custom blocks. The current URL is written to `mcp.json` in the data folder (the desktop app
+uses a new port each launch), e.g. `claude --mcp-config <data>/mcp.json`. Add `?flow=<id>` to limit a session to one
+flow. The [`sandflow-flows` skill](agent-skills/sandflow-flows/SKILL.md) teaches an agent how to design flows with
+these tools — copy it into your agent's skills folder (e.g. `~/.claude/skills/`).
+
 ## Data
 
 Everything is stored in a data folder — desktop app: `%APPDATA%\Sandflow\data` (Windows),
 `~/Library/Application Support/Sandflow/data` (macOS), `~/.config/Sandflow/data` (Linux); `npm run dev`: `./.sandflow/`.
 It holds `library.json` (blocks), `flows.json`, `settings.json`,
-`env.json` (**secrets — gitignored**) and `runs/` (run state, artifacts and agent logs).
+`env.json` (**secrets — gitignored**), `runs/` (run state, artifacts and agent logs) and `chats/` (Edit with AI
+conversations).
 
 ## Development
 
