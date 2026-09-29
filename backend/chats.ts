@@ -57,7 +57,8 @@ export function resolveCli(
       const shim = path.join(dir, `${bin}.cmd`);
       if (!fs.existsSync(shim)) continue;
       const target = /"%dp0%\\([^"]+\.(?:exe|js|cjs|mjs))"/i.exec(fs.readFileSync(shim, "utf8"))?.[1];
-      const full = target && path.join(dir, target);
+      // The shim writes the target with backslashes; split on either separator so this holds on any host.
+      const full = target && path.join(dir, ...target.split(/[\\/]+/));
       if (full && fs.existsSync(full)) {
         // In Electron, process.execPath is the app; ELECTRON_RUN_AS_NODE makes it behave as node.
         return full.toLowerCase().endsWith(".exe") ? { cmd: full, args: [] } : { cmd: process.execPath, args: [full] };
