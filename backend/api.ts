@@ -152,11 +152,21 @@ export function createApi(
     webhookServer = undefined;
     webhookError = undefined;
     if (!w?.enabled) return;
-    try {
-      webhookServer = await startWebhookServer(w.host, w.port, triggers.handleWebhook);
-    } catch (e) {
-      webhookError = `Couldn't listen on ${w.host}:${w.port}: ${(e as Error).message}`;
-      console.warn(`[webhooks] ${webhookError}`);
+    // Retry briefly: after a dev-server restart the previous listener may still be releasing the port.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        webhookServer = await startWebhookServer(w.host, w.port, triggers.handleWebhook);
+        return;
+      } catch (e) {
+        const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
+        if (busy && attempt < 10 && webhookKey === key) {
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        webhookError = `Couldn't listen on ${w.host}:${w.port}: ${(e as Error).message}`;
+        console.warn(`[webhooks] ${webhookError}`);
+        return;
+      }
     }
   }
   function webhookInfo() {
