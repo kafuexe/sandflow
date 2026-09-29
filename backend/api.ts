@@ -2,14 +2,16 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
-import { ENV_NAME_RE } from "../shared/resolve";
+import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
 import { missingInputs, validateBlocks } from "../shared/validate";
-import type { BlockDef, EnvValues, Flow, RunState, Settings } from "../shared/types";
+import type { AppData, BlockDef, EnvValues, Flow, RunState, Settings, TriggerEvent } from "../shared/types";
 import { startRun, type NodeRunner, type RunHandle } from "./engine";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
-import type { Storage } from "./storage";
+import { summarize, type Storage } from "./storage";
+import { createTriggerService, type FireOutcome } from "./triggers";
+import { startWebhookServer, type WebhookServer } from "./webhooks";
 
 type Next = (err?: unknown) => void;
 type Handler = (req: IncomingMessage, res: ServerResponse, next: Next) => void;
@@ -55,6 +57,119 @@ export function createApi(
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
 
+  /** Start a run (manual, or fired by a trigger node). */
+  function launch(flow: Flow, data: AppData, extra: { trigger?: TriggerEvent; startNodeId?: string } = {}): RunHandle {
+    let lastSave = 0;
+    const handle = startRun({
+      flow,
+      blocks: data.blocks,
+      env: data.env,
+      settings: data.settings,
+      runners,
+      logRoot: path.join(storage.dir, "runs"),
+      saveArtifact: storage.saveArtifact,
+      loadSkill: skills.read,
+      ...extra,
+      onChange: (s) => {
+        listeners.get(s.id)?.forEach((fn) => fn(s));
+        if (s.finishedAt || Date.now() - lastSave > 2000) {
+          lastSave = Date.now();
+          storage.saveRun(s);
+        }
+      },
+    });
+    runs.set(handle.state.id, handle);
+    void handle.done.then((s) => {
+      storage.saveRun(s);
+      setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
+      drainQueue(s.flowId);
+    });
+    return handle;
+  }
+
+  // ---------- triggers ----------
+
+  /** Triggered runs waiting because their flow is busy (overlap: queue). */
+  const queues = new Map<string, { nodeId: string; event: TriggerEvent }[]>();
+  const MAX_QUEUE = 50;
+  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.finishedAt);
+
+  function startTriggered(flowId: string, nodeId: string, event: TriggerEvent): FireOutcome {
+    const data = storage.load();
+    const flow = data.flows.find((f) => f.id === flowId);
+    if (!flow) return { status: "skipped", reason: "flow was deleted" };
+    if (!flow.active) return { status: "skipped", reason: "flow is not active" };
+    const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt);
+    if (missing.length) return { status: "skipped", reason: `missing inputs: ${missing.join(", ")}` };
+    return { status: "started", runId: launch(flow, data, { trigger: event, startNodeId: nodeId }).state.id };
+  }
+
+  function fireTrigger(flow: Flow, nodeId: string, event: TriggerEvent): FireOutcome {
+    if (!flowBusy(flow.id)) return startTriggered(flow.id, nodeId, event);
+    const data = storage.load();
+    const node = flow.nodes.find((n) => n.id === nodeId);
+    let overlap: "queue" | "skip" = "queue";
+    try {
+      if (node) overlap = resolveNode(node, data.blocks).trigger.overlap ?? "queue";
+    } catch {
+      /* default */
+    }
+    if (overlap === "skip") return { status: "skipped", reason: "flow is already running (overlap: skip)" };
+    const q = queues.get(flow.id) ?? [];
+    if (q.length >= MAX_QUEUE) return { status: "skipped", reason: `queue is full (${MAX_QUEUE})` };
+    q.push({ nodeId, event });
+    queues.set(flow.id, q);
+    return { status: "queued" };
+  }
+
+  function drainQueue(flowId: string) {
+    const q = queues.get(flowId);
+    while (q?.length && !flowBusy(flowId)) {
+      const next = q.shift()!;
+      const outcome = startTriggered(flowId, next.nodeId, next.event);
+      if (outcome.status !== "started") console.warn(`[trigger] queued ${next.event.type} skipped: ${"reason" in outcome ? outcome.reason : ""}`);
+    }
+    if (q && !q.length) queues.delete(flowId);
+  }
+
+  const triggers = createTriggerService({
+    load: storage.load,
+    fire: fireTrigger,
+    exec,
+    statePath: path.join(storage.dir, "triggers-state.json"),
+  });
+
+  // Webhook listener: its own port, only when enabled in Settings.
+  let webhookServer: WebhookServer | undefined;
+  let webhookKey = "";
+  let webhookError: string | undefined;
+  async function syncWebhooks() {
+    const w = storage.load().settings.webhooks;
+    const key = w?.enabled ? `${w.host}:${w.port}` : "";
+    if (key === webhookKey) return;
+    webhookKey = key;
+    await webhookServer?.close();
+    webhookServer = undefined;
+    webhookError = undefined;
+    if (!w?.enabled) return;
+    try {
+      webhookServer = await startWebhookServer(w.host, w.port, triggers.handleWebhook);
+    } catch (e) {
+      webhookError = `Couldn't listen on ${w.host}:${w.port}: ${(e as Error).message}`;
+      console.warn(`[webhooks] ${webhookError}`);
+    }
+  }
+  function webhookInfo() {
+    const w = storage.load().settings.webhooks;
+    const base = w?.publicUrl?.trim().replace(/\/+$/, "") || (webhookServer ? `http://${w?.host === "0.0.0.0" ? "<this-machine>" : w?.host}:${webhookServer.port}` : undefined);
+    return { enabled: !!w?.enabled, listening: !!webhookServer, port: webhookServer?.port, baseUrl: base, error: webhookError };
+  }
+  function syncTriggers() {
+    triggers.sync();
+    void syncWebhooks();
+  }
+  syncTriggers();
+
   function getRun(id: string): RunState {
     const r = runs.get(id)?.state ?? storage.loadRun(id);
     if (!r) throw new HttpError(404, "Run not found");
@@ -82,6 +197,7 @@ export function createApi(
         const errors = validateBlocks(blocks);
         if (errors.length) throw new HttpError(400, errors[0], { errors });
         storage.saveBlocks(blocks);
+        syncTriggers();
         return send(res, 200, { ok: true });
       }
 
@@ -89,6 +205,7 @@ export function createApi(
         const flows = await readJson<Flow[]>(req);
         if (!Array.isArray(flows)) throw new HttpError(400, "Expected an array of flows");
         storage.saveFlows(flows);
+        syncTriggers();
         return send(res, 200, { ok: true });
       }
 
@@ -99,6 +216,7 @@ export function createApi(
         } catch (e) {
           throw new HttpError(400, (e as Error).message);
         }
+        syncTriggers();
         return send(res, 200, { ok: true });
       }
 
@@ -130,31 +248,24 @@ export function createApi(
         if (!flow) throw new HttpError(404, "Flow not found");
         const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt);
         if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
-        let lastSave = 0;
-        const handle = startRun({
-          flow,
-          blocks: data.blocks,
-          env: data.env,
-          settings: data.settings,
-          runners,
-          logRoot: path.join(storage.dir, "runs"),
-          saveArtifact: storage.saveArtifact,
-          loadSkill: skills.read,
-          onChange: (s) => {
-            listeners.get(s.id)?.forEach((fn) => fn(s));
-            if (s.finishedAt || Date.now() - lastSave > 2000) {
-              lastSave = Date.now();
-              storage.saveRun(s);
-            }
-          },
-        });
-        runs.set(handle.state.id, handle);
-        void handle.done.then((s) => {
-          storage.saveRun(s);
-          setTimeout(() => runs.delete(s.id), 10 * 60_000);
-        });
-        return send(res, 200, { runId: handle.state.id });
+        return send(res, 200, { runId: launch(flow, data).state.id });
       }
+
+      case "GET /runs": {
+        const live = [...runs.values()].map((h) => summarize(h.state));
+        const liveIds = new Set(live.map((r) => r.id));
+        const saved = storage.listRuns(50).filter((r) => !liveIds.has(r.id));
+        const all = [...live, ...saved].sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+        return send(res, 200, all);
+      }
+
+      case "GET /triggers":
+        return send(res, 200, {
+          triggers: triggers.status(),
+          log: triggers.log().slice(0, 100),
+          webhooks: webhookInfo(),
+          queued: Object.fromEntries([...queues].map(([k, q]) => [k, q.length])),
+        });
 
       case "GET /skills":
         return send(res, 200, await skills.list());
@@ -223,6 +334,10 @@ export function createApi(
   };
   /** Cancel every active run and wait (bounded) for its cleanup — sandboxes/containers get closed. */
   handler.shutdown = async (timeoutMs = 15_000) => {
+    triggers.stop();
+    queues.clear();
+    await webhookServer?.close();
+    webhookServer = undefined;
     const active = [...runs.values()].filter((h) => !h.state.finishedAt);
     active.forEach((h) => h.cancel());
     await Promise.race([

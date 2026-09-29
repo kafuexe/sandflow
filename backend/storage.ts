@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
-import type { AppData, BlockDef, EnvValues, Flow, RunState, Settings } from "../shared/types";
+import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
 
 export const DEFAULT_SETTINGS: Settings = { startingPrompt: "", sandbox: "docker", maxSteps: 40 };
 
@@ -41,6 +41,19 @@ function upgradeBuiltinSkills(blocks: BlockDef[]): { blocks: BlockDef[]; changed
 }
 
 export type Storage = ReturnType<typeof createStorage>;
+
+export function summarize(r: RunState): RunSummary {
+  const t = r.trigger;
+  return {
+    id: r.id,
+    flowId: r.flowId,
+    flowName: r.flowName,
+    status: r.status,
+    startedAt: r.startedAt,
+    finishedAt: r.finishedAt,
+    trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
+  };
+}
 
 export function createStorage(dir = path.resolve(".sandflow")) {
   const file = (name: string) => path.join(dir, name);
@@ -84,6 +97,26 @@ export function createStorage(dir = path.resolve(".sandflow")) {
     saveEnv: (env: EnvValues) => write("env.json", env),
     saveRun: (run: RunState) => writeAtomic(runFile(run.id), JSON.stringify(run, null, 2)),
     loadRun: (id: string) => (RUN_ID_RE.test(id) ? readJson<RunState>(runFile(id)) : undefined),
+    /** Most recent saved runs (ids start with an ISO timestamp, so name order = time order). */
+    listRuns(limit = 50): RunSummary[] {
+      let names: string[];
+      try {
+        names = fs.readdirSync(path.join(dir, "runs")).filter((n) => n.endsWith(".json"));
+      } catch {
+        return [];
+      }
+      return names
+        .sort()
+        .reverse()
+        .slice(0, limit)
+        .flatMap((n) => {
+          try {
+            return [summarize(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState)];
+          } catch {
+            return [];
+          }
+        });
+    },
     saveArtifact(runId: string, nodeId: string, n: number, text: string) {
       runFile(runId);
       const safeNode = nodeId.replace(/[^\w-]/g, "_");
