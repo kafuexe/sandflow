@@ -26,8 +26,9 @@ export function NewFlowDialog({ open, onOpenChange }: { open: boolean; onOpenCha
 
   useEffect(() => {
     if (nameTouched) return;
-    const src = flows.find((f) => f.id === from) ?? EXAMPLE_FLOWS.find((f) => f.id === from);
-    setName(src ? `${src.name} (copy)` : `Flow ${flows.length + 1}`);
+    const own = flows.find((f) => f.id === from);
+    const example = EXAMPLE_FLOWS.find((f) => f.id === from);
+    setName(own ? `${own.name} (copy)` : example ? example.name : `Flow ${flows.length + 1}`);
   }, [from, flows, nameTouched]);
 
   const source = flows.find((f) => f.id === from) ?? EXAMPLE_FLOWS.find((f) => f.id === from);
