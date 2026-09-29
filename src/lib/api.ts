@@ -1,4 +1,25 @@
-import type { AppData, AssistantAgent, BlockDef, Chat, ChatSummary, DataChange, EnvValues, Flow, RunState, Settings, SkillRef } from "../../shared/types";
+import type { AppData, AssistantAgent, BlockDef, Chat, ChatSummary, DataChange, EnvValues, Flow, RunState, RunSummary, Settings, SkillRef } from "../../shared/types";
+
+export interface TriggerStatusRow {
+  flowId: string;
+  flowName: string;
+  nodeId: string;
+  label: string;
+  type: string;
+  mode?: "webhook" | "poll";
+  nextRun?: number;
+  webhookPath?: string;
+  lastFired?: number;
+  lastPoll?: number;
+  lastError?: string;
+}
+
+export interface TriggersInfo {
+  triggers: TriggerStatusRow[];
+  log: { ts: number; flowId: string; nodeId: string; level: "info" | "warn" | "error"; msg: string }[];
+  webhooks: { enabled: boolean; listening: boolean; port?: number; baseUrl?: string; error?: string };
+  queued: Record<string, number>;
+}
 
 export type LiveChat = Chat & { running: boolean };
 
@@ -40,6 +61,8 @@ export const api = {
   listSkills: () => request<SkillRef[]>("GET", "/skills"),
   uploadSkill: (name: string, files: { path: string; content: string }[]) =>
     request<SkillRef>("POST", "/skills", { name, files }),
+  listRuns: () => request<RunSummary[]>("GET", "/runs"),
+  triggers: () => request<TriggersInfo>("GET", "/triggers"),
   cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
 };
 

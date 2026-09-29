@@ -1,5 +1,14 @@
 import {
   Bot,
+  CalendarClock,
+  Clock,
+  GitFork,
+  Github,
+  Gitlab,
+  MessageSquareReply,
+  Play,
+  Webhook,
+  Zap,
   Box,
   Code,
   FileText,
@@ -35,6 +44,15 @@ export const ICONS: Record<string, LucideIcon> = {
   rocket: Rocket,
   "shield-check": ShieldCheck,
   "test-tube": TestTube,
+  zap: Zap,
+  clock: Clock,
+  "calendar-clock": CalendarClock,
+  play: Play,
+  github: Github,
+  gitlab: Gitlab,
+  webhook: Webhook,
+  "git-fork": GitFork,
+  "message-square-reply": MessageSquareReply,
 };
 
 export function BlockIcon({ name, className }: { name: string; className?: string }) {

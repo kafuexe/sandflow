@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, Pencil, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, Pencil, Radio, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,10 +8,13 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore, type SideTab } from "@/lib/store";
+import { cn } from "@/lib/utils";
 import { resolveNode } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
 import type { BlockDef, ResolvedConfig } from "../../shared/types";
+import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
+import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
 
 function Row({ k, children }: { k: string; children: React.ReactNode }) {
@@ -81,6 +84,49 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
   );
 }
 
+/** Live status of a trigger node: webhook URL, next scheduled run, last poll / error. */
+function TriggerStatusCard({ flowId, nodeId, cfg, active }: { flowId: string; nodeId: string; cfg: ResolvedConfig; active: boolean }) {
+  const info = useStore((s) => s.triggers);
+  const row = info?.triggers.find((t) => t.flowId === flowId && t.nodeId === nodeId);
+  const t = cfg.trigger;
+  if (t.type === "manual") return <div className="text-xs text-muted-foreground">Starts when you press Run.</div>;
+  const mode = t.mode ?? "webhook";
+  const hookUrl =
+    t.type !== "schedule" && mode === "webhook" ? `${info?.webhooks.baseUrl ?? "<webhook listener>"}/hooks/${t.type}/${flowId}/${nodeId}` : undefined;
+  return (
+    <div className="space-y-1.5 rounded-lg border p-2 text-xs">
+      <div className="flex items-center gap-1.5">
+        <Radio className={cn("size-3.5", active ? "text-emerald-400" : "text-muted-foreground")} />
+        {active ? (row ? "Listening" : "Starting…") : "Inactive — turn on Active in the top bar"}
+      </div>
+      {hookUrl && (
+        <div className="space-y-1">
+          <div className="text-muted-foreground">
+            Webhook URL {t.type === "github" ? "(content type: application/json)" : ""}
+          </div>
+          <div className="flex items-center gap-1">
+            <code className="min-w-0 flex-1 truncate rounded bg-muted px-1.5 py-1" title={hookUrl}>
+              {hookUrl}
+            </code>
+            <Button size="icon" variant="ghost" className="size-6" title="Copy" onClick={() => void navigator.clipboard?.writeText(hookUrl)}>
+              <Copy className="size-3" />
+            </Button>
+          </div>
+          {!info?.webhooks.enabled && <div className="text-amber-400">Enable the webhook listener in Settings → Webhooks.</div>}
+          {info?.webhooks.error && <div className="text-red-400">{info.webhooks.error}</div>}
+          <div className="text-muted-foreground">
+            Secret: set <code>{t.secretEnv || "(choose an env var)"}</code> in Inputs and use the same value in {t.type === "github" ? "GitHub" : "GitLab"}.
+          </div>
+        </div>
+      )}
+      {row?.nextRun && <div>Next run: {new Date(row.nextRun).toLocaleString()}</div>}
+      {row?.lastPoll && <div className="text-muted-foreground">Last poll: {new Date(row.lastPoll).toLocaleTimeString()}</div>}
+      {row?.lastFired && <div className="text-muted-foreground">Last fired: {new Date(row.lastFired).toLocaleString()}</div>}
+      {row?.lastError && <div className="text-red-400">{row.lastError}</div>}
+    </div>
+  );
+}
+
 function BlockPanel() {
   const flow = useCurrentFlow();
   const blocks = useStore((s) => s.data?.blocks ?? []);
@@ -130,13 +176,26 @@ function BlockPanel() {
           </div>
         </div>
         {error && <div className="text-xs text-red-400">{error}</div>}
-        {cfg && cfg.kind !== "auto" && (
+        {cfg?.kind === "trigger" && (
+          <div className="space-y-3">
+            <TriggerStatusCard flowId={flow!.id} nodeId={node.id} cfg={cfg} active={!!flow!.active} />
+            <div className="text-xs font-medium">Trigger (this node)</div>
+            <TriggerEditor value={cfg.trigger} allowTypeChange={false} onChange={(trigger) => updateNodeOverrides(node.id, { trigger })} />
+          </div>
+        )}
+        {cfg?.kind === "condition" && (
+          <div className="space-y-2">
+            <div className="text-xs font-medium">Condition (this node)</div>
+            <ConditionEditor value={cfg.condition} onChange={(condition) => updateNodeOverrides(node.id, { condition })} />
+          </div>
+        )}
+        {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && (
           <label className="flex items-center justify-between text-sm">
             Allow questions
             <Switch checked={cfg.allowQuestions} onCheckedChange={(v) => updateNodeOverrides(node.id, { allowQuestions: v })} />
           </label>
         )}
-        {cfg && cfg.kind !== "auto" && (
+        {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && (
           <div className="space-y-1.5">
             <Label htmlFor="node-extra">Extra instructions (this node only)</Label>
             <Textarea

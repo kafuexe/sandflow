@@ -15,7 +15,9 @@ import { ENDPOINT_ENV } from "../../shared/agents";
 import { applyConfig, ENV_NAME_RE, resolveInherited, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
+import { ConditionEditor } from "./ConditionEditor";
 import { SkillsEditor } from "./SkillsEditor";
+import { TriggerEditor } from "./TriggerEditor";
 
 const PROVIDERS: AgentProvider[] = ["claudeCode", "codex", "pi", "opencode", "cursor", "copilot"];
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
@@ -120,6 +122,8 @@ export function BlockEditor() {
   ];
 
   const ownSkills = c.skills ?? [];
+  /** Trigger and If blocks have no agent, skills or configurable inputs/outputs. */
+  const simple = cfg.kind === "trigger" || cfg.kind === "condition";
 
   const addEnv = () => {
     const name = envInput.trim().toUpperCase();
@@ -196,6 +200,8 @@ export function BlockEditor() {
                   <SelectItem value="auto">auto — deterministic logic</SelectItem>
                   <SelectItem value="ai">ai — agent in sandbox</SelectItem>
                   <SelectItem value="manager">manager — AI router</SelectItem>
+                  <SelectItem value="trigger">trigger — starts the flow on an event</SelectItem>
+                  <SelectItem value="condition">if — deterministic true / false</SelectItem>
                 </SelectContent>
               </Select>
             </Field>
@@ -241,7 +247,7 @@ export function BlockEditor() {
             />
           </Field>
 
-          <div className="grid grid-cols-2 gap-4">
+          {!simple && <div className="grid grid-cols-2 gap-4">
             {(["inputs", "outputs"] as const).map((which) => (
               <div key={which} className="space-y-2 rounded-lg border p-3">
                 <div className="text-xs font-medium capitalize">{which}</div>
@@ -266,7 +272,7 @@ export function BlockEditor() {
                 })}
               </div>
             ))}
-          </div>
+          </div>}
 
           <Field label="Env var names (values are set globally in the Inputs panel)">
             <div className="flex flex-wrap items-center gap-1.5">
@@ -308,11 +314,22 @@ export function BlockEditor() {
 
           <Separator />
 
-          <SkillsEditor inherited={inherited.skills} own={ownSkills} onChange={(skills) => setCfg({ skills })} />
+          {!simple && (
+            <>
+              <SkillsEditor inherited={inherited.skills} own={ownSkills} onChange={(skills) => setCfg({ skills })} />
+              <Separator />
+            </>
+          )}
 
-          <Separator />
-
-          {cfg.kind === "auto" ? (
+          {cfg.kind === "trigger" ? (
+            <Field label="Trigger (defaults — each node can override them in its Block tab)" overridden={c.trigger !== undefined} onReset={() => setCfg({ trigger: undefined })} inheritable>
+              <TriggerEditor value={cfg.trigger} onChange={(trigger) => setCfg({ trigger })} />
+            </Field>
+          ) : cfg.kind === "condition" ? (
+            <Field label="Condition (default — each node can override it in its Block tab)" overridden={c.condition !== undefined} onReset={() => setCfg({ condition: undefined })} inheritable>
+              <ConditionEditor value={cfg.condition} onChange={(condition) => setCfg({ condition })} />
+            </Field>
+          ) : cfg.kind === "auto" ? (
             <div className="space-y-4">
               <Field label="Action" overridden={c.autoAction !== undefined} onReset={() => setCfg({ autoAction: undefined })} inheritable>
                 <Select value={cfg.autoAction} onValueChange={(v) => setCfg({ autoAction: v as AutoAction })}>
@@ -323,6 +340,7 @@ export function BlockEditor() {
                     <SelectItem value="create-task">create-task — create branch</SelectItem>
                     <SelectItem value="create-mr">create-mr — push + open MR</SelectItem>
                     <SelectItem value="shell">shell — run a command</SelectItem>
+                    <SelectItem value="post-comment">post-comment — reply on the triggering issue / MR</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
