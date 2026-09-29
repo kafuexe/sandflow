@@ -12,7 +12,7 @@ import { startRun, type NodeRunner, type RunHandle } from "./engine";
 import { createMcp } from "./mcp";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
-import { summarize, type Storage } from "./storage";
+import { settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
 import { startWebhookServer, type WebhookServer } from "./webhooks";
 
@@ -106,7 +106,11 @@ export function createApi(
   }
 
   /** Start a run (manual, or fired by a trigger node). */
-  function launch(flow: Flow, data: AppData, extra: { trigger?: TriggerEvent; startNodeId?: string } = {}): RunHandle {
+  function launch(
+    flow: Flow,
+    data: AppData,
+    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string } = {},
+  ): RunHandle {
     let lastSave = 0;
     const handle = startRun({
       flow,
@@ -229,9 +233,11 @@ export function createApi(
   syncTriggers();
 
   function getRun(id: string): RunState {
-    const r = runs.get(id)?.state ?? storage.loadRun(id);
-    if (!r) throw new HttpError(404, "Run not found");
-    return r;
+    const live = runs.get(id)?.state;
+    if (live) return live;
+    const saved = storage.loadRun(id);
+    if (!saved) throw new HttpError(404, "Run not found");
+    return settleInterrupted(saved);
   }
 
   function getChat(id: string): Chat {
@@ -413,13 +419,15 @@ export function createApi(
       }
 
       case "POST /runs": {
-        const { flowId } = (await readJson<{ flowId?: string }>(req)) ?? {};
+        // `prompt` (optional) is this run's starting prompt; without it the global one is used.
+        const body = (await readJson<{ flowId?: string; prompt?: string }>(req)) ?? {};
+        const prompt = typeof body.prompt === "string" ? body.prompt.trim() : undefined;
         const data = storage.load();
-        const flow = data.flows.find((f) => f.id === flowId);
+        const flow = data.flows.find((f) => f.id === body.flowId);
         if (!flow) throw new HttpError(404, "Flow not found");
-        const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt);
+        const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt);
         if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
-        return send(res, 200, { runId: launch(flow, data).state.id });
+        return send(res, 200, { runId: launch(flow, data, { prompt }).state.id });
       }
 
       case "GET /runs": {

@@ -42,6 +42,22 @@ function upgradeBuiltinSkills(blocks: BlockDef[]): { blocks: BlockDef[]; changed
 
 export type Storage = ReturnType<typeof createStorage>;
 
+/**
+ * A saved run without `finishedAt` was active when Sandflow last stopped (e.g. a crash) — nothing will
+ * ever finish it, so report it as cancelled instead of forever "running".
+ */
+export function settleInterrupted(r: RunState): RunState {
+  if (r.finishedAt) return r;
+  const last = r.logs.at(-1)?.ts ?? r.startedAt;
+  return {
+    ...r,
+    status: "cancelled",
+    finishedAt: last,
+    pendingQuestion: undefined,
+    error: r.error ?? "Interrupted — Sandflow stopped while this run was active",
+  };
+}
+
 export function summarize(r: RunState): RunSummary {
   const t = r.trigger;
   return {
@@ -52,6 +68,8 @@ export function summarize(r: RunState): RunSummary {
     startedAt: r.startedAt,
     finishedAt: r.finishedAt,
     trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
+    prompt: r.prompt,
+    pendingQuestion: r.pendingQuestion,
   };
 }
 
@@ -97,6 +115,7 @@ export function createStorage(dir = path.resolve(".sandflow")) {
     saveEnv: (env: EnvValues) => write("env.json", env),
     saveRun: (run: RunState) => writeAtomic(runFile(run.id), JSON.stringify(run, null, 2)),
     loadRun: (id: string) => (RUN_ID_RE.test(id) ? readJson<RunState>(runFile(id)) : undefined),
+
     /** Most recent saved runs (ids start with an ISO timestamp, so name order = time order). */
     listRuns(limit = 50): RunSummary[] {
       let names: string[];
@@ -111,7 +130,7 @@ export function createStorage(dir = path.resolve(".sandflow")) {
         .slice(0, limit)
         .flatMap((n) => {
           try {
-            return [summarize(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState)];
+            return [summarize(settleInterrupted(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState))];
           } catch {
             return [];
           }

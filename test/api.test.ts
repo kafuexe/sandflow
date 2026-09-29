@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApi } from "../backend/api";
 import { createStorage } from "../backend/storage";
 import type { NodeRunner } from "../backend/engine";
-import type { AppData, RunState } from "../shared/types";
+import type { AppData, RunState, RunSummary } from "../shared/types";
 
 let dir: string;
 const execCalls: string[][] = [];
@@ -127,5 +127,33 @@ describe("api", () => {
     const { value } = await reader.read();
     expect(new TextDecoder().decode(value)).toContain("event: state");
     await reader.cancel();
+  });
+
+  it("starts a run with its own prompt and lists it with the prompt", async () => {
+    await fetch(`${base}/env`, json("PUT", env));
+    await fetch(`${base}/settings`, json("PUT", { startingPrompt: "", sandbox: "none", maxSteps: 40 }));
+    const blank = await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline", prompt: "   " }));
+    expect(((await blank.json()) as { missing: string[] }).missing).toContain("Starting prompt");
+    const r = await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline", prompt: "Add dark mode" }));
+    expect(r.status).toBe(200);
+    const { runId } = (await r.json()) as { runId: string };
+    const list = (await (await fetch(`${base}/runs`)).json()) as RunSummary[];
+    expect(list.find((x) => x.id === runId)).toMatchObject({ prompt: "Add dark mode", flowName: expect.any(String) });
+  });
+
+  it("reports a saved run that never finished as interrupted", async () => {
+    const id = "2026-01-01T00-00-00-000Z-deadbeef";
+    const stale: RunState = {
+      id, flowId: "feature-pipeline", flowName: "Feature pipeline", status: "waiting", startedAt: 1, nodes: {}, logs: [],
+      pendingQuestion: { nodeId: "n-plan", question: "?" },
+    };
+    fs.mkdirSync(path.join(dir, "runs"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "runs", `${id}.json`), JSON.stringify(stale));
+    const got = (await (await fetch(`${base}/runs/${id}`)).json()) as RunState;
+    expect(got).toMatchObject({ status: "cancelled", error: expect.stringMatching(/interrupted/i) });
+    expect(got.finishedAt).toBeTypeOf("number");
+    expect(got.pendingQuestion).toBeUndefined();
+    const list = (await (await fetch(`${base}/runs`)).json()) as RunSummary[];
+    expect(list.find((x) => x.id === id)).toMatchObject({ status: "cancelled" });
   });
 });

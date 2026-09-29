@@ -12,6 +12,7 @@ import type {
   FlowNode,
   LogLine,
   NodeIO,
+  QuestionRecord,
   ResolvedConfig,
   RunState,
   Settings,
@@ -72,6 +73,8 @@ export interface StartRunOptions {
   trigger?: TriggerEvent;
   /** Start only from this (trigger) node — used for triggered runs. Default: every node without inputs. */
   startNodeId?: string;
+  /** Starting prompt for this run only; overrides `settings.startingPrompt`. */
+  prompt?: string;
 }
 
 export interface RunHandle {
@@ -84,7 +87,8 @@ export interface RunHandle {
 const MAX_LOGS = 2000;
 
 export function startRun(opts: StartRunOptions): RunHandle {
-  const { flow, blocks, env, settings, runners } = opts;
+  const { flow, blocks, env, runners } = opts;
+  const settings: Settings = opts.prompt === undefined ? opts.settings : { ...opts.settings, startingPrompt: opts.prompt };
   const run: RunState = {
     id: `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
     flowId: flow.id,
@@ -93,6 +97,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
     startedAt: Date.now(),
     nodes: Object.fromEntries(flow.nodes.map((n) => [n.id, { status: "idle", executions: 0 }])),
     logs: [],
+    questions: [],
+    prompt: settings.startingPrompt,
     trigger: opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
     triggerNodeId: opts.startNodeId,
   };
@@ -122,7 +128,10 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (ctx.abort.signal.aborted) return Promise.reject(new Error("Run cancelled"));
       run.status = "waiting";
       run.nodes[nodeId].status = "waiting";
-      run.pendingQuestion = { nodeId, question };
+      const askedAt = Date.now();
+      const record: QuestionRecord = { nodeId, question, askedAt };
+      run.pendingQuestion = { nodeId, question, askedAt };
+      (run.questions ??= []).push(record);
       ctx.log("info", `Question: ${question}`, nodeId);
       return new Promise<string>((resolve, reject) => {
         pending = {
@@ -131,6 +140,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
             run.status = "running";
             run.nodes[nodeId].status = "running";
             run.pendingQuestion = undefined;
+            record.answer = a;
+            record.answeredAt = Date.now();
             ctx.log("info", `Answer: ${a}`, nodeId);
             resolve(a);
           },
