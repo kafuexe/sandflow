@@ -44,7 +44,8 @@ export const api = {
   saveFlows: (flows: Flow[]) => request("PUT", "/flows", flows),
   saveSettings: (settings: Settings) => request("PUT", "/settings", settings),
   saveEnv: (env: EnvValues) => request("PUT", "/env", env),
-  startRun: (flowId: string) => request<{ runId: string }>("POST", "/runs", { flowId }),
+  /** `prompt` overrides the global starting prompt for this run only. */
+  startRun: (flowId: string, prompt?: string) => request<{ runId: string }>("POST", "/runs", { flowId, prompt }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   sandboxStatus: () =>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { Check, CloudUpload, Loader2, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves } from "lucide-react";
+import { Check, CloudUpload, Loader2, MessagesSquare, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -12,8 +12,11 @@ import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { Palette } from "@/components/Palette";
 import { SidePanel } from "@/components/SidePanel";
 import { Switch } from "@/components/ui/switch";
-import { useCurrentFlow, useStore } from "@/lib/store";
 import { resolveNode } from "../shared/resolve";
+import { AgentScreen } from "@/components/agent/AgentScreen";
+import { useWaitingCount } from "@/lib/agent";
+import { useCurrentFlow, useStore, type View } from "@/lib/store";
+import { cn } from "@/lib/utils";
 
 function SaveIndicator() {
   const status = useStore((s) => s.saveStatus);
@@ -67,10 +70,49 @@ function ActiveSwitch({ flowId }: { flowId: string }) {
   );
 }
 
+function ViewSwitch() {
+  const view = useStore((s) => s.view);
+  const setView = useStore((s) => s.setView);
+  const waiting = useWaitingCount();
+  const tab = (v: View, icon: React.ReactNode, label: string, extra?: React.ReactNode) => (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={view === v}
+      onClick={() => setView(v)}
+      className={cn(
+        "flex h-7 items-center gap-1.5 rounded-md px-2.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/60 [&_svg]:size-4",
+        view === v ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {icon} {label} {extra}
+    </button>
+  );
+  return (
+    <div role="tablist" aria-label="Screen" className="flex items-center gap-0.5 rounded-lg bg-secondary/70 p-0.5">
+      {tab("builder", <Workflow />, "Builder")}
+      {tab(
+        "agent",
+        <MessagesSquare />,
+        "Agent",
+        waiting > 0 && (
+          <span
+            className="flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-400 px-1 text-[11px] font-semibold text-black tabular-nums"
+            title={`${waiting} ${waiting === 1 ? "run needs" : "runs need"} your answer`}
+          >
+            {waiting}
+          </span>
+        ),
+      )}
+    </div>
+  );
+}
+
 function TopBar() {
   const flows = useStore((s) => s.data?.flows ?? []);
   const flow = useCurrentFlow();
   const run = useStore((s) => s.run);
+  const view = useStore((s) => s.view);
   const { setCurrentFlow, renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
   const missing = useMissingInputs();
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -84,8 +126,9 @@ function TopBar() {
       <div className="mr-2 flex items-center gap-1.5 font-semibold">
         <Waves className="size-5 text-amber-400" /> Sandflow
       </div>
+      <ViewSwitch />
 
-      {renaming !== null && flow ? (
+      {view === "agent" ? null : renaming !== null && flow ? (
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -109,21 +152,25 @@ function TopBar() {
           </SelectContent>
         </Select>
       )}
-      <Button size="sm" variant="ghost" title="New pipeline (empty or cloned)" onClick={() => setNewOpen(true)}>
-        <Plus /> New
-      </Button>
-      <Button size="sm" variant="ghost" title="Rename flow" disabled={!flow} onClick={() => setRenaming(flow?.name ?? "")}>
-        <Pencil />
-      </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        title="Delete flow"
-        disabled={!flow}
-        onClick={() => flow && confirm(`Delete flow "${flow.name}"?`) && deleteFlow(flow.id)}
-      >
-        <Trash2 />
-      </Button>
+      {view === "builder" && (
+        <>
+          <Button size="sm" variant="ghost" title="New pipeline (empty or cloned)" onClick={() => setNewOpen(true)}>
+            <Plus /> New
+          </Button>
+          <Button size="sm" variant="ghost" title="Rename flow" disabled={!flow} onClick={() => setRenaming(flow?.name ?? "")}>
+            <Pencil />
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            title="Delete flow"
+            disabled={!flow}
+            onClick={() => flow && confirm(`Delete flow "${flow.name}"?`) && deleteFlow(flow.id)}
+          >
+            <Trash2 />
+          </Button>
+        </>
+      )}
 
       <div className="ml-auto flex items-center gap-3">
         {flow && <ActiveSwitch flowId={flow.id} />}
@@ -131,7 +178,7 @@ function TopBar() {
         <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
           <Settings /> Settings
         </Button>
-        {active ? (
+        {view === "agent" ? null : active ? (
           <Button size="sm" variant="destructive" onClick={() => void cancelRun()}>
             <Square /> Cancel
           </Button>
@@ -160,6 +207,7 @@ export default function App() {
   const data = useStore((s) => s.data);
   const loadError = useStore((s) => s.loadError);
   const editor = useStore((s) => s.editor);
+  const view = useStore((s) => s.view);
 
   useEffect(() => {
     void useStore.getState().load();
@@ -182,17 +230,23 @@ export default function App() {
     <ReactFlowProvider>
       <div className="flex h-full flex-col">
         <TopBar />
-        <div className="flex min-h-0 flex-1">
-          <Palette />
-          <main className="min-w-0 flex-1">
-            <FlowCanvas />
+        {view === "agent" ? (
+          <main className="min-h-0 flex-1">
+            <AgentScreen />
           </main>
-          <SidePanel />
-        </div>
+        ) : (
+          <div className="flex min-h-0 flex-1">
+            <Palette />
+            <main className="min-w-0 flex-1">
+              <FlowCanvas />
+            </main>
+            <SidePanel />
+          </div>
+        )}
       </div>
       {editor && <BlockEditor />}
       <SettingsDialog />
-      <QuestionDialog />
+      {view === "builder" && <QuestionDialog />}
     </ReactFlowProvider>
   );
 }

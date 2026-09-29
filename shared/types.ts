@@ -334,6 +334,16 @@ export interface QaPair {
 export interface PendingQuestion {
   nodeId: string;
   question: string;
+  askedAt?: number;
+}
+
+/** A question an agent asked during the run, and the user's answer once given. */
+export interface QuestionRecord {
+  nodeId: string;
+  question: string;
+  askedAt: number;
+  answer?: string;
+  answeredAt?: number;
 }
 
 export interface LogLine {
@@ -353,6 +363,10 @@ export interface RunState {
   branch?: string;
   nodes: Record<string, NodeRunState>;
   pendingQuestion?: PendingQuestion;
+  /** Every question asked so far, in order. */
+  questions?: QuestionRecord[];
+  /** The starting prompt this run used (a per-run prompt, or the global one). */
+  prompt?: string;
   logs: LogLine[];
   error?: string;
   /** The event that started the run (manual runs get `{ source: "manual" }`). */
@@ -370,4 +384,6 @@ export interface RunSummary {
   startedAt: number;
   finishedAt?: number;
   trigger?: { source: TriggerType; type: string; author?: string; title?: string };
+  prompt?: string;
+  pendingQuestion?: PendingQuestion;
 }
