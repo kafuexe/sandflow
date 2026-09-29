@@ -19,6 +19,8 @@ import { api, ApiError, subscribeRun, type TriggersInfo } from "./api";
 type Section = "blocks" | "flows" | "settings" | "env";
 export type SaveStatus = "saved" | "pending" | "saving" | "error";
 export type SideTab = "inputs" | "block" | "run";
+/** Builder = the flow canvas; Agent = prompt-and-run chat over flows. */
+export type View = "builder" | "agent";
 /** Block editor target: an existing block id, or a new block/template. */
 export type EditorTarget = { id: string } | { create: "block" | "template" } | null;
 
@@ -37,8 +39,12 @@ interface State {
   runError?: string;
   saveStatus: SaveStatus;
   saveError?: string;
+  view: View;
 
   load(): Promise<void>;
+  /** Write pending edits now (the server runs what is saved). Resolves false if saving failed. */
+  flushSaves(): Promise<boolean>;
+  setView(view: View): void;
   // blocks
   upsertBlock(block: BlockDef): void;
   deleteBlock(id: string): void;
@@ -141,6 +147,7 @@ export const useStore = create<State>((set, get) => {
     sideTab: "inputs",
     saveStatus: "saved",
     runs: [],
+    view: "builder",
 
     async load() {
       try {
@@ -149,6 +156,15 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         set({ loadError: (e as Error).message });
       }
+    },
+
+    async flushSaves() {
+      clearTimeout(timer);
+      await flush();
+      return get().saveStatus !== "error";
+    },
+    setView(view) {
+      set({ view });
     },
 
     upsertBlock(block) {
@@ -306,9 +322,7 @@ export const useStore = create<State>((set, get) => {
     async startRun() {
       const flowId = get().currentFlowId;
       if (!flowId) return;
-      clearTimeout(timer);
-      await flush(); // the server runs what is saved
-      if (get().saveStatus === "error") {
+      if (!(await get().flushSaves())) {
         set({ runError: `Can't run: ${get().saveError}` });
         return;
       }
