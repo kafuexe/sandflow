@@ -1,7 +1,7 @@
 {
   "name": "sandflow",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.0.1",
   "type": "module",
   "description": "Visual flow builder for sandboxed coding agents (auto + AI blocks) powered by @ai-hero/sandcastle",
   "author": "Ofek Tal",
