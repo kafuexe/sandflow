@@ -1,7 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { CORE_BLOCKS } from "../shared/core";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
+import { BASE_PACK } from "../shared/packs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
+import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
 
 export const DEFAULT_SETTINGS: Settings = { startingPrompt: "", sandbox: "docker", maxSteps: 40 };
 
@@ -40,6 +43,37 @@ function upgradeBuiltinSkills(blocks: BlockDef[]): { blocks: BlockDef[]; changed
   return { blocks: out, changed };
 }
 
+/** JSON with object keys sorted, so two equal definitions compare equal whatever order their keys were written in. */
+function stableJson(v: unknown): string {
+  return JSON.stringify(v, (_k, x) =>
+    x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, (x as Record<string, unknown>)[k]])) : x,
+  );
+}
+
+/**
+ * Before packs, the built-in blocks were copied into library.json and flows referenced them by short id
+ * (`plan`). They now live in the base pack (`base/plan`): unchanged copies are dropped and every reference
+ * re-pointed; a built-in you edited stays as one of your own blocks (same id, so your flows keep using it).
+ */
+export function migrateLegacy(blocks: BlockDef[], flows: Flow[]): { blocks: BlockDef[]; flows: Flow[]; changed: boolean } {
+  if (!blocks.some((b) => b.builtin)) return { blocks, flows, changed: false };
+  const legacy = new Map(BUILTIN_BLOCKS.map((b) => [b.id, b]));
+  const shape = (b: BlockDef) => stableJson({ name: b.name, isTemplate: b.isTemplate, extends: b.extends ?? null, config: b.config });
+  const idMap = new Map<string, string>();
+  const kept: BlockDef[] = [];
+  for (const b of upgradeBuiltinSkills(blocks).blocks) {
+    const original = b.builtin ? legacy.get(b.id) : undefined;
+    if (original && shape(b) === shape(original)) idMap.set(b.id, `${BASE_PACK}/${b.id}`);
+    else kept.push(b.builtin ? (({ builtin: _drop, ...rest }) => rest)(b) : b);
+  }
+  const remap = (id: string) => idMap.get(id) ?? id;
+  return {
+    blocks: kept.map((b) => (b.extends ? { ...b, extends: remap(b.extends) } : b)),
+    flows: flows.map((f) => ({ ...f, nodes: f.nodes.map((n) => ({ ...n, data: { ...n.data, blockId: remap(n.data.blockId) } })) })),
+    changed: true,
+  };
+}
+
 export type Storage = ReturnType<typeof createStorage>;
 
 /**
@@ -73,8 +107,23 @@ export function summarize(r: RunState): RunSummary {
   };
 }
 
-export function createStorage(dir = path.resolve(".sandflow")) {
+export interface StorageOptions extends PackStoreOptions {
+  /** Use this pack store instead of creating one over `<dir>/packs`. */
+  packs?: PackStore;
+}
+
+export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOptions = {}) {
   const file = (name: string) => path.join(dir, name);
+  // Private pack repos: tokens from the Inputs tab's env values, else the process environment.
+  const tokens = () => {
+    const env = readJson<EnvValues>(file("env.json")) ?? {};
+    return {
+      github: env.GITHUB_TOKEN || env.GH_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN,
+      gitlab: env.GITLAB_TOKEN || process.env.GITLAB_TOKEN,
+    };
+  };
+  const packs = opts.packs ?? createPackStore(dir, { tokens, ...opts });
+  let baseChecked = false;
   const write = (name: string, value: unknown) => writeAtomic(file(name), JSON.stringify(value, null, 2));
   const runFile = (id: string) => {
     if (!RUN_ID_RE.test(id)) throw new Error("Invalid run id");
@@ -83,22 +132,32 @@ export function createStorage(dir = path.resolve(".sandflow")) {
 
   return {
     dir,
+    packs,
+    /** Your own blocks/flows merged with Sandflow's core blocks and every installed pack's blocks/flows. */
     load(): AppData {
-      let blocks = readJson<BlockDef[]>(file("library.json"));
-      if (!blocks) {
-        blocks = BUILTIN_BLOCKS;
-        write("library.json", blocks);
-      } else {
-        const missing = BUILTIN_BLOCKS.filter((b) => !blocks!.some((x) => x.id === b.id));
-        const upgraded = upgradeBuiltinSkills(blocks);
-        if (missing.length || upgraded.changed) {
-          blocks = [...upgraded.blocks, ...missing];
-          write("library.json", blocks);
+      if (!baseChecked) {
+        // First start: the base pack shipped with the app, so there's always something to build with.
+        baseChecked = true;
+        try {
+          packs.ensureBundledBase();
+        } catch (e) {
+          console.warn(`[packs] couldn't install the shipped base pack: ${(e as Error).message}`);
         }
       }
+      let blocks = readJson<BlockDef[]>(file("library.json"));
       let flows = readJson<Flow[]>(file("flows.json"));
+      if (!blocks) {
+        blocks = [];
+        write("library.json", blocks);
+      }
       if (!flows) {
-        flows = [DEFAULT_FLOW];
+        flows = [qualifyFlow(DEFAULT_FLOW, BASE_PACK, false)];
+        write("flows.json", flows);
+      }
+      const migrated = migrateLegacy(blocks, flows);
+      if (migrated.changed) {
+        ({ blocks, flows } = migrated);
+        write("library.json", blocks);
         write("flows.json", flows);
       }
       let settings = readJson<Settings>(file("settings.json"));
@@ -107,10 +166,19 @@ export function createStorage(dir = path.resolve(".sandflow")) {
         write("settings.json", settings);
       }
       const env = readJson<EnvValues>(file("env.json")) ?? {};
-      return { blocks, flows, settings: { ...DEFAULT_SETTINGS, ...settings }, env };
+      const p = packs.load();
+      return {
+        blocks: [...CORE_BLOCKS, ...p.blocks, ...blocks.filter((b) => !b.pack)],
+        flows: [...flows.filter((f) => !f.pack), ...p.flows],
+        settings: { ...DEFAULT_SETTINGS, ...settings },
+        env,
+        packs: p.infos,
+      };
     },
-    saveBlocks: (blocks: BlockDef[]) => write("library.json", blocks),
-    saveFlows: (flows: Flow[]) => write("flows.json", flows),
+    /** Saves your own blocks; pack and core blocks in the list are ignored (they're read-only). */
+    saveBlocks: (blocks: BlockDef[]) => write("library.json", blocks.filter((b) => !b.pack)),
+    /** Saves your own flows; pack flows in the list are ignored. */
+    saveFlows: (flows: Flow[]) => write("flows.json", flows.filter((f) => !f.pack)),
     saveSettings: (settings: Settings) => write("settings.json", settings),
     saveEnv: (env: EnvValues) => write("env.json", env),
     saveRun: (run: RunState) => writeAtomic(runFile(run.id), JSON.stringify(run, null, 2)),

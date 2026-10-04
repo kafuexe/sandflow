@@ -16,7 +16,7 @@ export function useMissingInputs(): string[] {
   const flow = useCurrentFlow();
   const data = useStore((s) => s.data);
   return useMemo(
-    () => (flow && data ? missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt) : []),
+    () => (flow && data ? missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt, data.flows) : []),
     [flow, data],
   );
 }
@@ -44,7 +44,7 @@ export function InputsPanel() {
   const [showOther, setShowOther] = useState(false);
   const [newName, setNewName] = useState("");
 
-  const req = useMemo(() => (flow && data ? flowRequirements(flow, data.blocks) : undefined), [flow, data]);
+  const req = useMemo(() => (flow && data ? flowRequirements(flow, data.blocks, data.flows) : undefined), [flow, data]);
   if (!flow || !data || !req) return null;
 
   const used = new Set(req.env.map((e) => e.name));

@@ -1,0 +1,19 @@
+{
+  "id": "schedule-trigger",
+  "name": "Schedule",
+  "isTemplate": false,
+  "extends": "tpl-trigger",
+  "config": {
+    "description": "Runs the flow on a timer — once, every N minutes/hours/days/…, or a cron expression.",
+    "icon": "clock",
+    "trigger": {
+      "type": "schedule",
+      "schedule": {
+        "kind": "interval",
+        "every": 1,
+        "unit": "days",
+        "start": "2026-01-05T09:00"
+      }
+    }
+  }
+}

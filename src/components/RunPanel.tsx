@@ -6,7 +6,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { nodeLabel } from "../../shared/resolve";
+import { runNodeLabel } from "../../shared/subflow";
 import type { NodeRunStatus, RunStatus, TriggerEvent } from "../../shared/types";
 
 const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
@@ -58,6 +58,7 @@ export function AnswerBox({ autoFocus }: { autoFocus?: boolean }) {
 export function RunPanel() {
   const run = useStore((s) => s.run);
   const blocks = useStore((s) => s.data?.blocks ?? []);
+  const flows = useStore((s) => s.data?.flows ?? []);
   const runError = useStore((s) => s.runError);
   const flow = useCurrentFlow();
   const [picked, setPicked] = useState<string | null>(null);
@@ -81,11 +82,9 @@ export function RunPanel() {
     );
   }
 
-  const nodes = flow?.id === run.flowId ? flow.nodes : [];
-  const label = (id: string) => {
-    const n = nodes.find((x) => x.id === id);
-    return n ? nodeLabel(n, blocks) : id;
-  };
+  // Nodes inside subflows are keyed `<subflow node>/<node>`.
+  const label = (id: string) => runNodeLabel(id, flow?.id === run.flowId ? flow : flows.find((f) => f.id === run.flowId), flows, blocks);
+  const prefixOf = (id: string) => id.slice(0, id.lastIndexOf("/") + 1);
   const executed = Object.entries(run.nodes).filter(([, s]) => s.executions > 0 || s.status !== "idle");
   const detail = picked ? run.nodes[picked] : undefined;
 
@@ -137,7 +136,8 @@ export function RunPanel() {
             >
               {STATUS_ICON[s.status]}
               <span className="flex-1 truncate">{label(id)}</span>
-              {s.routedTo && <span className="truncate text-[10px] text-emerald-400">→ {label(s.routedTo)}</span>}
+              {s.routedTo && <span className="truncate text-[10px] text-emerald-400">→ {label(prefixOf(id) + s.routedTo)}</span>}
+              {s.exit && <span className="truncate text-[10px] text-violet-300">→ {s.exit}</span>}
               {s.executions > 1 && <Badge variant="secondary" className="px-1 py-0 text-[10px]">×{s.executions}</Badge>}
             </button>
           ))}

@@ -2,6 +2,7 @@
 // batched edit operations and auto-layout. Agents never send coordinates or edge ids.
 
 import { nodeLabel, resolveNode } from "./resolve";
+import { exitName, isExitHandle, resolveNodeIn, subflowCycle } from "./subflow";
 import type { BlockConfig, BlockDef, EdgeInputKind, Flow, FlowEdge, FlowNode, ResolvedConfig, SourceHandle } from "./types";
 
 export const NODE_ID_RE = /^[A-Za-z][\w-]{0,63}$/;
@@ -24,14 +25,15 @@ export const formatEdge = (e: EdgeRef) => `${e.source}.${e.sourceHandle} -> ${e.
 /**
  * Parse `plan.artifact -> implement.steer`. Handles are optional and default to `artifact`
  * (`plan -> implement` = artifact to artifact). Condition branches: `check.true -> fix`.
+ * Named exits of a Script / subflow: `review.exit:approved -> merge`.
  */
 export function parseEdge(ref: string): EdgeRef {
-  const m = /^\s*([\w-]+)(?:\.([\w]+))?\s*-+>\s*([\w-]+)(?:\.([\w]+))?\s*$/.exec(ref);
+  const m = /^\s*([\w-]+)(?:\.(exit:[\w-]+|[\w]+))?\s*-+>\s*([\w-]+)(?:\.([\w]+))?\s*$/.exec(ref);
   if (!m) throw new Error(`Can't read edge "${ref}". Write it as "source.handle -> target.handle", e.g. "plan.artifact -> implement.artifact"`);
   const sourceHandle = (m[2] ?? "artifact") as SourceHandle;
   const targetHandle = (m[4] ?? "artifact") as EdgeInputKind;
-  if (!SOURCE_HANDLES.includes(sourceHandle)) {
-    throw new Error(`"${ref}": "${sourceHandle}" isn't an output handle. Use artifact, steer, or true/false out of an If block`);
+  if (!SOURCE_HANDLES.includes(sourceHandle) && !isExitHandle(sourceHandle)) {
+    throw new Error(`"${ref}": "${sourceHandle}" isn't an output handle. Use artifact, steer, true/false out of an If block, or exit:<name>`);
   }
   if (!TARGET_HANDLES.includes(targetHandle)) {
     throw new Error(`"${ref}": "${targetHandle}" isn't an input handle. Use artifact or steer`);
@@ -39,36 +41,44 @@ export function parseEdge(ref: string): EdgeRef {
   return { source: m[1], sourceHandle, target: m[3], targetHandle };
 }
 
-function tryResolve(node: FlowNode, blocks: BlockDef[]): ResolvedConfig | undefined {
+function tryResolve(node: FlowNode, blocks: BlockDef[], flows: Flow[] = []): (ResolvedConfig & { exits: string[] }) | undefined {
   try {
-    return resolveNode(node, blocks);
+    return resolveNodeIn(node, blocks, flows);
   } catch {
     return undefined;
   }
 }
 
-/** Why this edge can't exist in `flow` (undefined = fine). */
-export function edgeProblem(flow: Flow, blocks: BlockDef[], e: EdgeRef): string | undefined {
+/** Why this edge can't exist in `flow` (undefined = fine). Pass `flows` so subflow exits/inputs are known. */
+export function edgeProblem(flow: Flow, blocks: BlockDef[], e: EdgeRef, flows: Flow[] = []): string | undefined {
   const src = flow.nodes.find((n) => n.id === e.source);
   const dst = flow.nodes.find((n) => n.id === e.target);
   if (!src) return `No node "${e.source}" in this flow`;
   if (!dst) return `No node "${e.target}" in this flow`;
   if (e.source === e.target) return `A node can't connect to itself ("${e.source}")`;
-  const s = tryResolve(src, blocks);
-  const t = tryResolve(dst, blocks);
+  const s = tryResolve(src, blocks, flows);
+  const t = tryResolve(dst, blocks, flows);
   if (!s) return `Node "${e.source}" uses unknown block "${src.data.blockId}"`;
   if (!t) return `Node "${e.target}" uses unknown block "${dst.data.blockId}"`;
+  const exitList = s.exits.map((x) => `${e.source}.exit:${x}`).join(", ");
   if (s.kind === "condition") {
     if (e.sourceHandle !== "true" && e.sourceHandle !== "false") {
       return `"${e.source}" is an If block — connect from "${e.source}.true" or "${e.source}.false"`;
     }
   } else if (e.sourceHandle === "true" || e.sourceHandle === "false") {
     return `"${e.source}" isn't an If block, so it has no ${e.sourceHandle} output`;
+  } else if (isExitHandle(e.sourceHandle)) {
+    if (!s.exits.includes(exitName(e.sourceHandle))) {
+      return `"${e.source}" has no exit "${exitName(e.sourceHandle)}". Exits: ${exitList || "none"}`;
+    }
+  } else if (s.exits.length) {
+    return `"${e.source}" leaves through its named exits — connect from one of: ${exitList}`;
   } else if (!s.outputs[e.sourceHandle]) {
     const valid = (["artifact", "steer"] as const).filter((k) => s.outputs[k]);
     return `"${e.source}" doesn't output ${e.sourceHandle}. Valid: ${valid.join(", ") || "none (it has no outputs)"}`;
   }
   if (t.kind === "trigger") return `"${e.target}" is a trigger — triggers start a flow and take no inputs`;
+  if (t.kind === "flow-input") return `"${e.target}" is a Flow input — it starts the flow and takes no edge inputs`;
   if (!t.inputs[e.targetHandle]) {
     const valid = (["artifact", "steer"] as const).filter((k) => t.inputs[k]);
     return `"${e.target}" doesn't accept ${e.targetHandle}. Valid: ${valid.join(", ") || "none (it takes no edge inputs)"}`;
@@ -82,7 +92,7 @@ export interface FlowReport {
 }
 
 /** Everything wrong with a flow. Errors make it unrunnable; warnings are likely mistakes. */
-export function validateFlow(flow: Flow, blocks: BlockDef[]): FlowReport {
+export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = []): FlowReport {
   const errors: string[] = [];
   const warnings: string[] = [];
   const ids = new Set<string>();
@@ -93,7 +103,7 @@ export function validateFlow(flow: Flow, blocks: BlockDef[]): FlowReport {
   }
   const seen = new Set<string>();
   for (const e of flow.edges) {
-    const problem = edgeProblem(flow, blocks, e);
+    const problem = edgeProblem(flow, blocks, e, flows);
     if (problem) errors.push(`${formatEdge(e)}: ${problem}`);
     const key = formatEdge(e);
     if (seen.has(key)) warnings.push(`Duplicate edge ${key}`);
@@ -105,9 +115,16 @@ export function validateFlow(flow: Flow, blocks: BlockDef[]): FlowReport {
   if (!flow.nodes.some((n) => !incoming.has(n.id))) {
     errors.push("No start node: every node has an incoming edge, so nothing can run first");
   }
+  const cycle = subflowCycle(flow.id, flows.some((f) => f.id === flow.id) ? flows.map((f) => (f.id === flow.id ? flow : f)) : [...flows, flow], blocks);
+  if (cycle) errors.push(`Subflow loop: ${cycle} — a flow can't contain itself`);
   for (const n of flow.nodes) {
-    const cfg = tryResolve(n, blocks);
+    const cfg = tryResolve(n, blocks, flows);
     if (!cfg) continue;
+    if (cfg.kind === "subflow") {
+      if (!cfg.subflow.flowId) errors.push(`Subflow "${n.id}" doesn't say which flow to run (set overrides.subflow.flowId)`);
+      else if (!flows.some((f) => f.id === cfg.subflow.flowId)) errors.push(`Subflow "${n.id}" runs unknown flow "${cfg.subflow.flowId}"`);
+      else if (!cfg.exits.length) warnings.push(`Subflow "${n.id}": its flow has no Flow output block, so nothing continues after it`);
+    }
     const out = flow.edges.filter((e) => e.source === n.id);
     const targets = new Set(out.map((e) => e.target));
     if (cfg.kind === "manager" && targets.size < 2) {
@@ -139,7 +156,7 @@ export interface OpsResult {
 }
 
 /** Apply ops in order to a copy of `flow`. Throws with the failing op's index on the first bad op. */
-export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[]): OpsResult {
+export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: Flow[] = []): OpsResult {
   let f: Flow = structuredClone(flow);
   const changes: string[] = [];
   const touched = new Set<string>();
@@ -211,7 +228,7 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[]): OpsResu
         }
         case "connect": {
           const e = parseEdge(op.edge);
-          const problem = edgeProblem(f, blocks, e);
+          const problem = edgeProblem(f, blocks, e, flows);
           if (problem) throw new Error(problem);
           const id = edgeId(e);
           if (!f.edges.some((x) => x.id === id)) {
@@ -330,15 +347,14 @@ function placeNew(flow: Flow, added: Set<string>): Flow {
 // ---------- descriptions for agents ----------
 
 /** Compact text view of a flow: nodes with their block and wired handles, then edges. */
-export function describeFlow(flow: Flow, blocks: BlockDef[]): string {
-  const lines = [`Flow "${flow.name}" (id: ${flow.id})${flow.active ? " — triggers active" : ""}`];
+export function describeFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = []): string {
+  const lines = [`Flow "${flow.name}" (id: ${flow.id})${flow.active ? " — triggers active" : ""}${flow.pack ? ` — from pack ${flow.pack}, read-only` : ""}`];
   if (!flow.nodes.length) return `${lines[0]}\n(empty — no nodes yet)`;
   lines.push("", "Nodes:");
   for (const n of flow.nodes) {
-    const cfg = tryResolve(n, blocks);
-    const io = cfg
-      ? ` [${cfg.kind}; in: ${ioList(cfg.inputs) || "-"}; out: ${cfg.kind === "condition" ? "true, false" : ioList(cfg.outputs) || "-"}]`
-      : " [unknown block]";
+    const cfg = tryResolve(n, blocks, flows);
+    const outs = cfg?.kind === "condition" ? "true, false" : cfg?.exits.length ? cfg.exits.map((x) => `exit:${x}`).join(", ") : cfg ? ioList(cfg.outputs) : "";
+    const io = cfg ? ` [${cfg.kind}; in: ${ioList(cfg.inputs) || "-"}; out: ${outs || "-"}]` : " [unknown block]";
     const ov = n.data.overrides && Object.keys(n.data.overrides).length ? ` overrides: ${JSON.stringify(n.data.overrides)}` : "";
     lines.push(`- ${n.id}: ${nodeLabel(n, blocks)} (block ${n.data.blockId})${io}${ov}`);
   }
@@ -365,9 +381,13 @@ export function describeBlocks(blocks: BlockDef[]): string {
       } catch {
         return `- ${b.id}: ${b.name} (broken template chain)`;
       }
-      const out = cfg.kind === "condition" ? "true, false" : ioList(cfg.outputs) || "-";
+      const out =
+        cfg.kind === "condition" ? "true, false"
+        : cfg.kind === "subflow" ? "exit:<name> per Flow output of the flow it runs (set overrides.subflow.flowId)"
+        : cfg.kind === "script" && cfg.script.exits.length ? cfg.script.exits.map((x) => `exit:${x}`).join(", ")
+        : ioList(cfg.outputs) || "-";
       const env = cfg.env.length ? `; env: ${cfg.env.join(", ")}` : "";
-      const tpl = b.isTemplate ? " (template)" : "";
+      const tpl = `${b.isTemplate ? " (template)" : ""}${b.pack ? ` (pack ${b.pack})` : ""}`;
       return `- ${b.id}: ${b.name}${tpl} [${cfg.kind}${cfg.kind === "auto" ? `/${cfg.autoAction}` : ""}; in: ${ioList(cfg.inputs) || "-"}; out: ${out}${env}] ${cfg.description}`;
     })
     .join("\n");

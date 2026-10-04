@@ -34,8 +34,8 @@ export function NewRun() {
   }, [flow, data.blocks]);
 
   // The prompt is typed here, so only env vars can be missing.
-  const missing = flow ? missingInputs(flow, data.blocks, data.env, "-") : [];
-  const readsPrompt = flow ? flowRequirements(flow, data.blocks).startingPromptNodes.length > 0 : false;
+  const missing = flow ? missingInputs(flow, data.blocks, data.env, "-", data.flows) : [];
+  const readsPrompt = flow ? flowRequirements(flow, data.blocks, data.flows).startingPromptNodes.length > 0 : false;
   const canStart = !!flow && flow.nodes.length > 0 && !!draft.trim() && !missing.length && !starting;
 
   const openInputs = () => {

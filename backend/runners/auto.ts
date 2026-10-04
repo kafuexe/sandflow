@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { nodeLabel } from "../../shared/resolve";
 import type { FlowNode, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
+import { codeOwner, trustedOnHost } from "./trust";
 
 const execFileP = promisify(execFile);
 
@@ -157,6 +158,11 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
     case "shell": {
       const cmd = cfg.shellCommand.trim();
       if (!cmd) throw new Error("Shell block has no command");
+      // Shell commands run on this machine: one that comes from a pack needs that pack to be trusted.
+      const owner = codeOwner(ctx, node, (c) => c.shellCommand);
+      if (!trustedOnHost(ctx, owner)) {
+        throw new Error(`This command comes from pack "${owner}", which isn't allowed to run code on this machine (Packs → ${owner}). Command: ${cmd}`);
+      }
       const stdout = await new Promise<string>((resolve, reject) => {
         const child = spawn(cmd, {
           shell: true,

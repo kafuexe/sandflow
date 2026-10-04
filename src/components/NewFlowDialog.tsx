@@ -5,12 +5,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useStore } from "@/lib/store";
-import { EXAMPLE_FLOWS } from "../../shared/library";
 
 const EMPTY = "__empty__";
 
 export function NewFlowDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
-  const flows = useStore((s) => s.data?.flows ?? []);
+  const allFlows = useStore((s) => s.data?.flows ?? []);
+  const packs = useStore((s) => s.data?.packs ?? []);
+  const flows = allFlows.filter((f) => !f.pack);
+  const packFlows = allFlows.filter((f) => f.pack);
   const currentFlowId = useStore((s) => s.currentFlowId);
   const createFlow = useStore((s) => s.createFlow);
   const [from, setFrom] = useState(EMPTY);
@@ -27,11 +29,11 @@ export function NewFlowDialog({ open, onOpenChange }: { open: boolean; onOpenCha
   useEffect(() => {
     if (nameTouched) return;
     const own = flows.find((f) => f.id === from);
-    const example = EXAMPLE_FLOWS.find((f) => f.id === from);
+    const example = packFlows.find((f) => f.id === from);
     setName(own ? `${own.name} (copy)` : example ? example.name : `Flow ${flows.length + 1}`);
-  }, [from, flows, nameTouched]);
+  }, [from, allFlows, nameTouched]);
 
-  const source = flows.find((f) => f.id === from) ?? EXAMPLE_FLOWS.find((f) => f.id === from);
+  const source = allFlows.find((f) => f.id === from);
   const submit = () => {
     if (!name.trim()) return;
     createFlow(name.trim(), source?.id);
@@ -66,10 +68,10 @@ export function NewFlowDialog({ open, onOpenChange }: { open: boolean; onOpenCha
                     Clone “{f.name}” <span className="text-muted-foreground">({f.nodes.length} blocks)</span>
                   </SelectItem>
                 ))}
-                <SelectSeparator />
-                {EXAMPLE_FLOWS.map((f) => (
+                {packFlows.length > 0 && <SelectSeparator />}
+                {packFlows.map((f) => (
                   <SelectItem key={f.id} value={f.id}>
-                    Example: {f.name}
+                    From {packs.find((p) => p.id === f.pack)?.name ?? f.pack}: {f.name}
                   </SelectItem>
                 ))}
               </SelectContent>

@@ -1,0 +1,133 @@
+{
+  "id": "review-until-approved",
+  "name": "Review until approved",
+  "description": "A subflow: reviews the branch and fixes review comments until the review approves, then leaves through the `approved` exit.",
+  "nodes": [
+    {
+      "id": "in",
+      "type": "block",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "blockId": "sandflow/flow-input",
+        "label": "Work to review"
+      }
+    },
+    {
+      "id": "cr",
+      "type": "block",
+      "position": {
+        "x": 320,
+        "y": 0
+      },
+      "data": {
+        "blockId": "cr"
+      }
+    },
+    {
+      "id": "check",
+      "type": "block",
+      "position": {
+        "x": 640,
+        "y": 0
+      },
+      "data": {
+        "blockId": "if",
+        "label": "Approved?",
+        "overrides": {
+          "condition": {
+            "match": "all",
+            "rules": [
+              {
+                "field": "text",
+                "op": "contains",
+                "value": "VERDICT: APPROVED"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "fix",
+      "type": "block",
+      "position": {
+        "x": 640,
+        "y": 260
+      },
+      "data": {
+        "blockId": "cr-fix"
+      }
+    },
+    {
+      "id": "approved",
+      "type": "block",
+      "position": {
+        "x": 960,
+        "y": 0
+      },
+      "data": {
+        "blockId": "sandflow/flow-output",
+        "label": "Approved",
+        "overrides": {
+          "flowOutput": {
+            "name": "approved"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-in-artifact-cr-artifact",
+      "source": "in",
+      "target": "cr",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-cr-artifact-check-artifact",
+      "source": "cr",
+      "target": "check",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-cr-steer-check-steer",
+      "source": "cr",
+      "target": "check",
+      "sourceHandle": "steer",
+      "targetHandle": "steer"
+    },
+    {
+      "id": "e-check-true-approved-artifact",
+      "source": "check",
+      "target": "approved",
+      "sourceHandle": "true",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-check-false-fix-artifact",
+      "source": "check",
+      "target": "fix",
+      "sourceHandle": "false",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-check-false-fix-steer",
+      "source": "check",
+      "target": "fix",
+      "sourceHandle": "false",
+      "targetHandle": "steer"
+    },
+    {
+      "id": "e-fix-artifact-cr-artifact",
+      "source": "fix",
+      "target": "cr",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    }
+  ]
+}

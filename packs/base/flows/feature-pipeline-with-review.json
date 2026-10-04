@@ -1,0 +1,123 @@
+{
+  "id": "feature-pipeline-with-review",
+  "name": "Feature pipeline (review subflow)",
+  "description": "The feature pipeline with the review loop as a subflow: Create task → Plan → Implement → [Review until approved] → Changed files → Create MR.",
+  "nodes": [
+    {
+      "id": "create-task",
+      "type": "block",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "blockId": "create-task"
+      }
+    },
+    {
+      "id": "plan",
+      "type": "block",
+      "position": {
+        "x": 320,
+        "y": 0
+      },
+      "data": {
+        "blockId": "plan"
+      }
+    },
+    {
+      "id": "implement",
+      "type": "block",
+      "position": {
+        "x": 640,
+        "y": 0
+      },
+      "data": {
+        "blockId": "implement"
+      }
+    },
+    {
+      "id": "review",
+      "type": "block",
+      "position": {
+        "x": 960,
+        "y": 0
+      },
+      "data": {
+        "blockId": "sandflow/subflow",
+        "label": "Review until approved",
+        "overrides": {
+          "subflow": {
+            "flowId": "review-until-approved"
+          }
+        }
+      }
+    },
+    {
+      "id": "changes",
+      "type": "block",
+      "position": {
+        "x": 1280,
+        "y": 0
+      },
+      "data": {
+        "blockId": "changed-files"
+      }
+    },
+    {
+      "id": "create-mr",
+      "type": "block",
+      "position": {
+        "x": 1600,
+        "y": 0
+      },
+      "data": {
+        "blockId": "create-mr"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-create-task-artifact-plan-artifact",
+      "source": "create-task",
+      "target": "plan",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-plan-artifact-implement-artifact",
+      "source": "plan",
+      "target": "implement",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-plan-steer-implement-steer",
+      "source": "plan",
+      "target": "implement",
+      "sourceHandle": "steer",
+      "targetHandle": "steer"
+    },
+    {
+      "id": "e-implement-artifact-review-artifact",
+      "source": "implement",
+      "target": "review",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-review-exit:approved-changes-artifact",
+      "source": "review",
+      "target": "changes",
+      "sourceHandle": "exit:approved",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-changes-artifact-create-mr-artifact",
+      "source": "changes",
+      "target": "create-mr",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    }
+  ]
+}

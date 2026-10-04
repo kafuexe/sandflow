@@ -1,0 +1,21 @@
+{
+  "id": "gitlab-trigger",
+  "name": "GitLab trigger",
+  "isTemplate": false,
+  "extends": "tpl-trigger",
+  "config": {
+    "description": "Fires on GitLab events (issues, notes, MRs, pushes) via webhook or polling (glab).",
+    "icon": "gitlab",
+    "color": "#f97316",
+    "trigger": {
+      "type": "gitlab",
+      "mode": "webhook",
+      "events": [
+        "issue.opened",
+        "merge_request.comment"
+      ],
+      "pollSeconds": 60,
+      "secretEnv": "GITLAB_WEBHOOK_SECRET"
+    }
+  }
+}

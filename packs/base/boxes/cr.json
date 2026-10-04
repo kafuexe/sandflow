@@ -1,0 +1,26 @@
+{
+  "id": "cr",
+  "name": "CR",
+  "isTemplate": false,
+  "extends": "tpl-reviewer",
+  "config": {
+    "description": "Reviews the branch diff against the plan and gives a verdict.",
+    "icon": "search-check",
+    "env": [
+      "BASE_BRANCH"
+    ],
+    "extraInstructions": "Review the diff of this branch against the base branch (`git fetch origin` then `git diff origin/$BASE_BRANCH...HEAD`, or `git diff $BASE_BRANCH...HEAD` if there is no remote). Compare it with the plan/summary in the input artifact. The artifact is your review and MUST end with a line that is exactly `VERDICT: APPROVED` or `VERDICT: CHANGES_REQUESTED`. The steer is a concrete, numbered list of fixes (empty if approved).",
+    "skills": [
+      {
+        "name": "code-review",
+        "source": "mattpocock/skills",
+        "file": {
+          "store": "pack",
+          "dir": "mattpocock-skills/code-review"
+        },
+        "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering/code-review",
+        "why": "Matt Pocock's code-review checklist"
+      }
+    ]
+  }
+}

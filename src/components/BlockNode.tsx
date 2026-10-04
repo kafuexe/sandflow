@@ -7,20 +7,37 @@ import { BlockIcon } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { describeCondition } from "../../shared/conditions";
-import { resolveNode } from "../../shared/resolve";
 import { describeSchedule } from "../../shared/schedule";
 import { skillKey } from "../../shared/skills";
-import type { FlowNodeData, NodeRunStatus, ResolvedConfig } from "../../shared/types";
+import { exitHandle, resolveNodeIn } from "../../shared/subflow";
+import type { Flow, FlowNodeData, NodeRunStatus, ResolvedConfig } from "../../shared/types";
 
 type BlockNodeType = Node<FlowNodeData, "block">;
 
-const KIND_LABEL: Record<ResolvedConfig["kind"], string> = { auto: "AUTO", ai: "AI", manager: "MANAGER", trigger: "TRIGGER", condition: "IF" };
+const KIND_LABEL: Record<ResolvedConfig["kind"], string> = {
+  auto: "AUTO",
+  ai: "AI",
+  manager: "MANAGER",
+  trigger: "TRIGGER",
+  condition: "IF",
+  script: "SCRIPT",
+  subflow: "SUBFLOW",
+  "flow-input": "INPUT",
+  "flow-output": "OUTPUT",
+};
 
 const TRIGGER_WHAT: Record<string, string> = { manual: "Run button", schedule: "", github: "GitHub", gitlab: "GitLab" };
 
-/** One-line summary of what starts a trigger node / what an If checks. */
-function summary(cfg: ResolvedConfig): string | undefined {
+/** One-line summary of what starts a trigger node / what an If checks / what a script or subflow runs. */
+function summary(cfg: ResolvedConfig, flows: Flow[]): string | undefined {
   if (cfg.kind === "condition") return describeCondition(cfg.condition);
+  if (cfg.kind === "script") return cfg.script.run ? `$ ${cfg.script.run}${cfg.script.where === "host" ? "  (this machine)" : ""}` : "Set the command to run";
+  if (cfg.kind === "subflow") {
+    const child = flows.find((f) => f.id === cfg.subflow.flowId);
+    return child ? `Runs “${child.name}”` : cfg.subflow.flowId ? `Unknown flow ${cfg.subflow.flowId}` : "Pick the flow to run";
+  }
+  if (cfg.kind === "flow-input") return "What the parent flow sends in";
+  if (cfg.kind === "flow-output") return `Leaves through exit “${cfg.flowOutput.name || "done"}”`;
   if (cfg.kind !== "trigger") return undefined;
   const t = cfg.trigger;
   if (t.type === "schedule") return describeSchedule(t.schedule);
@@ -37,6 +54,21 @@ function BranchHandles({ taken }: { taken?: "true" | "false" }) {
         <Handle key={b} id={b} type="source" position={Position.Right} className={`handle-${b}`} style={{ top: `${((i + 1) / 3) * 100}%` }}>
           <span className={cn("pointer-events-none absolute top-1/2 right-3 -translate-y-1/2 text-[9px] font-medium", b === "true" ? "text-emerald-400" : "text-red-400", taken === b && "underline")}>
             {b}
+          </span>
+        </Handle>
+      ))}
+    </>
+  );
+}
+
+/** Named exits of a Script / subflow node (`exit:<name>`). */
+function ExitHandles({ exits, taken }: { exits: string[]; taken?: string }) {
+  return (
+    <>
+      {exits.map((x, i) => (
+        <Handle key={x} id={exitHandle(x)} type="source" position={Position.Right} className="handle-exit" style={{ top: `${((i + 1) / (exits.length + 1)) * 100}%` }}>
+          <span className={cn("pointer-events-none absolute top-1/2 right-3 max-w-24 -translate-y-1/2 truncate text-[9px] font-medium text-violet-300", taken === x && "underline")}>
+            {x}
           </span>
         </Handle>
       ))}
@@ -112,16 +144,17 @@ function HandleRow({ cfg, side }: { cfg: ResolvedConfig; side: "in" | "out" }) {
 
 function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const blocks = useStore((s) => s.data?.blocks ?? []);
+  const flows = useStore((s) => s.data?.flows ?? []);
   const runNode = useStore((s) => s.run?.nodes[id]);
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
   const touchedAt = useStore((s) => s.highlight[id]);
   const flowActive = useStore((s) => !!s.data?.flows.find((f) => f.id === s.currentFlowId)?.active);
   const block = blocks.find((b) => b.id === data.blockId);
 
-  let cfg: ResolvedConfig | undefined;
+  let cfg: (ResolvedConfig & { exits: string[] }) | undefined;
   let error: string | undefined;
   try {
-    cfg = block ? resolveNode({ id, type: "block", position: { x: 0, y: 0 }, data }, blocks) : undefined;
+    cfg = block ? resolveNodeIn({ id, type: "block", position: { x: 0, y: 0 }, data }, blocks, flows) : undefined;
     if (!block) error = `Missing block "${data.blockId}"`;
   } catch (e) {
     error = (e as Error).message;
@@ -151,7 +184,13 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
     >
       <StatusBadge status={status} executions={runNode?.executions ?? 0} />
       {cfg.kind !== "trigger" && <HandleRow cfg={cfg} side="in" />}
-      {cfg.kind === "condition" ? <BranchHandles taken={runNode?.branch} /> : <HandleRow cfg={cfg} side="out" />}
+      {cfg.kind === "condition" ? (
+        <BranchHandles taken={runNode?.branch} />
+      ) : cfg.exits.length ? (
+        <ExitHandles exits={cfg.exits} taken={runNode?.exit} />
+      ) : (
+        <HandleRow cfg={cfg} side="out" />
+      )}
 
       <div className="flex items-center gap-2 rounded-t-lg border-b px-3 py-2" style={{ borderTop: `3px solid ${cfg.color}` }}>
         <span className="flex size-6 items-center justify-center rounded" style={{ background: `${cfg.color}33`, color: cfg.color }}>
@@ -174,7 +213,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
       </div>
 
       <div className="space-y-1.5 px-7 py-2 text-[10px]">
-        {summary(cfg) && <div className="line-clamp-3 font-mono text-muted-foreground" title={summary(cfg)}>{summary(cfg)}</div>}
+        {summary(cfg, flows) && <div className="line-clamp-3 font-mono text-muted-foreground" title={summary(cfg, flows)}>{summary(cfg, flows)}</div>}
         {cfg.kind === "trigger" && flowActive && cfg.trigger.type !== "manual" && (
           <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-400">● listening</span>
         )}

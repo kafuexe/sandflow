@@ -1,0 +1,97 @@
+{
+  "id": "mr-comment-assistant",
+  "name": "MR comment assistant",
+  "description": "Answers MR comments by a given user that mention @sandflow: GitLab trigger → If → Answer comment → Post comment.",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "block",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "blockId": "gitlab-trigger"
+      }
+    },
+    {
+      "id": "if",
+      "type": "block",
+      "position": {
+        "x": 320,
+        "y": 0
+      },
+      "data": {
+        "blockId": "if",
+        "label": "From me + @sandflow?",
+        "overrides": {
+          "condition": {
+            "match": "all",
+            "rules": [
+              {
+                "field": "trigger.type",
+                "op": "equals",
+                "value": "merge_request.comment"
+              },
+              {
+                "field": "trigger.author",
+                "op": "equals",
+                "value": "your-username"
+              },
+              {
+                "field": "trigger.body",
+                "op": "contains",
+                "value": "@sandflow"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "answer",
+      "type": "block",
+      "position": {
+        "x": 640,
+        "y": 0
+      },
+      "data": {
+        "blockId": "answer-comment"
+      }
+    },
+    {
+      "id": "post",
+      "type": "block",
+      "position": {
+        "x": 960,
+        "y": 0
+      },
+      "data": {
+        "blockId": "post-comment"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-t-artifact-if-artifact",
+      "source": "t",
+      "target": "if",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-if-true-answer-artifact",
+      "source": "if",
+      "target": "answer",
+      "sourceHandle": "true",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-answer-artifact-post-artifact",
+      "source": "answer",
+      "target": "post",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    }
+  ]
+}

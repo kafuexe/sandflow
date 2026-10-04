@@ -1,0 +1,18 @@
+{
+  "id": "shell",
+  "name": "Shell command",
+  "isTemplate": false,
+  "extends": "tpl-auto-git",
+  "config": {
+    "description": "Runs a shell command in REPO_PATH on the host; stdout becomes the artifact.",
+    "icon": "terminal",
+    "autoAction": "shell",
+    "shellCommand": "git log --oneline -5",
+    "inputs": {
+      "artifact": true
+    },
+    "outputs": {
+      "artifact": true
+    }
+  }
+}

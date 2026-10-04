@@ -2,6 +2,8 @@
 
 /** The two things a block can emit. */
 export type OutputKind = "artifact" | "steer";
+/** A named way out of a block (`exit:<name>`): a Script that picks a route, or a subflow's Flow output. */
+export type ExitHandle = `exit:${string}`;
 /** Inputs that travel along edges (the other two — starting prompt and env — are global). */
 export type EdgeInputKind = "artifact" | "steer";
 
@@ -11,14 +13,17 @@ export type EdgeInputKind = "artifact" | "steer";
  * manager – an agent that decides which outgoing connection receives the task.
  * trigger – starts the flow on an event (schedule, GitHub/GitLab webhook or poll, or manually).
  * condition – deterministic If: evaluates rules and continues out of its `true` or `false` handle.
+ * script  – runs a pack's code (any language / executable) in a container, or on this machine when trusted.
+ * subflow – runs another flow inside this one; its exits are the child flow's Flow output blocks.
+ * flow-input / flow-output – where a flow used as a subflow receives its input / hands its result back.
  */
-export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition";
+export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "flow-input" | "flow-output";
 
 export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment";
 
 /** Where a condition's result leaves the block. */
 export type BranchHandle = "true" | "false";
-export type SourceHandle = OutputKind | BranchHandle;
+export type SourceHandle = OutputKind | BranchHandle | ExitHandle;
 
 // ---------- Triggers ----------
 
@@ -131,9 +136,14 @@ export interface AgentConfig {
   endpointEnv?: string;
 }
 
-/** A skill stored as files: `bundled` = shipped in this codebase (`skills/`), `user` = uploaded (`.sandflow/skills/`). */
+/**
+ * A skill stored as files: `bundled` = shipped in this codebase (`skills/`), `user` = uploaded (`.sandflow/skills/`),
+ * `pack` = inside an installed pack (`<pack>/skills/`).
+ */
 export interface SkillFileRef {
-  store: "bundled" | "user";
+  store: "bundled" | "user" | "pack";
+  /** Pack id (store `pack` only; filled in when the pack is loaded). */
+  pack?: string;
   /** Directory inside the store, e.g. `obra-superpowers/writing-plans`. */
   dir: string;
 }
@@ -162,6 +172,17 @@ export interface BlockInputs {
 export interface BlockOutputs {
   artifact?: boolean;
   steer?: boolean;
+}
+
+/** Script blocks: what to run and where. */
+export interface ScriptConfig {
+  /** Shell command, run in the pack's runtime copy (`$PACK_DIR`), e.g. `python scripts/report.py`. */
+  run?: string;
+  /** `sandbox` (default) = a container; `host` = this machine (only your own blocks and trusted packs). */
+  where?: "sandbox" | "host";
+  /** Named exits; the script picks one with `"exit": "<name>"` in its output. Empty = plain artifact/steer outputs. */
+  exits?: string[];
+  timeoutSeconds?: number;
 }
 
 /**
@@ -195,6 +216,12 @@ export interface BlockConfig {
   trigger?: TriggerConfig;
   /** condition blocks. */
   condition?: ConditionSpec;
+  /** script blocks. */
+  script?: ScriptConfig;
+  /** subflow blocks: the flow to run. */
+  subflow?: { flowId?: string };
+  /** flow-output blocks: the exit this output becomes on the subflow node. */
+  flowOutput?: { name?: string };
 }
 
 export interface BlockDef {
@@ -204,7 +231,10 @@ export interface BlockDef {
   isTemplate: boolean;
   /** Template this block/template inherits its base configuration from. */
   extends?: string | null;
+  /** Legacy: shipped inside the app before packs existed (now migrated to the base pack). */
   builtin?: boolean;
+  /** Pack this block comes from (read-only; set when packs load). Absent = one of your own blocks. */
+  pack?: string;
   config: BlockConfig;
 }
 
@@ -226,6 +256,9 @@ export interface ResolvedConfig {
   maxIterations: number;
   trigger: TriggerConfig;
   condition: ConditionSpec;
+  script: { run: string; where: "sandbox" | "host"; exits: string[]; timeoutSeconds?: number };
+  subflow: { flowId: string };
+  flowOutput: { name: string };
 }
 
 export interface FlowNodeData {
@@ -260,6 +293,9 @@ export interface Flow {
   edges: FlowEdge[];
   /** When true, the flow's trigger blocks (schedule / git) fire runs automatically. */
   active?: boolean;
+  description?: string;
+  /** Pack this flow comes from (read-only; set when packs load). Absent = one of your own flows. */
+  pack?: string;
 }
 
 export type SandboxKind = "docker" | "podman" | "none";
@@ -304,6 +340,105 @@ export interface AppData {
   flows: Flow[];
   settings: Settings;
   env: EnvValues;
+  /** Installed packs (their blocks and flows are already merged into `blocks` / `flows`). */
+  packs?: PackInfo[];
+}
+
+// ---------- Packs ----------
+
+/** Where a pack was installed from. */
+export type PackSource =
+  | { type: "github"; repo: string; host?: string; ref?: string; subdir?: string }
+  | { type: "gitlab"; project: string; host?: string; ref?: string; subdir?: string }
+  | { type: "folder"; path: string; link: boolean }
+  | { type: "zip"; name: string }
+  | { type: "bundled" };
+
+/** A pack's dependency on another pack. */
+export interface PackRequirement {
+  id: string;
+  /** semver range, e.g. `^1.0.0`. */
+  version?: string;
+  /** Where to get it when it's missing (a GitHub/GitLab URL). */
+  source?: string;
+}
+
+/** `manifest.json` at the root of a pack. */
+export interface PackManifest {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  author?: string;
+  homepage?: string;
+  license?: string;
+  requires?: PackRequirement[];
+  /** Run once per install/update inside the pack's runtime copy, e.g. `pip install -r requirements.txt -t .deps`. */
+  setup?: string;
+  /** Container for this pack's Script blocks: an image name, or a Dockerfile in the pack (built locally). */
+  sandbox?: { image?: string; dockerfile?: string };
+  /** Executables: name → platform (`linux-x64`, `linux-arm64`, `win32-x64`, `darwin-arm64`, …) → path in the pack. */
+  bin?: Record<string, Record<string, string>>;
+}
+
+/** An installed pack, as the UI sees it. */
+export interface PackInfo {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  author?: string;
+  homepage?: string;
+  source: PackSource;
+  /** Commit the pack is pinned to (git sources). */
+  commit?: string;
+  /** sha256 over the pack's files. */
+  hash: string;
+  installedAt: number;
+  /** May run code on this machine (Script blocks with where: host, Shell command blocks). */
+  trustHost: boolean;
+  /** Ships something that runs code: scripts, setup, executables, a Dockerfile or shell commands. */
+  hasCode: boolean;
+  requires: PackRequirement[];
+  blockCount: number;
+  flowCount: number;
+  skillCount: number;
+  /** Problems found while loading (bad JSON, unmet requirements, …). */
+  problems: string[];
+}
+
+/** Something a pack does that runs code — listed before installing. */
+export interface PackRisk {
+  kind: "script" | "host-script" | "shell" | "setup" | "bin" | "dockerfile" | "image";
+  /** Block or file it comes from. */
+  where: string;
+  detail: string;
+}
+
+/** What installing a staged pack would do. */
+export interface PackPreview {
+  token: string;
+  manifest: PackManifest;
+  source: PackSource;
+  commit?: string;
+  hash: string;
+  blocks: { id: string; name: string; kind?: string; isTemplate: boolean }[];
+  flows: { id: string; name: string }[];
+  skills: string[];
+  fileCount: number;
+  totalBytes: number;
+  risks: PackRisk[];
+  /** Needs the run-code-on-this-machine permission to work fully. */
+  needsHost: boolean;
+  /** The same pack id is already installed. */
+  existing?: { version: string; source: PackSource; hash: string; trustHost: boolean };
+  /** Files added / changed / removed compared with the installed copy. */
+  changes?: { added: string[]; changed: string[]; removed: string[]; codeChanged: boolean };
+  missing: PackRequirement[];
+  conflicts: { id: string; installed: string; required: string }[];
+  /** Installed packs whose requirements this version would break. */
+  breaks: { id: string; requires: string }[];
+  problems: string[];
 }
 
 // ---------- Runs ----------
@@ -326,6 +461,8 @@ export interface NodeRunState {
   routedTo?: string;
   /** condition: which way it went. */
   branch?: BranchHandle;
+  /** script / subflow: the exit it left through. */
+  exit?: string;
 }
 
 export interface QaPair {

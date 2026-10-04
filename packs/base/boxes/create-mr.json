@@ -1,0 +1,34 @@
+{
+  "id": "create-mr",
+  "name": "Create MR",
+  "isTemplate": false,
+  "extends": "tpl-auto-git",
+  "config": {
+    "description": "Pushes the branch and opens a pull/merge request with gh or glab.",
+    "icon": "git-pull-request",
+    "autoAction": "create-mr",
+    "inputs": {
+      "artifact": true
+    },
+    "outputs": {
+      "artifact": true
+    },
+    "env": [
+      "MR_PROVIDER",
+      "BASE_BRANCH",
+      "BRANCH_NAME"
+    ],
+    "skills": [
+      {
+        "name": "finishing-a-development-branch",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/finishing-a-development-branch"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/finishing-a-development-branch",
+        "why": "Wrap up a branch and open a merge request"
+      }
+    ]
+  }
+}

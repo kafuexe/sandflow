@@ -1,0 +1,156 @@
+{
+  "id": "feature-pipeline",
+  "name": "Feature pipeline",
+  "description": "Create task → Plan → Implement → CR → Manager → CR fix ↺ / Create MR.",
+  "nodes": [
+    {
+      "id": "n-create-task",
+      "type": "block",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "blockId": "create-task"
+      }
+    },
+    {
+      "id": "n-plan",
+      "type": "block",
+      "position": {
+        "x": 320,
+        "y": 0
+      },
+      "data": {
+        "blockId": "plan"
+      }
+    },
+    {
+      "id": "n-implement",
+      "type": "block",
+      "position": {
+        "x": 640,
+        "y": 0
+      },
+      "data": {
+        "blockId": "implement"
+      }
+    },
+    {
+      "id": "n-cr",
+      "type": "block",
+      "position": {
+        "x": 960,
+        "y": 0
+      },
+      "data": {
+        "blockId": "cr"
+      }
+    },
+    {
+      "id": "n-manager",
+      "type": "block",
+      "position": {
+        "x": 1280,
+        "y": 0
+      },
+      "data": {
+        "blockId": "manager"
+      }
+    },
+    {
+      "id": "n-create-mr",
+      "type": "block",
+      "position": {
+        "x": 1600,
+        "y": 0
+      },
+      "data": {
+        "blockId": "create-mr"
+      }
+    },
+    {
+      "id": "n-cr-fix",
+      "type": "block",
+      "position": {
+        "x": 1280,
+        "y": 260
+      },
+      "data": {
+        "blockId": "cr-fix"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-n-create-task-artifact-n-plan-artifact",
+      "source": "n-create-task",
+      "target": "n-plan",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-n-plan-artifact-n-implement-artifact",
+      "source": "n-plan",
+      "target": "n-implement",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-n-plan-steer-n-implement-steer",
+      "source": "n-plan",
+      "target": "n-implement",
+      "sourceHandle": "steer",
+      "targetHandle": "steer"
+    },
+    {
+      "id": "e-n-implement-artifact-n-cr-artifact",
+      "source": "n-implement",
+      "target": "n-cr",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-n-cr-artifact-n-manager-artifact",
+      "source": "n-cr",
+      "target": "n-manager",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-n-cr-steer-n-manager-steer",
+      "source": "n-cr",
+      "target": "n-manager",
+      "sourceHandle": "steer",
+      "targetHandle": "steer"
+    },
+    {
+      "id": "e-n-manager-artifact-n-cr-fix-artifact",
+      "source": "n-manager",
+      "target": "n-cr-fix",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-n-manager-steer-n-cr-fix-steer",
+      "source": "n-manager",
+      "target": "n-cr-fix",
+      "sourceHandle": "steer",
+      "targetHandle": "steer"
+    },
+    {
+      "id": "e-n-cr-fix-artifact-n-cr-artifact",
+      "source": "n-cr-fix",
+      "target": "n-cr",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    },
+    {
+      "id": "e-n-manager-artifact-n-create-mr-artifact",
+      "source": "n-manager",
+      "target": "n-create-mr",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    }
+  ]
+}

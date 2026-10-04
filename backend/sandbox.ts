@@ -57,9 +57,9 @@ export async function ensureSandboxReady(s: Settings, exec: Exec = execCli): Pro
   }
 }
 
-/** Options for sandcastle's docker()/podman() providers. */
-export function sandboxProviderOptions(s: Settings) {
-  const mounts: { hostPath: string; sandboxPath: string; readonly: boolean }[] = [];
+/** Options for sandcastle's docker()/podman() providers. `extra` = more read-only mounts (e.g. installed packs). */
+export function sandboxProviderOptions(s: Settings, extra: { hostPath: string; sandboxPath: string }[] = []) {
+  const mounts: { hostPath: string; sandboxPath: string; readonly: boolean }[] = extra.map((m) => ({ ...m, readonly: true }));
   const tools = s.agentToolsDir?.trim();
   if (tools) {
     if (!fs.existsSync(tools) || !fs.statSync(tools).isDirectory()) {

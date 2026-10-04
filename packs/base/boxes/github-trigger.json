@@ -1,0 +1,21 @@
+{
+  "id": "github-trigger",
+  "name": "GitHub trigger",
+  "isTemplate": false,
+  "extends": "tpl-trigger",
+  "config": {
+    "description": "Fires on GitHub events (issues, comments, PRs, pushes) via webhook or polling (gh).",
+    "icon": "github",
+    "color": "#a3a3a3",
+    "trigger": {
+      "type": "github",
+      "mode": "webhook",
+      "events": [
+        "issue.opened",
+        "merge_request.comment"
+      ],
+      "pollSeconds": 60,
+      "secretEnv": "GITHUB_WEBHOOK_SECRET"
+    }
+  }
+}

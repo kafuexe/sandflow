@@ -1,0 +1,25 @@
+{
+  "id": "manager",
+  "name": "Manager",
+  "isTemplate": false,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "kind": "manager",
+    "description": "Reads the incoming result and routes it to exactly one of its outgoing connections.",
+    "icon": "split",
+    "color": "#ec4899",
+    "instructions": "You are a delivery manager deciding the next step of a pipeline. Read the input artifact and steering notes, then pick exactly one route. Default guidance: if the review is approved / has no requested changes, route to the step that creates the merge request; otherwise route to the step that fixes the review comments. Do not modify code.",
+    "skills": [
+      {
+        "name": "verification-before-completion",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/verification-before-completion"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/verification-before-completion",
+        "why": "Check evidence before claiming something is done"
+      }
+    ]
+  }
+}

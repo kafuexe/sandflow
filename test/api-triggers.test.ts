@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApi, type Api } from "../backend/api";
 import type { NodeRunner } from "../backend/engine";
 import { createStorage } from "../backend/storage";
+import { qualifyFlow } from "../backend/packs";
 import { EXAMPLE_FLOWS } from "../shared/library";
 import type { Flow, RunState, RunSummary } from "../shared/types";
 
@@ -61,7 +62,7 @@ async function waitFor<T>(fn: () => Promise<T | undefined>, ms = 5000): Promise<
 }
 
 async function configure(port: number, active = true) {
-  const flow: Flow = { ...structuredClone(EXAMPLE_FLOWS[0]), active };
+  const flow: Flow = { ...qualifyFlow(structuredClone(EXAMPLE_FLOWS[0]), "base", false), active };
   const cond = flow.nodes.find((n) => n.id === "if")!.data.overrides!.condition!;
   cond.rules[1].value = "ofek";
   await put("/env", { GITLAB_WEBHOOK_SECRET: "tok", REPO_PATH: "/r", ANTHROPIC_API_KEY: "k" });

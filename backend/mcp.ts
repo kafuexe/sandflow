@@ -75,11 +75,14 @@ export function createMcp(deps: McpDeps) {
     }
     const flow = data.flows.find((f) => f.id === id);
     if (!flow) throw new ToolError(`No flow "${id}". list_flows shows the ids`);
+    if (forWrite && flow.pack) {
+      throw new ToolError(`"${flow.name}" comes from the ${flow.pack} pack and is read-only. Ask the user to duplicate it first (Flows tab → Duplicate)`);
+    }
     return { data, flow };
   }
 
-  function report(flow: Flow, blocks: BlockDef[]): string {
-    const r = validateFlow(flow, blocks);
+  function report(flow: Flow, data: AppData): string {
+    const r = validateFlow(flow, data.blocks, data.flows);
     const parts = [];
     parts.push(r.errors.length ? `Errors:\n${r.errors.map((e) => `- ${e}`).join("\n")}` : "Valid: no errors.");
     if (r.warnings.length) parts.push(`Warnings:\n${r.warnings.map((w) => `- ${w}`).join("\n")}`);
@@ -93,7 +96,7 @@ export function createMcp(deps: McpDeps) {
   }
 
   /** Build a flow from scratch (used by create_flow and replace_flow). */
-  function build(base: Flow, blocks: BlockDef[], args: Record<string, unknown>) {
+  function build(base: Flow, data: AppData, args: Record<string, unknown>) {
     const nodes = (args.nodes as Record<string, unknown>[] | undefined) ?? [];
     const edges = (args.edges as string[] | undefined) ?? [];
     if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new ToolError("nodes and edges must be arrays");
@@ -101,7 +104,7 @@ export function createMcp(deps: McpDeps) {
       ...nodes.map((n) => ({ op: "add_node" as const, id: String(n.id ?? ""), block: String(n.block ?? ""), label: n.label as string | undefined, overrides: n.overrides as BlockConfig | undefined })),
       ...edges.map((edge) => ({ op: "connect" as const, edge: String(edge) })),
     ];
-    const r = applyOps({ ...base, nodes: [], edges: [] }, blocks, ops);
+    const r = applyOps({ ...base, nodes: [], edges: [] }, data.blocks, ops, data.flows);
     return { ...r, flow: autoLayout(r.flow) };
   }
 
@@ -115,12 +118,12 @@ export function createMcp(deps: McpDeps) {
     },
     {
       name: "list_flows",
-      description: "List flows (id, name, node count).",
+      description: "List flows (id, name, node count). Pack flows are read-only but can run inside other flows as subflows.",
       inputSchema: { type: "object", properties: {} },
       run: (_a, { scope }) =>
         deps
           .load()
-          .flows.map((f) => `- ${f.id}: ${f.name} (${f.nodes.length} nodes)${f.id === scope ? " ← this chat's flow" : ""}`)
+          .flows.map((f) => `- ${f.id}: ${f.name} (${f.nodes.length} nodes)${f.pack ? ` [pack ${f.pack}, read-only]` : ""}${f.id === scope ? " ← this chat's flow" : ""}`)
           .join("\n") || "(no flows)",
     },
     {
@@ -129,7 +132,7 @@ export function createMcp(deps: McpDeps) {
       inputSchema: { type: "object", properties: flowIdProp },
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, false);
-        return `${describeFlow(flow, data.blocks)}\n\n${report(flow, data.blocks)}`;
+        return `${describeFlow(flow, data.blocks, data.flows)}\n\n${report(flow, data)}`;
       },
     },
     {
@@ -148,9 +151,9 @@ export function createMcp(deps: McpDeps) {
         if (!name) throw new ToolError("name is required");
         let id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "flow";
         while (data.flows.some((f) => f.id === id)) id = `${id}-${Math.random().toString(36).slice(2, 5)}`;
-        const r = build({ id, name, nodes: [], edges: [] }, data.blocks, a);
+        const r = build({ id, name, nodes: [], edges: [] }, data, a);
         save(data, r.flow, r.touched);
-        return `Created flow "${name}" (id: ${id}).\n\nChanges:\n${r.changes.join("\n")}\n\n${describeFlow(r.flow, data.blocks)}\n\n${report(r.flow, data.blocks)}`;
+        return `Created flow "${name}" (id: ${id}).\n\nChanges:\n${r.changes.join("\n")}\n\n${describeFlow(r.flow, data.blocks, data.flows)}\n\n${report(r.flow, data)}`;
       },
     },
     {
@@ -165,9 +168,9 @@ export function createMcp(deps: McpDeps) {
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, true);
         const name = typeof a.name === "string" && a.name.trim() ? a.name.trim() : flow.name;
-        const r = build({ ...flow, name }, data.blocks, a);
+        const r = build({ ...flow, name }, data, a);
         save(data, r.flow, r.touched);
-        return `Replaced flow "${name}".\n\nChanges:\n${r.changes.join("\n") || "(emptied the flow)"}\n\n${describeFlow(r.flow, data.blocks)}\n\n${report(r.flow, data.blocks)}`;
+        return `Replaced flow "${name}".\n\nChanges:\n${r.changes.join("\n") || "(emptied the flow)"}\n\n${describeFlow(r.flow, data.blocks, data.flows)}\n\n${report(r.flow, data)}`;
       },
     },
     {
@@ -178,9 +181,9 @@ export function createMcp(deps: McpDeps) {
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, true);
         if (!Array.isArray(a.ops) || !a.ops.length) throw new ToolError("ops must be a non-empty array");
-        const r = applyOps(flow, data.blocks, a.ops as FlowOp[]);
+        const r = applyOps(flow, data.blocks, a.ops as FlowOp[], data.flows);
         save(data, r.flow, r.touched);
-        return `Changes:\n${r.changes.join("\n") || "(nothing changed)"}\n\n${describeFlow(r.flow, data.blocks)}\n\n${report(r.flow, data.blocks)}`;
+        return `Changes:\n${r.changes.join("\n") || "(nothing changed)"}\n\n${describeFlow(r.flow, data.blocks, data.flows)}\n\n${report(r.flow, data)}`;
       },
     },
     {
@@ -189,7 +192,7 @@ export function createMcp(deps: McpDeps) {
       inputSchema: { type: "object", properties: flowIdProp },
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, false);
-        return report(flow, data.blocks);
+        return report(flow, data);
       },
     },
     {
@@ -198,7 +201,7 @@ export function createMcp(deps: McpDeps) {
       inputSchema: { type: "object", properties: flowIdProp },
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, false);
-        const req = flowRequirements(flow, data.blocks);
+        const req = flowRequirements(flow, data.blocks, data.flows);
         const lines = req.env.map((e) => `- ${e.name} (${data.env[e.name]?.trim() ? "set" : "MISSING"}) — used by ${e.nodes.map((n) => n.label).join(", ")}`);
         if (req.startingPromptNodes.length) {
           lines.unshift(`- Starting prompt (${data.settings.startingPrompt.trim() ? "set" : "MISSING"}) — used by ${req.startingPromptNodes.map((n) => n.label).join(", ")}`);
@@ -209,7 +212,7 @@ export function createMcp(deps: McpDeps) {
     {
       name: "save_block",
       description:
-        "Create or update a custom (non-built-in) block or template in the library. Prefer extending a template (e.g. tpl-ai-agent) and setting only what differs: description, instructions, inputs/outputs, env, skills.",
+        "Create or update a custom (non-built-in) block or template in the library. Prefer extending a template (e.g. base/tpl-ai-agent) and setting only what differs: description, instructions, inputs/outputs, env, skills.",
       inputSchema: {
         type: "object",
         required: ["id", "name", "config"],
@@ -224,9 +227,11 @@ export function createMcp(deps: McpDeps) {
       run: (a) => {
         const data = deps.load();
         const id = String(a.id ?? "").trim();
-        if (!/^[A-Za-z][\w-]{0,63}$/.test(id)) throw new ToolError(`Block id "${id}" is invalid: letters, digits, _ or -, starting with a letter`);
         const existing = data.blocks.find((b) => b.id === id);
-        if (existing?.builtin) throw new ToolError(`"${id}" is a built-in block and can't be changed. Save a new block that extends a template instead`);
+        if (existing?.pack || existing?.builtin) {
+          throw new ToolError(`"${id}" comes from a pack and can't be changed. Save a new block that extends a template instead`);
+        }
+        if (!/^[A-Za-z][\w-]{0,63}$/.test(id)) throw new ToolError(`Block id "${id}" is invalid: letters, digits, _ or -, starting with a letter`);
         const block: BlockDef = {
           id,
           name: String(a.name ?? "").trim() || id,
@@ -235,7 +240,7 @@ export function createMcp(deps: McpDeps) {
           config: (a.config as BlockConfig) ?? {},
         };
         const blocks = existing ? data.blocks.map((b) => (b.id === id ? block : b)) : [...data.blocks, block];
-        const errors = validateBlocks(blocks);
+        const errors = validateBlocks(blocks, new Set([id]));
         if (errors.length) throw new ToolError(errors.join("\n"));
         deps.saveBlocks(blocks);
         return `${existing ? "Updated" : "Created"} block "${block.name}" (id: ${id}).\n${describeBlocks([block, ...blocks.filter((b) => b.id !== id)]).split("\n")[0]}`;

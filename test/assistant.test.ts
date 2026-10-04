@@ -86,7 +86,7 @@ describe("MCP server", () => {
     });
     const created = await callTool("create_flow", {
       name: "Nightly report",
-      nodes: [{ id: "t", block: "schedule-trigger" }, { id: "sh", block: "shell", overrides: { shellCommand: "git log -5" } }],
+      nodes: [{ id: "t", block: "base/schedule-trigger" }, { id: "sh", block: "base/shell", overrides: { shellCommand: "git log -5" } }],
       edges: ["t -> sh"],
     });
     expect(created.isError).toBeUndefined();
@@ -114,17 +114,17 @@ describe("MCP server", () => {
     expect(ok.content[0].text).toContain('Flow "Feature pipeline"');
   });
 
-  it("won't overwrite built-in blocks but saves valid custom ones", async () => {
+  it("won't overwrite pack blocks but saves valid custom ones", async () => {
     await start();
-    expect((await callTool("save_block", { id: "plan", name: "Plan", config: {} })).content[0].text).toMatch(/built-in/);
+    expect((await callTool("save_block", { id: "base/plan", name: "Plan", config: {} })).content[0].text).toMatch(/comes from a pack/);
     const ok = await callTool("save_block", {
       id: "security-review",
       name: "Security review",
-      extends: "tpl-reviewer",
+      extends: "base/tpl-reviewer",
       config: { instructions: "Look for security issues only." },
     });
     expect(ok.content[0].text).toContain('Created block "Security review"');
-    expect((await callTool("save_block", { id: "x", name: "X", extends: "plan", config: {} })).isError).toBe(true);
+    expect((await callTool("save_block", { id: "x", name: "X", extends: "base/plan", config: {} })).isError).toBe(true);
   });
 });
 

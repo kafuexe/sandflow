@@ -1,0 +1,30 @@
+{
+  "id": "if",
+  "name": "If",
+  "isTemplate": false,
+  "config": {
+    "kind": "condition",
+    "description": "Deterministic check: continues out of `true` or `false`. An unconnected branch ends the path.",
+    "color": "#14b8a6",
+    "icon": "git-fork",
+    "inputs": {
+      "artifact": true,
+      "steer": true,
+      "startingPrompt": false
+    },
+    "outputs": {
+      "artifact": false,
+      "steer": false
+    },
+    "condition": {
+      "match": "all",
+      "rules": [
+        {
+          "field": "trigger.body",
+          "op": "contains",
+          "value": "@sandflow"
+        }
+      ]
+    }
+  }
+}

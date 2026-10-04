@@ -1,0 +1,29 @@
+{
+  "id": "tpl-ai-agent",
+  "name": "AI Agent (template)",
+  "isTemplate": true,
+  "config": {
+    "kind": "ai",
+    "description": "Base for agent blocks: accepts artifact, steer and the starting prompt.",
+    "color": "#8b5cf6",
+    "icon": "bot",
+    "inputs": {
+      "artifact": true,
+      "steer": true,
+      "startingPrompt": true
+    },
+    "outputs": {
+      "artifact": true,
+      "steer": true
+    },
+    "env": [
+      "REPO_PATH",
+      "ANTHROPIC_API_KEY"
+    ],
+    "agent": {
+      "provider": "claudeCode",
+      "model": "claude-opus-4-8",
+      "effort": "high"
+    }
+  }
+}

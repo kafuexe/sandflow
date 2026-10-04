@@ -24,6 +24,10 @@ import {
   Terminal,
   TestTube,
   Wrench,
+  Workflow,
+  LogIn,
+  LogOut,
+  FileCode,
   type LucideIcon,
 } from "lucide-react";
 
@@ -53,6 +57,10 @@ export const ICONS: Record<string, LucideIcon> = {
   webhook: Webhook,
   "git-fork": GitFork,
   "message-square-reply": MessageSquareReply,
+  workflow: Workflow,
+  "log-in": LogIn,
+  "log-out": LogOut,
+  "file-code": FileCode,
 };
 
 export function BlockIcon({ name, className }: { name: string; className?: string }) {

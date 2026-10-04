@@ -72,8 +72,9 @@ describe("app server", () => {
     fs.mkdirSync(path.join(skills, "acme", "hello"), { recursive: true });
     fs.writeFileSync(path.join(skills, "acme", "hello", "SKILL.md"), "---\nname: hello\n---");
     server = await startAppServer({ dataDir: tmp(), webRoot: webRoot(), bundledSkillsDir: skills, runners: { auto: idle, ai: idle } });
-    const list = JSON.parse((await get(server.port, "/api/skills")).body) as { name: string }[];
-    expect(list.map((s) => s.name)).toEqual(["hello"]);
+    const list = JSON.parse((await get(server.port, "/api/skills")).body) as { name: string; file?: { store: string } }[];
+    // (plus the skills inside the base pack)
+    expect(list.filter((s) => s.file?.store !== "pack").map((s) => s.name)).toEqual(["hello"]);
   });
 
   it("cancels active runs on close so sandboxes get torn down", async () => {

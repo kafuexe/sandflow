@@ -14,8 +14,12 @@ export interface AppServerOptions {
   dataDir: string;
   /** Built UI (vite `dist/`). */
   webRoot: string;
-  runners: { auto: NodeRunner; ai: NodeRunner };
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner };
   bundledSkillsDir?: string;
+  /** Packs shipped with the app (`<dir>/base/manifest.json`); installed on first start. */
+  bundledPacksDir?: string;
+  /** Fetch the base pack from GitHub at start (default true). */
+  fetchBasePack?: boolean;
   /** Default 0 = pick a free port. */
   port?: number;
 }
@@ -41,7 +45,10 @@ const MIME: Record<string, string> = {
 };
 
 export async function startAppServer(opts: AppServerOptions): Promise<AppServer> {
-  const api = createApi(createStorage(opts.dataDir), opts.runners, { bundledSkillsDir: opts.bundledSkillsDir });
+  const api = createApi(createStorage(opts.dataDir, { bundledDir: opts.bundledPacksDir }), opts.runners, {
+    bundledSkillsDir: opts.bundledSkillsDir,
+    fetchBasePack: opts.fetchBasePack ?? true,
+  });
   const root = path.resolve(opts.webRoot);
   let allowedHosts = new Set<string>();
 

@@ -1,0 +1,45 @@
+{
+  "id": "implement",
+  "name": "Implement",
+  "isTemplate": false,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "description": "Implements the plan with TDD and commits the work.",
+    "icon": "hammer",
+    "color": "#3b82f6",
+    "maxIterations": 5,
+    "instructions": "You are implementing a plan. Follow the input artifact (the plan) and the steering notes. Use test-driven development: write a failing test, make it pass, refactor. Commit your work in small, well-described commits. Work in the current repository checkout (it is already on the task branch). The artifact is a summary of what you changed and how it was tested; the steer lists anything a reviewer should look at closely.",
+    "skills": [
+      {
+        "name": "executing-plans",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/executing-plans"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/executing-plans",
+        "why": "Work a written plan task by task"
+      },
+      {
+        "name": "test-driven-development",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/test-driven-development"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/test-driven-development",
+        "why": "Red → green → refactor for every change"
+      },
+      {
+        "name": "tdd",
+        "source": "mattpocock/skills",
+        "file": {
+          "store": "pack",
+          "dir": "mattpocock-skills/tdd"
+        },
+        "url": "https://github.com/mattpocock/skills/tree/main/skills/engineering/tdd",
+        "why": "Matt Pocock's TDD workflow"
+      }
+    ]
+  }
+}

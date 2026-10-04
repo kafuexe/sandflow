@@ -105,6 +105,10 @@
 .react-flow__handle.handle-false {
   background: #ef4444;
 }
+/* Named exits of a Script / subflow node. */
+.react-flow__handle.handle-exit {
+  background: #a855f7;
+}
 
 /* A node the assistant just added or changed: a violet halo that fades out (the AI-block colour). */
 @keyframes ai-touched {
