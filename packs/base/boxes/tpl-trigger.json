@@ -1,0 +1,24 @@
+{
+  "id": "tpl-trigger",
+  "name": "Trigger (template)",
+  "isTemplate": true,
+  "config": {
+    "kind": "trigger",
+    "description": "Starts the flow when something happens. Its artifact describes the event.",
+    "color": "#eab308",
+    "icon": "zap",
+    "inputs": {
+      "artifact": false,
+      "steer": false,
+      "startingPrompt": false
+    },
+    "outputs": {
+      "artifact": true,
+      "steer": false
+    },
+    "trigger": {
+      "type": "manual",
+      "overlap": "queue"
+    }
+  }
+}

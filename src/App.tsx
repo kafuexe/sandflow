@@ -11,6 +11,7 @@ import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
 import { FlowCanvas } from "@/components/FlowCanvas";
 import { useMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
+import { PacksDialog } from "@/components/PacksDialog";
 import { Palette } from "@/components/Palette";
 import { SidePanel } from "@/components/SidePanel";
 import { Switch } from "@/components/ui/switch";
@@ -90,7 +91,7 @@ function ActiveSwitch({ flowId }: { flowId: string }) {
       return false;
     }
   });
-  if (!flow || !hasTriggers) return null;
+  if (!flow || !hasTriggers || flow.pack) return null;
   const armed = (triggers ?? []).filter((t) => t.flowId === flowId);
   const errors = armed.filter((t) => t.lastError).length;
   return (
@@ -193,14 +194,14 @@ function TopBar() {
           <Button size="sm" variant="ghost" title="New pipeline (empty or cloned)" onClick={() => setNewOpen(true)}>
             <Plus /> New
           </Button>
-          <Button size="sm" variant="ghost" title="Rename flow" disabled={!flow} onClick={() => setRenaming(flow?.name ?? "")}>
+          <Button size="sm" variant="ghost" title={flow?.pack ? "Pack flows can't be renamed — duplicate it first" : "Rename flow"} disabled={!flow || !!flow.pack} onClick={() => setRenaming(flow?.name ?? "")}>
             <Pencil />
           </Button>
           <Button
             size="sm"
             variant="ghost"
-            title="Delete flow"
-            disabled={!flow}
+            title={flow?.pack ? "Pack flows are removed with their pack (Packs)" : "Delete flow"}
+            disabled={!flow || !!flow.pack}
             onClick={() => flow && confirm(`Delete flow "${flow.name}"?`) && deleteFlow(flow.id)}
           >
             <Trash2 />
@@ -292,6 +293,7 @@ export default function App() {
       </div>
       {editor && <BlockEditor />}
       <SettingsDialog />
+      <PacksDialog />
       {view === "builder" && <QuestionDialog />}
     </ReactFlowProvider>
   );

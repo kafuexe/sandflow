@@ -1,0 +1,33 @@
+{
+  "id": "create-task",
+  "name": "Create task",
+  "isTemplate": false,
+  "extends": "tpl-auto-git",
+  "config": {
+    "description": "Creates the task branch from BASE_BRANCH and hands the starting prompt on as the task.",
+    "icon": "flag",
+    "autoAction": "create-task",
+    "inputs": {
+      "startingPrompt": true
+    },
+    "outputs": {
+      "artifact": true
+    },
+    "env": [
+      "BRANCH_NAME",
+      "BASE_BRANCH"
+    ],
+    "skills": [
+      {
+        "name": "using-git-worktrees",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/using-git-worktrees"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/using-git-worktrees",
+        "why": "Isolated branch/worktree setup for a new task"
+      }
+    ]
+  }
+}

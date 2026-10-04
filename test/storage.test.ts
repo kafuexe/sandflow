@@ -14,28 +14,53 @@ const tmp = () => {
 afterEach(() => dirs.splice(0).forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
 
 describe("storage", () => {
-  it("seeds builtins, default flow and settings on first load", () => {
+  it("installs the shipped base pack on first load and seeds the default flow from it", () => {
     const s = createStorage(tmp());
     const data = s.load();
-    expect(data.blocks.length).toBe(BUILTIN_BLOCKS.length);
+    // Your own library starts empty; the blocks come from Sandflow's core and the base pack.
+    expect(data.blocks.filter((b) => !b.pack)).toEqual([]);
+    for (const b of BUILTIN_BLOCKS) expect(data.blocks.some((x) => x.id === `base/${b.id}` && x.pack === "base")).toBe(true);
+    expect(data.blocks.some((b) => b.id === "sandflow/subflow")).toBe(true);
+    expect(data.packs?.find((p) => p.id === "base")).toMatchObject({ source: { type: "bundled" }, trustHost: true, problems: [] });
     expect(data.flows[0].id).toBe("feature-pipeline");
+    expect(data.flows[0].pack).toBeUndefined();
+    expect(data.flows[0].nodes.every((n) => n.data.blockId.startsWith("base/"))).toBe(true);
+    expect(data.flows.some((f) => f.id === "base/review-until-approved" && f.pack === "base")).toBe(true);
     expect(data.settings).toEqual({ startingPrompt: "", sandbox: "docker", maxSteps: 40 });
     expect(data.env).toEqual({});
   });
 
-  it("persists edits and re-adds missing builtins without overwriting user edits", () => {
+  it("saves only your own blocks and flows — pack items stay read-only", () => {
     const dir = tmp();
     const s = createStorage(dir);
     const data = s.load();
-    const edited = data.blocks
-      .filter((b) => b.id !== "shell")
-      .map((b) => (b.id === "plan" ? { ...b, name: "My plan" } : b));
-    s.saveBlocks(edited);
-    s.saveEnv({ REPO_PATH: "/repo" });
+    const mine = { id: "mine", name: "Mine", isTemplate: false, extends: "base/tpl-ai-agent", config: {} };
+    s.saveBlocks([...data.blocks.map((b) => (b.id === "base/plan" ? { ...b, name: "Hacked" } : b)), mine]);
+    s.saveFlows(data.flows.map((f) => ({ ...f, name: `${f.name}!` })));
+    const saved = JSON.parse(fs.readFileSync(path.join(dir, "library.json"), "utf8"));
+    expect(saved).toEqual([mine]);
     const again = createStorage(dir).load();
-    expect(again.blocks.find((b) => b.id === "plan")?.name).toBe("My plan");
-    expect(again.blocks.some((b) => b.id === "shell")).toBe(true);
-    expect(again.env).toEqual({ REPO_PATH: "/repo" });
+    expect(again.blocks.find((b) => b.id === "base/plan")?.name).toBe("Plan");
+    expect(again.flows.find((f) => f.id === "feature-pipeline")?.name).toBe("Feature pipeline!");
+    expect(again.flows.find((f) => f.id === "base/feature-pipeline")?.name).toBe("Feature pipeline");
+  });
+
+  it("migrates pre-pack libraries: unchanged built-ins move to the base pack, edited ones stay yours", () => {
+    const dir = tmp();
+    const plan = BUILTIN_BLOCKS.find((b) => b.id === "plan")!;
+    const cr = BUILTIN_BLOCKS.find((b) => b.id === "cr")!;
+    const custom = { id: "sec", name: "Security", isTemplate: false, extends: "tpl-reviewer", config: {} };
+    const editedCr = { ...cr, config: { ...cr.config, extraInstructions: "Be strict." } };
+    fs.writeFileSync(path.join(dir, "library.json"), JSON.stringify([plan, editedCr, ...BUILTIN_BLOCKS.filter((b) => b.id !== "plan" && b.id !== "cr"), custom]));
+    const flow = { id: "f", name: "F", nodes: [{ id: "a", type: "block", position: { x: 0, y: 0 }, data: { blockId: "plan" } }, { id: "b", type: "block", position: { x: 0, y: 0 }, data: { blockId: "cr" } }], edges: [] };
+    fs.writeFileSync(path.join(dir, "flows.json"), JSON.stringify([flow]));
+    const data = createStorage(dir).load();
+    const own = data.blocks.filter((b) => !b.pack);
+    expect(own.map((b) => b.id).sort()).toEqual(["cr", "sec"]);
+    expect(own.find((b) => b.id === "sec")!.extends).toBe("base/tpl-reviewer");
+    expect(own.find((b) => b.id === "cr")!.extends).toBe("base/tpl-reviewer");
+    expect(own.find((b) => b.id === "cr")!.builtin).toBeUndefined();
+    expect(data.flows.find((f) => f.id === "f")!.nodes.map((n) => n.data.blockId)).toEqual(["base/plan", "cr"]);
   });
 
   it("upgrades built-in GitHub skill refs to the bundled file skills, leaving custom ones alone", () => {

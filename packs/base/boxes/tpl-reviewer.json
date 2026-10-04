@@ -1,0 +1,24 @@
+{
+  "id": "tpl-reviewer",
+  "name": "Reviewer (template)",
+  "isTemplate": true,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "description": "Base for review agents (a template that extends a template).",
+    "color": "#f59e0b",
+    "icon": "search-check",
+    "instructions": "You are a meticulous senior code reviewer. Focus on correctness, security, missing tests and deviations from the plan. Do not modify code. Be concrete: cite files and lines.",
+    "skills": [
+      {
+        "name": "requesting-code-review",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/requesting-code-review"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/requesting-code-review",
+        "why": "Structured review of a diff against its plan"
+      }
+    ]
+  }
+}

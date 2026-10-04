@@ -1,0 +1,28 @@
+{
+  "id": "changed-files",
+  "name": "Changed files",
+  "isTemplate": false,
+  "config": {
+    "kind": "script",
+    "description": "Lists what the task branch changed compared with BASE_BRANCH (git diff --stat). An example Script block: it runs scripts/changed-files.sh from this pack inside the run's sandbox.",
+    "color": "#0d9488",
+    "icon": "file-code",
+    "env": [
+      "REPO_PATH",
+      "BASE_BRANCH"
+    ],
+    "inputs": {
+      "artifact": true,
+      "steer": false,
+      "startingPrompt": false
+    },
+    "outputs": {
+      "artifact": true,
+      "steer": false
+    },
+    "script": {
+      "run": "sh \"$PACK_DIR/scripts/changed-files.sh\"",
+      "where": "sandbox"
+    }
+  }
+}

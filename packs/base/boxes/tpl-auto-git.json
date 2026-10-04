@@ -1,0 +1,14 @@
+{
+  "id": "tpl-auto-git",
+  "name": "Git Automation (template)",
+  "isTemplate": true,
+  "config": {
+    "kind": "auto",
+    "description": "Base for deterministic git/CLI steps run on the host.",
+    "color": "#10b981",
+    "icon": "git-branch",
+    "env": [
+      "REPO_PATH"
+    ]
+  }
+}

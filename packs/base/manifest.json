@@ -1,0 +1,9 @@
+{
+  "id": "base",
+  "name": "Sandflow base boxes",
+  "version": "1.0.0",
+  "description": "The blocks, templates and example flows Sandflow starts with: plan → implement → review → merge request, triggers, If, comments, scripts and subflows.",
+  "author": "Ofek Tal",
+  "homepage": "https://github.com/kafuexe/sandflow-base-boxes",
+  "license": "MIT"
+}

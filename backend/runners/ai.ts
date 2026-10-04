@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,10 @@ import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
 import { ensureSandboxReady, sandboxProviderOptions } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
+import { filesPack } from "./trust";
+
+/** Where installed packs are mounted (read-only) inside the run's sandbox. */
+export const SANDBOX_PACKS_DIR = "/opt/sandflow/packs";
 
 /** The subset of sandcastle's `Sandbox` / `SandboxRunResult` this runner relies on. */
 interface RunResultLike {
@@ -17,8 +22,8 @@ interface RunResultLike {
   iterations: { usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number } }[];
   resume?: (prompt: string, options?: Record<string, unknown>) => Promise<RunResultLike>;
 }
-interface SandboxLike {
-  exec(command: string, options?: { stdin?: string }): Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
+export interface SandboxLike {
+  exec(command: string, options?: { stdin?: string; cwd?: string; onLine?: (line: string) => void }): Promise<{ exitCode: number; stdout?: string; stderr?: string }>;
   run(options: Record<string, unknown>): Promise<RunResultLike>;
   close(): Promise<unknown>;
 }
@@ -98,17 +103,21 @@ export function sandboxBranch(ctx: RunContext): string {
   return ctx.branch || ctx.env.BRANCH_NAME?.trim() || `sandflow/${ctx.run.id}`;
 }
 
-async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
+/** The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted. */
+export async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   if (ctx.sandbox) return ctx.sandbox as SandboxLike;
   const sc = await import("@ai-hero/sandcastle");
   const kind = ctx.settings.sandbox;
   // Docker/Podman: the image must already be loaded (offline bundle) — never let `docker run` try to pull it.
   await ensureSandboxReady(ctx.settings);
+  const packMounts = (ctx.packs?.dirs() ?? [])
+    .filter((p) => existsSync(p.dir))
+    .map((p) => ({ hostPath: p.dir, sandboxPath: `${SANDBOX_PACKS_DIR}/${p.id}` }));
   const provider =
     kind === "docker"
-      ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxProviderOptions(ctx.settings))
+      ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxProviderOptions(ctx.settings, packMounts))
       : kind === "podman"
-        ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(ctx.settings))
+        ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(ctx.settings, packMounts))
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
   const repo = ctx.env.REPO_PATH?.trim();
   if (!repo) throw new Error("Missing env var REPO_PATH");
@@ -215,7 +224,10 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     if (r.exitCode !== 0) ctx.log("warn", `Skill ${skill.name} failed to install (exit ${r.exitCode}): ${tail(r.stderr ?? "", 500)}`, node.id);
   }
 
-  const agent = await makeAgent(cfg, agentEnv(cfg, env));
+  // Files of the pack this block comes from: mounted in the sandbox, or right where they are without one.
+  const pack = filesPack(ctx, node);
+  const packDir = pack ? (ctx.settings.sandbox === "none" ? ctx.packs?.runtime(pack)?.dir : `${SANDBOX_PACKS_DIR}/${pack}`) : undefined;
+  const agent = await makeAgent(cfg, { ...agentEnv(cfg, env), ...(packDir ? { PACK_DIR: packDir } : {}) });
   if (cfg.agent.endpoint?.trim()) ctx.log("info", `Agent endpoint: ${cfg.agent.endpoint.trim()}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
   const qa: QaPair[] = [];
@@ -241,7 +253,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     sandbox.run({
       ...baseOptions,
       agent,
-      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes }),
+      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes, packDir }),
       maxIterations: cfg.maxIterations,
     });
   // Follow up in the same agent session when possible, otherwise re-run with the extra context in the prompt.

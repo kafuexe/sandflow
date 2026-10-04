@@ -1,0 +1,18 @@
+{
+  "id": "answer-comment",
+  "name": "Answer comment",
+  "isTemplate": false,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "description": "Reads a comment/issue from the trigger event (with the repo as context) and drafts a reply.",
+    "icon": "message-square-reply",
+    "color": "#0ea5e9",
+    "inputs": {
+      "startingPrompt": false
+    },
+    "outputs": {
+      "steer": false
+    },
+    "instructions": "You answer questions and requests left on issues and merge requests. The input artifact describes the event (who wrote what, where). Explore the repository as needed to answer accurately. Do not modify or commit code. The artifact is ONLY the reply to post, in GitHub/GitLab markdown — concise, specific, citing files and lines."
+  }
+}

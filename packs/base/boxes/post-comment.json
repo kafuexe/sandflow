@@ -1,0 +1,18 @@
+{
+  "id": "post-comment",
+  "name": "Post comment",
+  "isTemplate": false,
+  "extends": "tpl-auto-git",
+  "config": {
+    "description": "Posts its input artifact as a comment on the issue / MR / PR the trigger came from (gh / glab).",
+    "icon": "message-square-reply",
+    "autoAction": "post-comment",
+    "env": [],
+    "inputs": {
+      "artifact": true
+    },
+    "outputs": {
+      "artifact": true
+    }
+  }
+}

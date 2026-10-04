@@ -1,0 +1,25 @@
+{
+  "id": "cr-fix",
+  "name": "CR fix",
+  "isTemplate": false,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "description": "Applies the requested review changes and commits them.",
+    "icon": "wrench",
+    "color": "#ef4444",
+    "maxIterations": 3,
+    "instructions": "You are addressing code-review feedback. The input artifact is the review; the steer is the list of requested fixes. Verify each point before changing code, fix what is valid (with tests), and commit. Work in the current repository checkout (it is already on the task branch). The artifact lists what you fixed and anything you deliberately did not change (with reasons).",
+    "skills": [
+      {
+        "name": "receiving-code-review",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/receiving-code-review"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/receiving-code-review",
+        "why": "Apply review feedback with technical rigor"
+      }
+    ]
+  }
+}

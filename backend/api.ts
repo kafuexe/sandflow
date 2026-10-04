@@ -5,10 +5,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
+import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
-import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, RunState, Settings, TriggerEvent } from "../shared/types";
+import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
-import { startRun, type NodeRunner, type RunHandle } from "./engine";
+import { startRun, type NodeRunner, type RunHandle, type RunPacks } from "./engine";
+import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
@@ -27,12 +29,15 @@ class HttpError extends Error {
 
 const MAX_BODY = 5 * 1024 * 1024;
 
-async function readJson<T>(req: IncomingMessage): Promise<T> {
+/** Zips of packs come in as base64 JSON. */
+const MAX_PACK_BODY = 300 * 1024 * 1024;
+
+async function readJson<T>(req: IncomingMessage, max = MAX_BODY): Promise<T> {
   let size = 0;
   const chunks: Buffer[] = [];
   for await (const c of req) {
     size += (c as Buffer).length;
-    if (size > MAX_BODY) throw new HttpError(413, "Body too large");
+    if (size > max) throw new HttpError(413, "Body too large");
     chunks.push(c as Buffer);
   }
   try {
@@ -50,12 +55,25 @@ function send(res: ServerResponse, status: number, body: unknown) {
 
 export type Api = Handler & { shutdown(timeoutMs?: number): Promise<void> };
 
+export interface ApiOptions {
+  bundledSkillsDir?: string;
+  exec?: Exec;
+  assistant?: AssistantRunner;
+  /** Try to pull the base pack from GitHub at start while the installed one is the copy shipped with the app. */
+  fetchBasePack?: boolean;
+}
+
 export function createApi(
   storage: Storage,
-  runners: { auto: NodeRunner; ai: NodeRunner },
-  opts: { bundledSkillsDir?: string; exec?: Exec; assistant?: AssistantRunner } = {},
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner },
+  opts: ApiOptions = {},
 ): Api {
-  const skills = createSkillStore(storage.dir, opts.bundledSkillsDir);
+  const skills = createSkillStore(storage.dir, opts.bundledSkillsDir, storage.packs);
+  const runPacks: RunPacks = {
+    runtime: (id) => storage.packs.runtime(id),
+    dirs: () => storage.packs.dirs(),
+    runtimeRoot: path.join(storage.dir, "packs-runtime"),
+  };
   const exec = opts.exec ?? execCli;
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
@@ -117,10 +135,12 @@ export function createApi(
       blocks: data.blocks,
       env: data.env,
       settings: data.settings,
+      flows: data.flows,
       runners,
       logRoot: path.join(storage.dir, "runs"),
       saveArtifact: storage.saveArtifact,
       loadSkill: skills.read,
+      packs: runPacks,
       ...extra,
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
@@ -151,7 +171,7 @@ export function createApi(
     const flow = data.flows.find((f) => f.id === flowId);
     if (!flow) return { status: "skipped", reason: "flow was deleted" };
     if (!flow.active) return { status: "skipped", reason: "flow is not active" };
-    const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt);
+    const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt, data.flows);
     if (missing.length) return { status: "skipped", reason: `missing inputs: ${missing.join(", ")}` };
     return { status: "started", runId: launch(flow, data, { trigger: event, startNodeId: nodeId }).state.id };
   }
@@ -232,6 +252,25 @@ export function createApi(
   }
   syncTriggers();
 
+  // ---------- packs ----------
+
+  // Installing / removing a pack (or editing a linked pack folder) changes the blocks and flows everyone sees.
+  const offPacks = storage.packs.onChange(() => {
+    syncTriggers();
+    changed({ source: "ui" });
+  });
+  if (opts.fetchBasePack) {
+    // The app ships a copy of the base pack; fetch the current one from GitHub unless updates are off
+    // (air-gapped installs keep the shipped copy).
+    const mode = storage.load().settings.updates?.mode;
+    if (mode !== "off") {
+      void storage.packs
+        .refreshBaseOnline()
+        .then((msg) => console.log(`[packs] ${msg}`))
+        .catch((e: Error) => console.warn(`[packs] couldn't fetch the base pack (keeping the shipped copy): ${e.message}`));
+    }
+  }
+
   function getRun(id: string): RunState {
     const live = runs.get(id)?.state;
     if (live) return live;
@@ -260,7 +299,9 @@ export function createApi(
     if (method !== "GET" && !req.headers["content-type"]?.startsWith("application/json")) {
       throw new HttpError(415, "Content-Type must be application/json");
     }
-    const route = `${method} /${parts.map((p, i) => ((parts[0] === "runs" || parts[0] === "chats") && i === 1 ? ":id" : p)).join("/")}`;
+    const isId = (i: number) =>
+      i === 1 && (parts[0] === "runs" || parts[0] === "chats" || (parts[0] === "packs" && !["preview", "install", "export"].includes(parts[1])));
+    const route = `${method} /${parts.map((p, i) => (isId(i) ? ":id" : p)).join("/")}`;
     noteHost(req.headers.host);
 
     switch (route) {
@@ -284,9 +325,14 @@ export function createApi(
         const blocks = await readJson<BlockDef[]>(req);
         if (!Array.isArray(blocks)) throw new HttpError(400, "Expected an array of blocks");
         checkRev(url);
-        const errors = validateBlocks(blocks);
+        // Pack/core blocks always come from the server, whatever the client sent.
+        const own = blocks.filter((b) => !b.pack);
+        const current = storage.load().blocks;
+        const before = new Map(current.filter((b) => !b.pack).map((b) => [b.id, JSON.stringify(b)]));
+        const touched = new Set(own.filter((b) => before.get(b.id) !== JSON.stringify(b)).map((b) => b.id));
+        const errors = validateBlocks([...current.filter((b) => b.pack), ...own], touched);
         if (errors.length) throw new HttpError(400, errors[0], { errors });
-        storage.saveBlocks(blocks);
+        storage.saveBlocks(own);
         syncTriggers();
         changed({ source: "ui" });
         return send(res, 200, { ok: true, rev });
@@ -296,7 +342,16 @@ export function createApi(
         const flows = await readJson<Flow[]>(req);
         if (!Array.isArray(flows)) throw new HttpError(400, "Expected an array of flows");
         checkRev(url);
-        storage.saveFlows(flows);
+        const own = flows.filter((f) => !f.pack);
+        const bad = own.find((f) => f.id.includes("/"));
+        if (bad) throw new HttpError(400, `Flow id "${bad.id}" can't contain "/" (that's reserved for pack flows)`);
+        const current = storage.load();
+        const all = [...own, ...current.flows.filter((f) => f.pack)];
+        for (const f of own) {
+          const cycle = subflowCycle(f.id, all, current.blocks);
+          if (cycle) throw new HttpError(400, `Subflow loop: ${cycle} — a flow can't contain itself`);
+        }
+        storage.saveFlows(own);
         syncTriggers();
         changed({ source: "ui" });
         return send(res, 200, { ok: true, rev });
@@ -425,7 +480,7 @@ export function createApi(
         const data = storage.load();
         const flow = data.flows.find((f) => f.id === body.flowId);
         if (!flow) throw new HttpError(404, "Flow not found");
-        const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt);
+        const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt, data.flows);
         if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
         return send(res, 200, { runId: launch(flow, data, { prompt }).state.id });
       }
@@ -448,6 +503,85 @@ export function createApi(
 
       case "GET /skills":
         return send(res, 200, await skills.list());
+
+      // ---------- packs ----------
+
+      case "GET /packs":
+        return send(res, 200, storage.packs.load().infos);
+
+      case "POST /packs/preview": {
+        // One of: { url } (GitHub/GitLab) · { folder, link } · { zipName, zipBase64 } · { zipPath } · { update: packId }
+        const b =
+          (await readJson<{ url?: string; folder?: string; link?: boolean; zipName?: string; zipBase64?: string; zipPath?: string; update?: string }>(req, MAX_PACK_BODY)) ??
+          {};
+        try {
+          if (b.url) return send(res, 200, await storage.packs.previewUrl(b.url));
+          if (b.folder) return send(res, 200, storage.packs.previewFolder(b.folder, !!b.link));
+          if (b.zipBase64) return send(res, 200, storage.packs.previewZip(b.zipName ?? "pack.zip", Buffer.from(b.zipBase64, "base64")));
+          if (b.zipPath) return send(res, 200, storage.packs.previewZip(b.zipPath, fs.readFileSync(b.zipPath)));
+          if (b.update) return send(res, 200, await storage.packs.previewUpdate(b.update));
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+        throw new HttpError(400, "Give a url, a folder, a zip or a pack to update");
+      }
+
+      case "POST /packs/install": {
+        const b = (await readJson<{ token?: string; trustHost?: boolean; replace?: boolean }>(req)) ?? {};
+        try {
+          return send(res, 200, storage.packs.install(String(b.token ?? ""), { trustHost: !!b.trustHost, replace: !!b.replace }));
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+      }
+
+      case "POST /packs/export": {
+        // Build a pack from your own blocks/flows: as a zip (base64) or into a folder.
+        const b = (await readJson<{ manifest?: PackManifest; blockIds?: string[]; flowIds?: string[]; folder?: string }>(req)) ?? {};
+        const data = storage.load();
+        try {
+          const files = await buildPack({
+            manifest: b.manifest as PackManifest,
+            blocks: data.blocks.filter((x) => b.blockIds?.includes(x.id)),
+            flows: data.flows.filter((x) => b.flowIds?.includes(x.id)),
+            allBlocks: data.blocks,
+            allFlows: data.flows,
+            installed: data.packs ?? [],
+            readSkill: skills.read,
+          });
+          if (b.folder?.trim()) {
+            writePackFolder(path.resolve(b.folder.trim()), files);
+            return send(res, 200, { folder: path.resolve(b.folder.trim()), fileCount: files.size });
+          }
+          const id = (b.manifest as PackManifest).id;
+          return send(res, 200, { fileName: `${id}.zip`, zipBase64: Buffer.from(zipFiles(files, id)).toString("base64"), fileCount: files.size });
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+      }
+
+      case "DELETE /packs/:id": {
+        try {
+          storage.packs.remove(parts[1]);
+        } catch (e) {
+          throw new HttpError(404, (e as Error).message);
+        }
+        return send(res, 200, { ok: true });
+      }
+
+      case "POST /packs/:id/trust": {
+        const { trustHost } = (await readJson<{ trustHost?: boolean }>(req)) ?? {};
+        try {
+          storage.packs.setTrust(parts[1], !!trustHost);
+        } catch (e) {
+          throw new HttpError(404, (e as Error).message);
+        }
+        return send(res, 200, { ok: true });
+      }
+
+      case "POST /packs/:id/reload":
+        storage.packs.reload();
+        return send(res, 200, { ok: true });
 
       case "POST /skills": {
         const body = await readJson<{ name?: string; files?: SkillFile[] }>(req);
@@ -513,6 +647,7 @@ export function createApi(
   };
   /** Cancel every active run and wait (bounded) for its cleanup — sandboxes/containers get closed. */
   handler.shutdown = async (timeoutMs = 15_000) => {
+    offPacks();
     triggers.stop();
     queues.clear();
     await chats.shutdown();

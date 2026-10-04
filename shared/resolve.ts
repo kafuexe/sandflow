@@ -26,6 +26,9 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   maxIterations: 1,
   trigger: { type: "manual", overlap: "queue" },
   condition: { match: "all", rules: [] },
+  script: { run: "", where: "sandbox", exits: [] },
+  subflow: { flowId: "" },
+  flowOutput: { name: "done" },
 };
 
 const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
@@ -65,6 +68,9 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
     // Trigger settings merge field by field; a condition's rule list is replaced as a whole.
     trigger: { ...base.trigger, ...stripUndef(patch.trigger) },
     condition: def(patch.condition, base.condition),
+    script: { ...base.script, ...stripUndef(patch.script) },
+    subflow: { ...base.subflow, ...stripUndef(patch.subflow) },
+    flowOutput: { ...base.flowOutput, ...stripUndef(patch.flowOutput) },
   };
 }
 
@@ -127,30 +133,45 @@ export interface FlowRequirements {
   startingPromptNodes: { id: string; label: string }[];
 }
 
-/** Everything a flow needs from the user before it can start. */
-export function flowRequirements(flow: Flow, blocks: BlockDef[]): FlowRequirements {
+/**
+ * Everything a flow needs from the user before it can start — including what its subflows need
+ * (pass `flows` so they can be found; nodes inside a subflow are listed as `Subflow › Node`).
+ */
+export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] = []): FlowRequirements {
   const env = new Map<string, RequiredEnvEntry>();
   const startingPromptNodes: { id: string; label: string }[] = [];
-  for (const node of flow.nodes) {
-    let cfg: ResolvedConfig;
-    try {
-      cfg = resolveNode(node, blocks);
-    } catch {
-      continue;
+
+  const visit = (f: Flow, prefix: string, labelPrefix: string, seen: Set<string>, asSubflow: boolean) => {
+    for (const node of f.nodes) {
+      let cfg: ResolvedConfig;
+      try {
+        cfg = resolveNode(node, blocks);
+      } catch {
+        continue;
+      }
+      // Inside a subflow, triggers never fire and Flow input hands on what the parent sent.
+      if (asSubflow && (cfg.kind === "trigger" || cfg.kind === "flow-input")) continue;
+      const id = prefix + node.id;
+      const label = labelPrefix + nodeLabel(node, blocks);
+      if (cfg.inputs.startingPrompt) startingPromptNodes.push({ id, label });
+      const names = [...cfg.env];
+      // Webhook triggers need their secret (to verify the git host's signature).
+      if (cfg.kind === "trigger" && cfg.trigger.mode === "webhook" && cfg.trigger.secretEnv?.trim()) {
+        names.push(cfg.trigger.secretEnv.trim());
+      }
+      for (const name of new Set(names)) {
+        const e = env.get(name) ?? { name, nodes: [] };
+        e.nodes.push({ id, label });
+        env.set(name, e);
+      }
+      if (cfg.kind === "subflow") {
+        const child = flows.find((x) => x.id === cfg.subflow.flowId);
+        if (child && !seen.has(child.id)) visit(child, `${id}/`, `${label} › `, new Set([...seen, child.id]), true);
+      }
     }
-    const label = nodeLabel(node, blocks);
-    if (cfg.inputs.startingPrompt) startingPromptNodes.push({ id: node.id, label });
-    const names = [...cfg.env];
-    // Webhook triggers need their secret (to verify the git host's signature).
-    if (cfg.kind === "trigger" && cfg.trigger.mode === "webhook" && cfg.trigger.secretEnv?.trim()) {
-      names.push(cfg.trigger.secretEnv.trim());
-    }
-    for (const name of new Set(names)) {
-      const e = env.get(name) ?? { name, nodes: [] };
-      e.nodes.push({ id: node.id, label });
-      env.set(name, e);
-    }
-  }
+  };
+  visit(flow, "", "", new Set([flow.id]), false);
+
   return {
     env: [...env.values()].sort((a, b) => a.name.localeCompare(b.name)),
     startingPromptNodes,

@@ -1,4 +1,28 @@
-import type { AppData, AssistantAgent, BlockDef, Chat, ChatSummary, DataChange, EnvValues, Flow, RunState, RunSummary, Settings, SkillRef } from "../../shared/types";
+import type {
+  AppData,
+  AssistantAgent,
+  BlockDef,
+  Chat,
+  ChatSummary,
+  DataChange,
+  EnvValues,
+  Flow,
+  PackInfo,
+  PackManifest,
+  PackPreview,
+  RunState,
+  RunSummary,
+  Settings,
+  SkillRef,
+} from "../../shared/types";
+
+/** What to stage a pack from. */
+export type PackFrom =
+  | { url: string }
+  | { folder: string; link: boolean }
+  | { zipName: string; zipBase64: string }
+  | { zipPath: string }
+  | { update: string };
 
 export interface TriggerStatusRow {
   flowId: string;
@@ -62,6 +86,14 @@ export const api = {
   listSkills: () => request<SkillRef[]>("GET", "/skills"),
   uploadSkill: (name: string, files: { path: string; content: string }[]) =>
     request<SkillRef>("POST", "/skills", { name, files }),
+  listPacks: () => request<PackInfo[]>("GET", "/packs"),
+  previewPack: (from: PackFrom) => request<PackPreview>("POST", "/packs/preview", from),
+  installPack: (token: string, o: { trustHost: boolean; replace: boolean }) => request<PackInfo>("POST", "/packs/install", { token, ...o }),
+  removePack: (id: string) => request("DELETE", `/packs/${encodeURIComponent(id)}`, {}),
+  setPackTrust: (id: string, trustHost: boolean) => request("POST", `/packs/${encodeURIComponent(id)}/trust`, { trustHost }),
+  reloadPack: (id: string) => request("POST", `/packs/${encodeURIComponent(id)}/reload`, {}),
+  exportPack: (body: { manifest: PackManifest; blockIds: string[]; flowIds: string[]; folder?: string }) =>
+    request<{ fileName?: string; zipBase64?: string; folder?: string; fileCount: number }>("POST", "/packs/export", body),
   listRuns: () => request<RunSummary[]>("GET", "/runs"),
   triggers: () => request<TriggersInfo>("GET", "/triggers"),
   cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),

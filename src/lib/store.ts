@@ -13,7 +13,6 @@ import type {
   Settings,
 } from "../../shared/types";
 import { cloneFlow, newFlow } from "../../shared/flows";
-import { EXAMPLE_FLOWS } from "../../shared/library";
 import { api, ApiError, subscribeData, subscribeRun, type TriggersInfo } from "./api";
 
 type Section = "blocks" | "flows" | "settings" | "env";
@@ -31,6 +30,8 @@ interface State {
   selectedNodeId: string | null;
   editor: EditorTarget;
   settingsOpen: boolean;
+  /** Packs dialog open. */
+  packsOpen: boolean;
   sideTab: SideTab;
   run?: RunState;
   /** Recent runs (manual + triggered), newest first. */
@@ -56,14 +57,14 @@ interface State {
   deleteBlock(id: string): void;
   // flows
   setCurrentFlow(id: string): void;
-  /** New empty flow, or a copy of `fromFlowId`. */
+  /** New empty flow, or a copy of `fromFlowId` (any flow, including a pack's). */
   createFlow(name: string, fromFlowId?: string): void;
   renameFlow(id: string, name: string): void;
   /** Turn a flow's triggers on/off. */
   setFlowActive(id: string, active: boolean): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
-  addNode(blockId: string, position: { x: number; y: number }): void;
+  addNode(blockId: string, position: { x: number; y: number }, data?: Partial<FlowNode["data"]>): void;
   updateNodeData(id: string, patch: Partial<FlowNode["data"]>): void;
   updateNodeOverrides(id: string, patch: BlockConfig): void;
   removeNode(id: string): void;
@@ -78,6 +79,7 @@ interface State {
   selectNode(id: string | null): void;
   openEditor(target: EditorTarget): void;
   setSettingsOpen(open: boolean): void;
+  setPacksOpen(open: boolean): void;
   setSideTab(tab: SideTab): void;
   // runs
   startRun(): Promise<void>;
@@ -165,6 +167,8 @@ export const useStore = create<State>((set, get) => {
 
   function patchFlow(fn: (f: Flow) => Flow) {
     const id = get().currentFlowId;
+    // Pack flows are read-only (duplicate them to edit).
+    if (get().data?.flows.find((f) => f.id === id)?.pack) return;
     patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? fn(f) : f)) }), "flows");
   }
 
@@ -183,6 +187,7 @@ export const useStore = create<State>((set, get) => {
     selectedNodeId: null,
     editor: null,
     settingsOpen: false,
+    packsOpen: false,
     sideTab: "inputs",
     saveStatus: "saved",
     highlight: {},
@@ -250,14 +255,13 @@ export const useStore = create<State>((set, get) => {
       set({ currentFlowId: id, selectedNodeId: null });
     },
     createFlow(name, fromFlowId) {
-      const source = fromFlowId
-        ? (get().data?.flows.find((f) => f.id === fromFlowId) ?? EXAMPLE_FLOWS.find((f) => f.id === fromFlowId))
-        : undefined;
+      const source = fromFlowId ? get().data?.flows.find((f) => f.id === fromFlowId) : undefined;
       const flow: Flow = source ? cloneFlow(source, uid("flow"), name) : newFlow(uid("flow"), name);
       patchData((d) => ({ ...d, flows: [...d.flows, flow] }), "flows");
       set({ currentFlowId: flow.id, selectedNodeId: null });
     },
     setFlowActive(id, active) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, active } : f)) }), "flows");
     },
     async watch(runId) {
@@ -281,16 +285,18 @@ export const useStore = create<State>((set, get) => {
       }
     },
     renameFlow(id, name) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, name } : f)) }), "flows");
     },
     deleteFlow(id) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.filter((f) => f.id !== id) }), "flows");
       const next = get().data?.flows[0]?.id ?? null;
       set({ currentFlowId: next, selectedNodeId: null });
     },
 
-    addNode(blockId, position) {
-      const node: FlowNode = { id: uid("n"), type: "block", position, data: { blockId } };
+    addNode(blockId, position, data) {
+      const node: FlowNode = { id: uid("n"), type: "block", position, data: { ...data, blockId } };
       patchFlow((f) => ({ ...f, nodes: [...f.nodes, node] }));
       set({ selectedNodeId: node.id, sideTab: "block" });
     },
@@ -378,6 +384,9 @@ export const useStore = create<State>((set, get) => {
     },
     setSettingsOpen(settingsOpen) {
       set({ settingsOpen });
+    },
+    setPacksOpen(packsOpen) {
+      set({ packsOpen });
     },
     setSideTab(sideTab) {
       set({ sideTab });

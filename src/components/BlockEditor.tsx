@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { ExternalLink, Lock, Plus, RotateCcw, Trash2, X } from "lucide-react";
+import { Copy, ExternalLink, Lock, Plus, RotateCcw, Trash2, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
@@ -23,12 +24,16 @@ const PROVIDERS: AgentProvider[] = ["claudeCode", "codex", "pi", "opencode", "cu
 const EFFORTS: Effort[] = ["low", "medium", "high", "xhigh", "max"];
 const NONE = "__none__";
 
-function newBlock(template: boolean): BlockDef {
+const newId = (template: boolean) => `${template ? "tpl" : "blk"}-${Math.random().toString(36).slice(2, 9)}`;
+
+function newBlock(template: boolean, blocks: BlockDef[]): BlockDef {
+  // New blocks start from the base pack's AI agent template when it's installed.
+  const agentTpl = blocks.find((b) => b.id === "base/tpl-ai-agent") ?? blocks.find((b) => b.id === "tpl-ai-agent");
   return {
-    id: `${template ? "tpl" : "blk"}-${Math.random().toString(36).slice(2, 9)}`,
+    id: newId(template),
     name: template ? "New template" : "New block",
     isTemplate: template,
-    extends: template ? null : "tpl-ai-agent",
+    extends: template ? null : (agentTpl?.id ?? null),
     config: {},
   };
 }
@@ -75,7 +80,7 @@ export function BlockEditor() {
     setErrors([]);
     setEnvInput("");
     if (!target || !data) return setDraft(null);
-    if ("create" in target) setDraft(newBlock(target.create === "template"));
+    if ("create" in target) setDraft(newBlock(target.create === "template", data.blocks));
     else {
       const b = data.blocks.find((x) => x.id === target.id);
       setDraft(b ? structuredClone(b) : null);
@@ -91,6 +96,9 @@ export function BlockEditor() {
 
   if (!draft || !data) return null;
   const isNew = !data.blocks.some((b) => b.id === draft.id);
+  // Blocks from packs (and Sandflow's built-ins) are read-only; duplicate one to make your own.
+  const readOnly = !!draft.pack;
+  const packInfo = draft.pack ? data.packs?.find((p) => p.id === draft.pack) : undefined;
   const inherited = resolveInherited(draft, blocks);
   const cfg = applyConfig(inherited, draft.config);
   const c = draft.config;
@@ -117,13 +125,25 @@ export function BlockEditor() {
   const extendedBy = data.blocks.filter((b) => b.extends === draft.id).map((b) => b.name);
   const deleteBlockedBy = [
     ...(draft.builtin ? ["built-in block"] : []),
+    ...(draft.pack ? ["it comes from a pack"] : []),
     ...usedInFlows.map((n) => `flow "${n}"`),
     ...extendedBy.map((n) => `"${n}" extends it`),
   ];
 
   const ownSkills = c.skills ?? [];
-  /** Trigger and If blocks have no agent, skills or configurable inputs/outputs. */
-  const simple = cfg.kind === "trigger" || cfg.kind === "condition";
+  /** Trigger, If and the subflow plumbing have no agent, skills or configurable inputs/outputs. */
+  const simple = cfg.kind === "trigger" || cfg.kind === "condition" || cfg.kind === "subflow" || cfg.kind === "flow-input" || cfg.kind === "flow-output";
+  const setScript = (patch: Partial<NonNullable<BlockConfig["script"]>>) => {
+    const next = { ...c.script, ...patch };
+    for (const k of Object.keys(next) as (keyof typeof next)[]) if (next[k] === undefined) delete next[k];
+    setCfg({ script: Object.keys(next).length ? next : undefined });
+  };
+  const duplicate = () => {
+    // A copy you own: same settings, no pack. Templates are better extended, but a copy is what was asked for.
+    const copy: BlockDef = { id: newId(draft.isTemplate), name: `${draft.name} (copy)`, isTemplate: draft.isTemplate, extends: draft.extends ?? null, config: structuredClone(draft.config) };
+    upsertBlock(copy);
+    openEditor({ id: copy.id });
+  };
 
   const addEnv = () => {
     const name = envInput.trim().toUpperCase();
@@ -134,7 +154,7 @@ export function BlockEditor() {
 
   const save = () => {
     const next = isNew ? [...data.blocks, draft] : data.blocks.map((b) => (b.id === draft.id ? draft : b));
-    const errs = validateBlocks(next);
+    const errs = validateBlocks(next, new Set([draft.id]));
     if (!draft.name.trim()) errs.unshift("Name is required");
     setErrors(errs);
     if (errs.length) return;
@@ -151,11 +171,14 @@ export function BlockEditor() {
             {isNew ? `New ${draft.isTemplate ? "template" : "block"}` : `Edit ${draft.name}`}
           </DialogTitle>
           <DialogDescription>
-            Unset fields inherit from {draft.extends ? `"${data.blocks.find((b) => b.id === draft.extends)?.name}"` : "the defaults"}.
+            {readOnly
+              ? `From ${packInfo ? `the ${packInfo.name} pack (${packInfo.version})` : draft.pack === "sandflow" ? "Sandflow itself" : `the ${draft.pack} pack`} — view only. Duplicate it to make your own copy${draft.isTemplate ? ", or create a block that extends it" : ""}.`
+              : `Unset fields inherit from ${draft.extends ? `"${data.blocks.find((b) => b.id === draft.extends)?.name}"` : "the defaults"}.`}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+        <ScrollArea className="flex min-h-0 flex-1 flex-col" viewportClassName="min-h-0 flex-1">
+        <fieldset disabled={readOnly} className="min-w-0 space-y-5 p-4">
           <div className="grid grid-cols-2 gap-4">
             <Field label="Name">
               <Input value={draft.name} onChange={(e) => set({ name: e.target.value })} aria-invalid={!draft.name.trim()} />
@@ -190,7 +213,7 @@ export function BlockEditor() {
             </label>
           </div>
 
-          <div className="grid grid-cols-[1fr_1fr_auto_auto] gap-4">
+          <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-4">
             <Field label="Kind" overridden={c.kind !== undefined} onReset={() => setCfg({ kind: undefined })} inheritable>
               <Select value={cfg.kind} onValueChange={(v) => setCfg({ kind: v as BlockKind })}>
                 <SelectTrigger className="w-full">
@@ -202,6 +225,10 @@ export function BlockEditor() {
                   <SelectItem value="manager">manager — AI router</SelectItem>
                   <SelectItem value="trigger">trigger — starts the flow on an event</SelectItem>
                   <SelectItem value="condition">if — deterministic true / false</SelectItem>
+                  <SelectItem value="script">script — run code from a pack (container or this machine)</SelectItem>
+                  {simple && (cfg.kind === "subflow" || cfg.kind === "flow-input" || cfg.kind === "flow-output") && (
+                    <SelectItem value={cfg.kind}>{cfg.kind} (built in)</SelectItem>
+                  )}
                 </SelectContent>
               </Select>
             </Field>
@@ -329,7 +356,54 @@ export function BlockEditor() {
             <Field label="Condition (default — each node can override it in its Block tab)" overridden={c.condition !== undefined} onReset={() => setCfg({ condition: undefined })} inheritable>
               <ConditionEditor value={cfg.condition} onChange={(condition) => setCfg({ condition })} />
             </Field>
-          ) : cfg.kind === "auto" ? (
+          ) : cfg.kind === "script" ? (
+            <div className="space-y-4">
+              <Field label="Run (a shell command; $PACK_DIR = this pack's files, inputs as JSON on stdin)" overridden={c.script?.run !== undefined} onReset={() => setScript({ run: undefined })} inheritable>
+                <Textarea
+                  className="font-mono text-xs"
+                  value={c.script?.run ?? ""}
+                  placeholder={inherited.script.run || 'python "$PACK_DIR/scripts/check.py"'}
+                  onChange={(e) => setScript({ run: e.target.value })}
+                />
+              </Field>
+              <div className="grid grid-cols-3 gap-4">
+                <Field label="Where" overridden={c.script?.where !== undefined} onReset={() => setScript({ where: undefined })} inheritable>
+                  <Select value={cfg.script.where} onValueChange={(v) => setScript({ where: v as "sandbox" | "host" })}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sandbox">In a container</SelectItem>
+                      <SelectItem value="host">On this machine (trusted only)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Exits (comma-separated)" overridden={c.script?.exits !== undefined} onReset={() => setScript({ exits: undefined })} inheritable>
+                  <Input
+                    className="font-mono text-xs"
+                    defaultValue={cfg.script.exits.join(", ")}
+                    key={cfg.script.exits.join(",")}
+                    placeholder="pass, fail"
+                    onBlur={(e) => setScript({ exits: [...new Set(e.target.value.split(",").map((x) => x.trim()).filter(Boolean))] })}
+                  />
+                </Field>
+                <Field label="Timeout (seconds)" overridden={c.script?.timeoutSeconds !== undefined} onReset={() => setScript({ timeoutSeconds: undefined })} inheritable>
+                  <Input
+                    type="number"
+                    min={1}
+                    value={c.script?.timeoutSeconds ?? ""}
+                    placeholder={String(inherited.script.timeoutSeconds ?? 1800)}
+                    onChange={(e) => setScript({ timeoutSeconds: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
+                  />
+                </Field>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                The script writes <code>{'{"artifact": …, "steer": …, "exit": "<name>"}'}</code> to <code>$SANDFLOW_OUTPUT</code>, or just prints the
+                artifact. With exits, the flow continues out of the one it picks. It runs in the run&apos;s sandbox when the block needs{" "}
+                <code>REPO_PATH</code>, otherwise in a throwaway container.
+              </p>
+            </div>
+          ) : simple ? null : cfg.kind === "auto" ? (
             <div className="space-y-4">
               <Field label="Action" overridden={c.autoAction !== undefined} onReset={() => setCfg({ autoAction: undefined })} inheritable>
                 <Select value={cfg.autoAction} onValueChange={(v) => setCfg({ autoAction: v as AutoAction })}>
@@ -451,10 +525,16 @@ export function BlockEditor() {
               ))}
             </div>
           )}
-        </div>
+        </fieldset>
+        </ScrollArea>
 
         <DialogFooter className="items-center border-t p-4">
-          {!isNew && (
+          {readOnly && (
+            <Button variant="outline" size="sm" className="mr-auto" onClick={duplicate}>
+              <Copy /> Duplicate as my own
+            </Button>
+          )}
+          {!isNew && !readOnly && (
             <div className="mr-auto flex items-center gap-2">
               <Button
                 variant="destructive"
@@ -473,9 +553,9 @@ export function BlockEditor() {
             </div>
           )}
           <Button variant="outline" onClick={() => openEditor(null)}>
-            Cancel
+            {readOnly ? "Close" : "Cancel"}
           </Button>
-          <Button onClick={save}>Save</Button>
+          {!readOnly && <Button onClick={save}>Save</Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -32,8 +32,9 @@ needs right-click → Open the first time. macOS auto-update only works for sign
 
 ## Air-gapped / on-prem install
 
-The installers are self-contained: the Node runtime, backend, UI, sandcastle and the base skills are all inside, and
-the app makes no network calls of its own. The target machine only needs **git** and a **container runtime**
+The installers are self-contained: the Node runtime, backend, UI, sandcastle, the base skills and the base pack are all
+inside. With **App updates: Off** the app makes no network calls of its own (otherwise it checks GitHub for app updates
+and, while the installed base pack is still the shipped copy, for a newer base pack). The target machine only needs **git** and a **container runtime**
 (Docker or Podman) — or neither runtime if you use *Sandbox: None*.
 
 Each release also ships an **offline bundle** for the sandbox — `sandflow-sandbox-image-<version>-linux-amd64.tar.gz`
@@ -55,6 +56,7 @@ loaded and stops with a clear message if it isn't.
 6. **Settings → App updates**: *Off*, or *Internal server* — host a release's `latest*.yml` files and installers on
    an internal web server and enter its URL.
 7. Skills: use bundled or uploaded **file** skills; GitHub skills need internet (`npx skills add`).
+8. Packs: add them from a **folder** or **zip** (Packs → Add pack), or from your internal GitLab / GitHub Enterprise.
 
 Using your own image? Set **Settings → Sandbox image** to its name (e.g. `registry.corp:5000/team/agent:1`); it must
 already be present locally. It should keep `ENTRYPOINT ["sleep", "infinity"]`, a writable `HOME=/home/agent`, and
@@ -106,6 +108,37 @@ npm run app
   `ANTHROPIC_BASE_URL` (Claude Code) or `OPENAI_BASE_URL` (Codex); for other agents set *Endpoint env var*.
   Set it on *AI Agent (template)* to apply it to every agent block. Add auth vars (e.g. `ANTHROPIC_AUTH_TOKEN`)
   to the block's env list. Inside Docker, reach a service on your machine via `host.docker.internal`, not `localhost`.
+
+## Packs: sharing blocks and flows
+
+Blocks, templates and flows can come from **packs** — folders, git repos or zips anyone can make and share. Sandflow
+installs the [base pack](https://github.com/kafuexe/sandflow-base-boxes) (the built-in blocks and example flows) on
+first start, from GitHub when it can and from the copy shipped in [`packs/base`](packs/) otherwise.
+
+- **Add** (palette → **Packs** → *Add pack*): a GitHub / GitLab link (repo, tag/branch, or a folder inside a repo;
+  self-hosted works; private repos use `GITHUB_TOKEN` / `GITLAB_TOKEN` from Inputs), a folder (copied, or **linked** so
+  edits show up live), or a zip. Before installing you see its blocks and flows, **every command it can run**, which
+  other packs it needs and, for updates, which files changed.
+- **Ids**: a pack's items are prefixed with its id (`base/plan`), so packs can't overwrite each other or your blocks.
+  Pack blocks and flows are read-only — duplicate one to make your own.
+- **Dependencies**: a pack lists the packs it needs (`requires`, semver ranges). Missing ones can be added from the
+  review screen; a version clash offers to update the other pack or install anyway. One version of each pack is
+  installed at a time, pinned to the commit / content it was installed from.
+- **Code**: a **Script** block runs code from its pack (any language, executables) with the inputs as JSON on stdin and
+  `{artifact, steer, exit}` written to `$SANDFLOW_OUTPUT`. It runs in a container — the run's sandbox when it needs the
+  repo, or the pack's own image / Dockerfile. Each pack's `setup` installs its dependencies into its own copy, so packs
+  never clash. Code from a pack runs **on this machine** (Script `where: host`, Shell command blocks, or Sandbox: None)
+  only if you allow that pack to.
+- **Share** (Packs → *Share my blocks*): pick your blocks and flows; templates and subflows they use come along,
+  other packs become `requires`. Download a zip or write a folder, push it to a repo and share the link. The
+  [base pack repo](https://github.com/kafuexe/sandflow-base-boxes) is a GitHub template with the full format.
+
+### Flows inside flows
+
+Drag a flow from the **Flows** tab onto the canvas to run it as one step (a **Subflow** block). The inner flow decides
+its interface: its **Flow input** block says what it takes (artifact / steer), and each **Flow output** block becomes
+a named exit on the subflow node (e.g. `approved` / `rejected`). Its env vars and starting prompt show up in the
+parent's Inputs tab, its steps show in the Run tab as `Subflow › Step`, and a flow can't contain itself.
 
 ## Triggers & logic
 
@@ -169,7 +202,8 @@ these tools — copy it into your agent's skills folder (e.g. `~/.claude/skills/
 
 Everything is stored in a data folder — desktop app: `%APPDATA%\Sandflow\data` (Windows),
 `~/Library/Application Support/Sandflow/data` (macOS), `~/.config/Sandflow/data` (Linux); `npm run dev`: `./.sandflow/`.
-It holds `library.json` (blocks), `flows.json`, `settings.json`,
+It holds `library.json` (your blocks), `flows.json` (your flows), `packs/` + `packs.json` (installed packs and what
+they're pinned to), `settings.json`,
 `env.json` (**secrets — gitignored**), `runs/` (run state, artifacts and agent logs) and `chats/` (Edit with AI
 conversations).
 

@@ -7,6 +7,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import electronUpdater from "electron-updater";
 import { runAi } from "../backend/runners/ai";
 import { runAuto } from "../backend/runners/auto";
+import { runScript } from "../backend/runners/script";
 import { startAppServer, type AppServer } from "../backend/server";
 import type { UpdateSettings } from "../shared/types";
 
@@ -119,7 +120,8 @@ async function start() {
     dataDir,
     webRoot: path.join(appRoot, "dist"),
     bundledSkillsDir: app.isPackaged ? path.join(process.resourcesPath, "skills") : path.join(appRoot, "skills"),
-    runners: { auto: runAuto, ai: runAi },
+    bundledPacksDir: app.isPackaged ? path.join(process.resourcesPath, "packs") : path.join(appRoot, "packs"),
+    runners: { auto: runAuto, ai: runAi, script: runScript },
   });
   console.log(`Sandflow backend listening on ${server.url}`);
   createWindow(server.url);

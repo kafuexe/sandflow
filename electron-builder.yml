@@ -13,10 +13,13 @@ files:
   - dist-electron/**
   - package.json
 
-# Base skills ship next to the app (copied into sandboxes at run time).
+# Base skills ship next to the app (copied into sandboxes at run time), and so does a copy of the base pack
+# (installed on first start when GitHub can't be reached).
 extraResources:
   - from: skills
     to: skills
+  - from: packs
+    to: packs
 
 # sandcastle spawns processes / reads templates from its own package dir.
 asarUnpack:

@@ -1,17 +1,20 @@
-import { Copy, ExternalLink, Pencil, Radio, Trash2 } from "lucide-react";
+import { Copy, ExternalLink, Lock, Pencil, Radio, ShieldAlert, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore, type SideTab } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { resolveNode } from "../../shared/resolve";
+import { CORE_PACK } from "../../shared/packs";
+import { templateChain } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
-import type { BlockDef, ResolvedConfig } from "../../shared/types";
+import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../shared/subflow";
+import type { BlockDef, Flow, FlowNode, ResolvedConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
 import { TriggerEditor } from "./TriggerEditor";
@@ -55,13 +58,15 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
                   ) : (
                     s.name
                   )}
-                  <span className="truncate text-muted-foreground">({s.file ? (s.file.store === "bundled" ? "bundled file" : "uploaded file") : s.source})</span>
+                  <span className="truncate text-muted-foreground">
+                    ({s.file ? (s.file.store === "bundled" ? "bundled file" : s.file.store === "pack" ? `pack ${s.file.pack}` : "uploaded file") : s.source})
+                  </span>
                 </div>
               ))
             : "—"}
         </div>
       </Row>
-      {cfg.kind !== "auto" && (
+      {(cfg.kind === "ai" || cfg.kind === "manager") && (
         <>
           <Row k="Agent">
             {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
@@ -79,6 +84,148 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
         <Row k="Command">
           <code className="break-all">{cfg.shellCommand || "—"}</code>
         </Row>
+      )}
+    </div>
+  );
+}
+
+/** Which flow a subflow node runs, and what that flow takes in / gives back. */
+function SubflowEditor({ flow, node, cfg, readOnly }: { flow: Flow; node: FlowNode; cfg: ResolvedConfig & { exits: string[] }; readOnly: boolean }) {
+  const flows = useStore((s) => s.data?.flows ?? []);
+  const blocks = useStore((s) => s.data?.blocks ?? []);
+  const { updateNodeOverrides, updateNodeData, setCurrentFlow } = useStore.getState();
+  const child = flows.find((f) => f.id === cfg.subflow.flowId);
+  // Only flows that wouldn't make this flow contain itself.
+  const choices = flows.filter((f) => {
+    if (f.id === flow.id) return false;
+    const trial = flows.map((x) =>
+      x.id === flow.id ? { ...x, nodes: x.nodes.map((n) => (n.id === node.id ? { ...n, data: { ...n.data, overrides: { ...n.data.overrides, subflow: { flowId: f.id } } } } : n)) } : x,
+    );
+    return !subflowCycle(flow.id, trial, blocks);
+  });
+  const fi = child ? flowInterface(child, blocks) : undefined;
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-medium">Flow to run</div>
+      <Select
+        disabled={readOnly}
+        value={cfg.subflow.flowId || undefined}
+        onValueChange={(id) => {
+          updateNodeOverrides(node.id, { subflow: { flowId: id } });
+          const picked = flows.find((f) => f.id === id);
+          if (picked && (!node.data.label || node.data.label === child?.name)) updateNodeData(node.id, { label: picked.name });
+        }}
+      >
+        <SelectTrigger size="sm" className="w-full">
+          <SelectValue placeholder="Pick a flow" />
+        </SelectTrigger>
+        <SelectContent>
+          {choices.map((f) => (
+            <SelectItem key={f.id} value={f.id}>
+              {f.name}
+              {f.pack && <span className="text-muted-foreground"> · {f.pack}</span>}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {child && fi && (
+        <div className="space-y-1.5 rounded-lg border p-2 text-xs">
+          <Row k="Takes">
+            {fi.hasInput ? [fi.inputs.artifact && "artifact", fi.inputs.steer && "steer"].filter(Boolean).join(", ") || "nothing" : <span className="text-amber-400">no Flow input (it gets nothing from here)</span>}
+          </Row>
+          <Row k="Exits">
+            {fi.exits.length ? fi.exits.join(", ") : <span className="text-amber-400">no Flow output (nothing continues after it)</span>}
+          </Row>
+          <p className="text-[11px] text-muted-foreground">
+            Set on that flow&apos;s <b>Flow input</b> and <b>Flow output</b> blocks.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => setCurrentFlow(child.id)}>
+            <Workflow /> Open “{child.name}”
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A Script node: what it runs, where, and its named exits. */
+function ScriptEditor({ node, cfg, pack }: { node: FlowNode; cfg: ResolvedConfig; pack?: string }) {
+  const packs = useStore((s) => s.data?.packs ?? []);
+  const { updateNodeOverrides } = useStore.getState();
+  const own = node.data.overrides?.script ?? {};
+  const set = (patch: Partial<NonNullable<typeof own>>) => {
+    const next = { ...own, ...patch };
+    for (const k of Object.keys(next) as (keyof typeof next)[]) if (next[k] === undefined) delete next[k];
+    updateNodeOverrides(node.id, { script: Object.keys(next).length ? next : undefined });
+  };
+  const info = pack ? packs.find((p) => p.id === pack) : undefined;
+  const exitsText = cfg.script.exits.join(", ");
+  return (
+    <div className="space-y-3">
+      <div className="space-y-1.5">
+        <Label htmlFor="script-run">Run (this node)</Label>
+        <Textarea
+          id="script-run"
+          rows={2}
+          className="font-mono text-xs"
+          value={own.run ?? ""}
+          placeholder={cfg.script.run || 'python "$PACK_DIR/scripts/report.py"'}
+          onChange={(e) => set({ run: e.target.value || undefined })}
+        />
+        <p className="text-[11px] text-muted-foreground">
+          Gets its inputs as JSON on stdin, writes <code>{"{artifact, steer, exit}"}</code> to <code>$SANDFLOW_OUTPUT</code> (or prints the artifact).
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1.5">
+          <Label>Where</Label>
+          <Select value={cfg.script.where} onValueChange={(v) => set({ where: v as "sandbox" | "host" })}>
+            <SelectTrigger size="sm" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="sandbox">In a container</SelectItem>
+              <SelectItem value="host">On this machine</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="script-timeout">Timeout (s)</Label>
+          <Input
+            id="script-timeout"
+            type="number"
+            min={1}
+            className="h-8"
+            value={own.timeoutSeconds ?? ""}
+            placeholder={String(cfg.script.timeoutSeconds ?? 1800)}
+            onChange={(e) => set({ timeoutSeconds: e.target.value ? Math.max(1, Number(e.target.value)) : undefined })}
+          />
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="script-exits">Exits (comma-separated; empty = plain artifact/steer outputs)</Label>
+        <Input
+          id="script-exits"
+          className="h-8 font-mono text-xs"
+          defaultValue={exitsText}
+          key={exitsText}
+          placeholder="pass, fail"
+          onBlur={(e) => {
+            const exits = [...new Set(e.target.value.split(",").map((x) => x.trim()).filter((x) => EXIT_NAME_RE.test(x)))];
+            if (exits.join(", ") !== exitsText) set({ exits });
+          }}
+        />
+      </div>
+      {pack && (
+        <div className="flex items-start gap-1.5 rounded-lg border p-2 text-[11px] text-muted-foreground">
+          {info?.trustHost ? <ShieldCheck className="size-3.5 shrink-0 text-emerald-400" /> : <ShieldAlert className="size-3.5 shrink-0 text-amber-400" />}
+          <span>
+            Uses files from the <b>{info?.name ?? pack}</b> pack ($PACK_DIR).{" "}
+            {info?.trustHost
+              ? "That pack may run code on this machine."
+              : "That pack's code only runs in a container — allow it in Packs to run it on this machine."}
+          </span>
+        </div>
       )}
     </div>
   );
@@ -130,18 +277,26 @@ function TriggerStatusCard({ flowId, nodeId, cfg, active }: { flowId: string; no
 function BlockPanel() {
   const flow = useCurrentFlow();
   const blocks = useStore((s) => s.data?.blocks ?? []);
+  const flows = useStore((s) => s.data?.flows ?? []);
   const selectedId = useStore((s) => s.selectedNodeId);
-  const { updateNodeData, updateNodeOverrides, removeNode, openEditor, upsertBlock } = useStore.getState();
+  const { updateNodeData, updateNodeOverrides, removeNode, openEditor, upsertBlock, createFlow } = useStore.getState();
   const node = flow?.nodes.find((n) => n.id === selectedId);
 
-  if (!node) return <div className="p-4 text-sm text-muted-foreground">Select a block on the canvas.</div>;
+  if (!node || !flow) return <div className="p-4 text-sm text-muted-foreground">Select a block on the canvas.</div>;
   const block = blocks.find((b) => b.id === node.data.blockId);
-  let cfg: ResolvedConfig | undefined;
+  let cfg: (ResolvedConfig & { exits: string[] }) | undefined;
   let error: string | undefined;
   try {
-    cfg = resolveNode(node, blocks);
+    cfg = resolveNodeIn(node, blocks, flows);
   } catch (e) {
     error = (e as Error).message;
+  }
+  const readOnly = !!flow.pack;
+  let filesPack: string | undefined;
+  try {
+    filesPack = [...templateChain(node.data.blockId, blocks)].reverse().find((b) => b.pack && b.pack !== CORE_PACK)?.pack;
+  } catch {
+    /* broken chain */
   }
 
   const duplicate = () => {
@@ -161,6 +316,18 @@ function BlockPanel() {
   return (
     <ScrollArea className="h-full">
       <div className="space-y-4 p-3">
+        {readOnly && (
+          <div className="flex items-center gap-2 rounded-lg border p-2 text-xs text-muted-foreground">
+            <Lock className="size-3.5 shrink-0" />
+            <span className="flex-1">This flow comes from the {flow.pack} pack and is view only.</span>
+            <Button size="sm" variant="outline" className="h-7" onClick={() => createFlow(`${flow.name} (copy)`, flow.id)}>
+              Duplicate
+            </Button>
+          </div>
+        )}
+        {/* Opening the flow a subflow runs works even when this flow is view only. */}
+        {cfg?.kind === "subflow" && <SubflowEditor flow={flow} node={node} cfg={cfg} readOnly={readOnly} />}
+        <fieldset disabled={readOnly} className="min-w-0 space-y-4">
         <div className="space-y-1.5">
           <Label htmlFor="node-label">Label</Label>
           <Input
@@ -173,8 +340,40 @@ function BlockPanel() {
           <div className="text-[11px] text-muted-foreground">
             Block: {block?.name ?? node.data.blockId}
             {block?.isTemplate && " (template)"}
+            {block?.pack && block.pack !== CORE_PACK && ` · ${block.pack} pack`}
           </div>
         </div>
+        {cfg?.kind === "script" && <ScriptEditor node={node} cfg={cfg} pack={filesPack} />}
+        {cfg?.kind === "flow-input" && (
+          <div className="space-y-2">
+            <div className="text-xs font-medium">What this flow takes in when it runs as a subflow</div>
+            {(["artifact", "steer"] as const).map((k) => (
+              <label key={k} className="flex items-center justify-between text-sm">
+                {k}
+                <Switch checked={cfg!.outputs[k]} onCheckedChange={(v) => updateNodeOverrides(node.id, { outputs: { ...node.data.overrides?.outputs, [k]: v } })} />
+              </label>
+            ))}
+          </div>
+        )}
+        {cfg?.kind === "flow-output" && (
+          <div className="space-y-1.5">
+            <Label htmlFor="flow-output-name">Exit name</Label>
+            <Input
+              id="flow-output-name"
+              className="h-8 font-mono"
+              defaultValue={cfg.flowOutput.name}
+              key={cfg.flowOutput.name}
+              onBlur={(e) => {
+                const name = e.target.value.trim();
+                if (EXIT_NAME_RE.test(name) && name !== cfg!.flowOutput.name) updateNodeOverrides(node.id, { flowOutput: { name } });
+                else e.target.value = cfg!.flowOutput.name;
+              }}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Where a parent flow continues when this flow reaches this block. Several outputs with different names = several exits (e.g. approved / rejected).
+            </p>
+          </div>
+        )}
         {error && <div className="text-xs text-red-400">{error}</div>}
         {cfg?.kind === "trigger" && (
           <div className="space-y-3">
@@ -208,16 +407,21 @@ function BlockPanel() {
           </div>
         )}
         {cfg && <Summary cfg={cfg} />}
+        </fieldset>
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="outline" onClick={() => block && openEditor({ id: block.id })} disabled={!block}>
-            <Pencil /> Edit block definition
+            <Pencil /> {block?.pack ? "View block definition" : "Edit block definition"}
           </Button>
-          <Button size="sm" variant="outline" onClick={duplicate} disabled={!block}>
-            <Copy /> Duplicate as new block
-          </Button>
-          <Button size="sm" variant="destructive" onClick={() => removeNode(node.id)}>
-            <Trash2 /> Delete node
-          </Button>
+          {!readOnly && (
+            <>
+              <Button size="sm" variant="outline" onClick={duplicate} disabled={!block || block.pack === CORE_PACK}>
+                <Copy /> Duplicate as new block
+              </Button>
+              <Button size="sm" variant="destructive" onClick={() => removeNode(node.id)}>
+                <Trash2 /> Delete node
+              </Button>
+            </>
+          )}
         </div>
       </div>
     </ScrollArea>

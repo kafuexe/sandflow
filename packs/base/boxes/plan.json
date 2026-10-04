@@ -1,0 +1,34 @@
+{
+  "id": "plan",
+  "name": "Plan",
+  "isTemplate": false,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "description": "Reads the task and the repo and writes an implementation plan.",
+    "icon": "list-checks",
+    "color": "#6366f1",
+    "instructions": "You are a senior engineer planning a change. Read the task and explore the repository. Produce a step-by-step implementation plan: files to change or create, tests to write first, risks and open questions. Do NOT write or modify any code. The artifact is the full plan in markdown; the steer is the handful of key points the implementer must not miss.",
+    "skills": [
+      {
+        "name": "writing-plans",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/writing-plans"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/writing-plans",
+        "why": "Turn requirements into a step-by-step implementation plan"
+      },
+      {
+        "name": "brainstorming",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/brainstorming"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/brainstorming",
+        "why": "Explore intent and requirements before planning"
+      }
+    ]
+  }
+}

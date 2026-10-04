@@ -1,0 +1,13 @@
+{
+  "id": "manual-trigger",
+  "name": "Manual start",
+  "isTemplate": false,
+  "extends": "tpl-trigger",
+  "config": {
+    "description": "Starts the flow only when you press Run.",
+    "icon": "play",
+    "trigger": {
+      "type": "manual"
+    }
+  }
+}

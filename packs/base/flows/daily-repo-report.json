@@ -1,0 +1,38 @@
+{
+  "id": "daily-repo-report",
+  "name": "Daily repo report",
+  "description": "Runs a shell command on a schedule.",
+  "nodes": [
+    {
+      "id": "t",
+      "type": "block",
+      "position": {
+        "x": 0,
+        "y": 0
+      },
+      "data": {
+        "blockId": "schedule-trigger"
+      }
+    },
+    {
+      "id": "sh",
+      "type": "block",
+      "position": {
+        "x": 320,
+        "y": 0
+      },
+      "data": {
+        "blockId": "shell"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-t-artifact-sh-artifact",
+      "source": "t",
+      "target": "sh",
+      "sourceHandle": "artifact",
+      "targetHandle": "artifact"
+    }
+  ]
+}

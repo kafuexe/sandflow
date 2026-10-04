@@ -51,26 +51,36 @@ async function exists(p: string) {
 
 export type SkillStore = ReturnType<typeof createSkillStore>;
 
-export function createSkillStore(dataDir: string, bundledDir = BUNDLED_SKILLS_DIR) {
+/** Installed pack folders (pack skills live in `<pack>/skills/`). */
+export interface SkillPacks {
+  dirs(): { id: string; dir: string }[];
+}
+
+export function createSkillStore(dataDir: string, bundledDir = BUNDLED_SKILLS_DIR, packs?: SkillPacks) {
   const userDir = path.join(dataDir, "skills");
-  const rootOf = (store: SkillFileRef["store"]) => (store === "bundled" ? bundledDir : userDir);
+  const packSkillsDir = (id: string | undefined) => {
+    const p = packs?.dirs().find((x) => x.id === id);
+    if (!p) throw new Error(`Pack "${id}" isn't installed`);
+    return path.join(p.dir, "skills");
+  };
+  const rootOf = (store: SkillFileRef["store"], pack?: string) => (store === "bundled" ? bundledDir : store === "pack" ? packSkillsDir(pack) : userDir);
 
   function locate(ref: SkillFileRef): string {
-    if ((ref.store !== "bundled" && ref.store !== "user") || !SKILL_DIR_RE.test(ref.dir)) {
+    if ((ref.store !== "bundled" && ref.store !== "user" && ref.store !== "pack") || !SKILL_DIR_RE.test(ref.dir)) {
       throw new Error(`Invalid skill location "${ref.store}:${ref.dir}"`);
     }
-    const root = rootOf(ref.store);
+    const root = rootOf(ref.store, ref.pack);
     const dir = path.resolve(root, ref.dir);
     if (!dir.startsWith(path.resolve(root) + path.sep)) throw new Error(`Invalid skill location "${ref.dir}"`);
     return dir;
   }
 
-  async function describe(store: SkillFileRef["store"], dir: string): Promise<SkillRef> {
-    const md = await fs.readFile(path.join(rootOf(store), dir, "SKILL.md"), "utf8");
+  async function describe(store: SkillFileRef["store"], dir: string, pack?: string): Promise<SkillRef> {
+    const md = await fs.readFile(path.join(rootOf(store, pack), dir, "SKILL.md"), "utf8");
     const fm = frontmatter(md);
     const name = SKILL_NAME_RE.test(fm.name ?? "") ? fm.name : path.basename(dir);
-    const known = SKILL_CATALOG.find((s) => s.file?.store === store && s.file.dir === dir);
-    return known ?? { name, file: { store, dir }, why: fm.description?.slice(0, 200) || undefined };
+    const known = store === "pack" ? undefined : SKILL_CATALOG.find((s) => s.file?.store === store && s.file.dir === dir);
+    return known ?? { name, file: { store, dir, ...(pack ? { pack } : {}) }, why: fm.description?.slice(0, 200) || undefined };
   }
 
   return {
@@ -84,7 +94,7 @@ export function createSkillStore(dataDir: string, bundledDir = BUNDLED_SKILLS_DI
       return Promise.all(files.map(async (p) => ({ path: p, content: await fs.readFile(path.join(dir, p), "utf8") })));
     },
 
-    /** Every bundled (`<origin>/<name>`) and uploaded (`<name>`) skill. */
+    /** Every bundled (`<origin>/<name>`), uploaded (`<name>`) and pack skill. */
     async list(): Promise<SkillRef[]> {
       const out: SkillRef[] = [];
       const dirs = async (root: string) =>
@@ -96,6 +106,13 @@ export function createSkillStore(dataDir: string, bundledDir = BUNDLED_SKILLS_DI
       }
       for (const name of await dirs(userDir)) {
         if (await exists(path.join(userDir, name, "SKILL.md"))) out.push(await describe("user", name));
+      }
+      for (const p of packs?.dirs() ?? []) {
+        const root = path.join(p.dir, "skills");
+        const found = await walk(root).catch(() => [] as string[]);
+        for (const f of found.filter((x) => x.endsWith("/SKILL.md")).sort()) {
+          out.push(await describe("pack", f.slice(0, -"/SKILL.md".length), p.id).catch(() => ({ name: f, file: { store: "pack" as const, pack: p.id, dir: f } })));
+        }
       }
       return out;
     },

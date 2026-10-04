@@ -1,3 +1,4 @@
 # Skills are copied into Linux sandboxes; keep LF so scripts run there.
 skills/** text eol=lf
 sandbox/** text eol=lf
+packs/** text eol=lf

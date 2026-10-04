@@ -14,10 +14,12 @@ export interface PromptParts {
   qa: QaPair[];
   /** manager only: the outgoing connections to choose from. */
   routes?: RouteOption[];
+  /** Where the files of the pack this block comes from are (read-only), when it comes from one. */
+  packDir?: string;
 }
 
 /** Builds the inline prompt string for an AI / manager block (never a prompt file — see plan §0). */
-export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes }: PromptParts): string {
+export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir }: PromptParts): string {
   const sections: string[] = [];
   const role = [cfg.instructions, cfg.extraInstructions].filter((s) => s.trim()).join("\n\n");
   sections.push(`# Role\n${role || "You are a helpful software engineering agent."}`);
@@ -25,6 +27,9 @@ export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes }: PromptP
   if (cfg.skills.length) {
     const list = cfg.skills.map((s) => `- ${s.name}${s.why ? ` — ${s.why}` : ""}`).join("\n");
     sections.push(`# Skills\nUse these installed skills where relevant:\n${list}`);
+  }
+  if (packDir) {
+    sections.push(`# Pack files\nFiles that come with this block (templates, checklists, scripts, …) are in \`${packDir}\` (also \`$PACK_DIR\`), read-only.`);
   }
   if (cfg.inputs.startingPrompt && startingPrompt.trim()) {
     sections.push(`# Task (starting prompt)\n${startingPrompt.trim()}`);
