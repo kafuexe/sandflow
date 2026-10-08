@@ -181,7 +181,7 @@ Rendered like a subflow node with a stacked-card edge (two offset outlines behin
      stack steer }`;
    - **Shared:** uses the parent run's sandbox;
    - **Isolated:** creates a sandbox via the same path as the run sandbox, on branch
-     `<run-branch>/stack-<index>-<slug>` cut from the parent branch at stack start (suffix added if it exists); the
+     `<run-branch>-stack-<index>-<slug>` (not `/`-nested: git cannot hold both `a/b` and `a/b/c`) cut from the parent branch at stack start (suffix added if it exists); the
      branch is recorded on the child run.
 4. **Retry.** A rejected attempt is re-queued with `attempt + 1`; its input is prefixed with the previous rejection
    ("Previous attempt ended at exit `rejected`: <reason>" or the error). After `maxRetries` it is **dropped**.
