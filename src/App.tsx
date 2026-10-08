@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { BlockEditor } from "@/components/BlockEditor";
 import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
+import { FlagAlerts } from "@/components/FlagAlerts";
 import { FlowCanvas } from "@/components/FlowCanvas";
 import { useMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
@@ -295,6 +296,7 @@ export default function App() {
       <SettingsDialog />
       <PacksDialog />
       {view === "builder" && <QuestionDialog />}
+      <FlagAlerts />
     </ReactFlowProvider>
   );
 }

@@ -570,6 +570,8 @@ export interface RunState {
   /** Set on a run started by another run's stack node. */
   parent?: { runId: string; nodeKey: string };
   stack?: StackRunInfo;
+  /** A run started with an input (stack children): what it was handed. */
+  input?: NodeIO;
   /** A run started with an input (stack children): the Flow output it reached and what it handed back. */
   result?: { exit?: string; outputs?: NodeIO };
 }

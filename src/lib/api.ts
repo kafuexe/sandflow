@@ -10,6 +10,7 @@ import type {
   PackInfo,
   PackManifest,
   PackPreview,
+  RunFlag,
   RunState,
   RunSummary,
   Settings,
@@ -97,7 +98,25 @@ export const api = {
   listRuns: () => request<RunSummary[]>("GET", "/runs"),
   triggers: () => request<TriggersInfo>("GET", "/triggers"),
   cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
+  dismissFlag: (runId: string, flagId: string) =>
+    request("POST", `/runs/${encodeURIComponent(runId)}/flags/${encodeURIComponent(flagId)}/dismiss`, {}),
 };
+
+/** A flag raised on a top-level run (flags from stack tasks arrive as copies on their top-level run). */
+export interface FlagEvent {
+  runId: string;
+  runTitle: string;
+  flowName: string;
+  flag: RunFlag;
+}
+
+/** Flags raised and cleared anywhere, live. */
+export function subscribeFlags(onFlag: (e: FlagEvent) => void, onDismissed: (e: { runId: string; flagId: string }) => void): () => void {
+  const es = new EventSource("/api/data/events");
+  es.addEventListener("flag", (ev) => onFlag(JSON.parse((ev as MessageEvent).data) as FlagEvent));
+  es.addEventListener("flag-dismissed", (ev) => onDismissed(JSON.parse((ev as MessageEvent).data) as { runId: string; flagId: string }));
+  return () => es.close();
+}
 
 /** Flows/blocks changed on the server (e.g. by the assistant). */
 export function subscribeData(onChange: (c: DataChange) => void): () => void {

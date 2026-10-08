@@ -18,6 +18,7 @@ describe("child runs", () => {
     expect(final.status).toBe("done");
     expect(final.parent).toEqual({ runId: "p", nodeKey: "s" });
     expect(final.result).toEqual({ exit: "done", outputs: { artifact: "did auth" } });
+    expect(final.input).toEqual({ artifact: "auth" });
   });
 });
 

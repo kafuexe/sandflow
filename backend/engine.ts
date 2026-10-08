@@ -180,6 +180,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     triggerNodeId: opts.startNodeId,
     ...(opts.parent ? { parent: opts.parent } : {}),
     ...(opts.stack ? { stack: opts.stack } : {}),
+    ...(opts.entry ? { input: opts.entry } : {}),
   };
   const emit = () => opts.onChange?.(run);
 

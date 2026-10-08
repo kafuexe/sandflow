@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import type { RunState } from "../../../shared/types";
 import { RunComposer, StopButton } from "./Composer";
 import { QuestionCard } from "./QuestionCard";
+import { FlagsBanner, StackCrumb } from "./RunFlags";
 import { StepRail } from "./StepRail";
 import { StepRow } from "./StepRow";
 import { RUN_TONE, RunStatusIcon, ago, duration, useNow } from "./status";
@@ -21,7 +22,8 @@ function Header({ run, rf }: { run: RunState; rf: ReturnType<typeof useRunFlow> 
     <header className="shrink-0 space-y-2.5 border-b px-6 pt-3 pb-2">
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-base leading-6 font-semibold">{runTitle(run)}</h2>
+          <StackCrumb run={run} />
+          <h2 className="truncate text-base leading-6 font-semibold">{run.stack ? run.stack.task : runTitle(run)}</h2>
           <p className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
             <span>
               Flow <span className="font-medium text-foreground">{run.flowName}</span>
@@ -56,6 +58,14 @@ function Header({ run, rf }: { run: RunState; rf: ReturnType<typeof useRunFlow> 
 }
 
 function Opening({ run }: { run: RunState }) {
+  if (run.stack) {
+    return (
+      <div className="space-y-1">
+        <p className="text-xs text-muted-foreground">Task handed over by {run.stack.name}</p>
+        <p className="rounded-lg border bg-card/40 px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">{run.input?.artifact ?? "(no input)"}</p>
+      </div>
+    );
+  }
   if (run.prompt?.trim()) {
     return (
       <div className="flex justify-end">
@@ -127,6 +137,7 @@ export function Conversation({ run }: { run: RunState }) {
         }}
       >
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
+          <FlagsBanner run={run} />
           <Opening run={run} />
           {items.length > 0 && (
             <ol className="relative space-y-4 before:absolute before:top-3 before:bottom-3 before:left-[13.5px] before:w-px before:bg-border">

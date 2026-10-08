@@ -3,7 +3,9 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Check, HelpCircle, KeyRound, Loader2, MessageSquareText, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { TASK_TONE } from "@/components/agent/status";
 import { BlockIcon } from "@/lib/icons";
+import { groupRuns, taskTone } from "@/lib/runGroups";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { describeCondition } from "../../shared/conditions";
@@ -36,6 +38,11 @@ function summary(cfg: ResolvedConfig, flows: Flow[]): string | undefined {
   if (cfg.kind === "subflow") {
     const child = flows.find((f) => f.id === cfg.subflow.flowId);
     return child ? `Runs “${child.name}”` : cfg.subflow.flowId ? `Unknown flow ${cfg.subflow.flowId}` : "Pick the flow to run";
+  }
+  if (cfg.kind === "stack") {
+    const child = flows.find((f) => f.id === cfg.stack.flowId);
+    if (!child) return cfg.stack.flowId ? `Unknown flow ${cfg.stack.flowId}` : "Pick the flow to run per task";
+    return `“${child.name}” per task · ≤${cfg.stack.maxConcurrent} at once · ${cfg.stack.workspace}`;
   }
   if (cfg.kind === "flow-input") return "What the parent flow sends in";
   if (cfg.kind === "flow-output") return `Leaves through exit “${cfg.flowOutput.name || "done"}”`;
@@ -143,6 +150,31 @@ function HandleRow({ cfg, side }: { cfg: ResolvedConfig; side: "in" | "out" }) {
   );
 }
 
+/** While the run on the canvas is in this stack: one segment per task, coloured by how far it got. */
+function StackProgress({ nodeKey }: { nodeKey: string }) {
+  const runId = useStore((s) => s.run?.id);
+  const runs = useStore((s) => s.runs);
+  if (!runId) return null;
+  const groups = groupRuns(runs.filter((r) => r.id === runId || (r.parent?.runId === runId && r.parent.nodeKey === nodeKey))).groups.get(runId);
+  const g = groups?.at(-1);
+  if (!g) return null;
+  return (
+    <div className="space-y-1">
+      <div className="flex h-1.5 gap-px overflow-hidden rounded-full" aria-hidden>
+        {g.tasks.map((t) => (
+          <span key={t.id} className={cn("flex-1", TASK_TONE[taskTone(t)].bar)} />
+        ))}
+        {Array.from({ length: Math.max(0, g.total - g.tasks.length) }, (_, i) => (
+          <span key={i} className="flex-1 bg-muted" />
+        ))}
+      </div>
+      <div className="text-muted-foreground">
+        {g.settled} of {g.total} tasks done
+      </div>
+    </div>
+  );
+}
+
 function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const blocks = useStore((s) => s.data?.blocks ?? []);
   const flows = useStore((s) => s.data?.flows ?? []);
@@ -178,6 +210,9 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
       key={touchedAt ?? "idle"}
       className={cn(
         "relative w-[240px] rounded-lg border bg-card text-card-foreground shadow-md transition-shadow",
+        // A Box Stack reads as a stack of cards: two offset outlines behind it.
+        cfg.kind === "stack" &&
+          "before:absolute before:inset-0 before:-z-10 before:translate-x-1.5 before:translate-y-1.5 before:rounded-lg before:border before:border-orange-400/40 before:bg-card after:absolute after:inset-0 after:-z-20 after:translate-x-3 after:translate-y-3 after:rounded-lg after:border after:border-orange-400/20 after:bg-card",
         selected && "outline-2 outline-offset-2 outline-primary/60",
         STATUS_RING[status],
         touchedAt && "ai-touched",
@@ -256,6 +291,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
             />
           </label>
         )}
+        {cfg.kind === "stack" && <StackProgress nodeKey={id} />}
         {runNode?.error && <div className="text-red-400">{runNode.error}</div>}
       </div>
     </div>

@@ -3,6 +3,7 @@ import path from "node:path";
 import { CORE_BLOCKS } from "../shared/core";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
 import { BASE_PACK } from "../shared/packs";
+import { summarize } from "../shared/runs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
 import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
 
@@ -105,30 +106,6 @@ export function dismissFlag(r: RunState, flagId: string): boolean {
   return true;
 }
 
-function flagCounts(r: RunState): RunSummary["flags"] {
-  const open = (r.flags ?? []).filter((f) => !f.dismissed);
-  if (!open.length) return undefined;
-  return { warning: open.filter((f) => f.severity === "warning").length, error: open.filter((f) => f.severity === "error").length };
-}
-
-export function summarize(r: RunState): RunSummary {
-  const t = r.trigger;
-  return {
-    id: r.id,
-    flowId: r.flowId,
-    flowName: r.flowName,
-    status: r.status,
-    startedAt: r.startedAt,
-    finishedAt: r.finishedAt,
-    trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
-    prompt: r.prompt,
-    pendingQuestion: r.pendingQuestion,
-    flags: flagCounts(r),
-    parent: r.parent,
-    stack: r.stack,
-  };
-}
-
 /**
  * The newest `limit` top-level runs plus every child run under them. `runs` must be newest first; a child always
  * starts after its parent, so it comes before it.
@@ -143,6 +120,8 @@ export function limitRuns(runs: RunSummary[], limit: number): RunSummary[] {
   const roots = new Set(runs.filter((r) => !r.parent).slice(0, limit).map((r) => r.id));
   return runs.filter((r) => roots.has(r.parent ? rootOf(r.id) : r.id));
 }
+
+export { summarize };
 
 export interface StorageOptions extends PackStoreOptions {
   /** Use this pack store instead of creating one over `<dir>/packs`. */

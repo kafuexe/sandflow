@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, CircleDashed, CircleSlash, Loader2, MessageCircleQuestion, X } from "lucide-react";
+import { Check, CircleDashed, CircleSlash, Flag, Loader2, MessageCircleQuestion, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RunStatus } from "../../../shared/types";
 
@@ -10,6 +10,22 @@ export const RUN_TONE: Record<RunStatus, { text: string; bar: string; label: str
   done: { text: "text-emerald-300", bar: "bg-emerald-400", label: "Finished" },
   failed: { text: "text-red-300", bar: "bg-red-400", label: "Failed" },
   cancelled: { text: "text-muted-foreground", bar: "bg-muted-foreground/50", label: "Stopped" },
+};
+
+/** Flags: orange, so they don't read as "needs your answer" (amber) or "failed" (red). */
+export const FLAG_TONE = { text: "text-orange-300", bar: "bg-orange-400", border: "border-orange-400/40", bg: "bg-orange-500/10" };
+
+export function FlagIcon({ className, label = "Flagged" }: { className?: string; label?: string }) {
+  return <Flag className={cn("size-4 shrink-0", FLAG_TONE.text, className)} aria-label={label} />;
+}
+
+/** Segment colours for a Box Stack's tasks (see `taskTone`). */
+export const TASK_TONE: Record<"done" | "dropped" | "running" | "waiting" | "cancelled", { bar: string; label: string }> = {
+  done: { bar: "bg-emerald-400", label: "succeeded" },
+  dropped: { bar: "bg-orange-400", label: "dropped" },
+  running: { bar: "bg-sky-400", label: "working" },
+  waiting: { bar: "bg-amber-400", label: "needs your answer" },
+  cancelled: { bar: "bg-muted-foreground/50", label: "stopped" },
 };
 
 export function RunStatusIcon({ status, className }: { status: RunStatus; className?: string }) {

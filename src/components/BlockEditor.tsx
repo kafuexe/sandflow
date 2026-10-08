@@ -226,6 +226,7 @@ export function BlockEditor() {
                   <SelectItem value="trigger">trigger — starts the flow on an event</SelectItem>
                   <SelectItem value="condition">if — deterministic true / false</SelectItem>
                   <SelectItem value="script">script — run code from a pack (container or this machine)</SelectItem>
+                  {cfg.kind === "stack" && <SelectItem value="stack">Box Stack (built in)</SelectItem>}
                   {simple && (cfg.kind === "subflow" || cfg.kind === "flow-input" || cfg.kind === "flow-output") && (
                     <SelectItem value={cfg.kind}>{cfg.kind} (built in)</SelectItem>
                   )}
@@ -415,6 +416,7 @@ export function BlockEditor() {
                     <SelectItem value="create-mr">create-mr — push + open MR</SelectItem>
                     <SelectItem value="shell">shell — run a command</SelectItem>
                     <SelectItem value="post-comment">post-comment — reply on the triggering issue / MR</SelectItem>
+                    <SelectItem value="merge-parent">merge-parent — merge a Box Stack task into its parent branch</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
