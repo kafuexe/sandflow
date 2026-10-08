@@ -19,6 +19,7 @@ import type {
   FlagSeverity,
   RunState,
   Settings,
+  StackRunInfo,
   SkillFileRef,
 } from "../shared/types";
 import type { PackRuntimeInfo } from "./packs";
@@ -59,6 +60,8 @@ export interface RunContext {
   settings: Settings;
   /** Set by Create task; used as the sandbox branch. */
   branch?: string;
+  /** Branch the sandbox branch is cut from when it doesn't exist yet (default: BASE_BRANCH). */
+  baseBranch?: string;
   /** Lazily created sandcastle sandbox, shared by every AI block of the run. */
   sandbox?: unknown;
   abort: AbortController;
@@ -103,6 +106,19 @@ export interface StartRunOptions {
   prompt?: string;
   /** Called for every flag raised on this run. */
   onFlag?: (run: RunState, flag: RunFlag) => void;
+  /** Run the flow from its Flow input with these inputs (like a subflow); the exit reached goes to `run.result`. */
+  entry?: NodeIO;
+  /** Subflow nesting depth this run starts at (stack children run one deeper than their stack). */
+  depth?: number;
+  parent?: { runId: string; nodeKey: string };
+  stack?: StackRunInfo;
+  /** Work in this run's sandbox (a stack's Shared workspace): sandbox, branch and installed skills are shared. */
+  share?: RunContext;
+  /** Sandbox branch for this run, and the branch it's cut from. */
+  branch?: string;
+  baseBranch?: string;
+  /** Called when this run starts a child run (a stack's task), so the caller can track, save and stream it. */
+  onSpawn?: (child: RunHandle) => void;
 }
 
 export interface RunHandle {
@@ -156,6 +172,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
     prompt: settings.startingPrompt,
     trigger: opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
     triggerNodeId: opts.startNodeId,
+    ...(opts.parent ? { parent: opts.parent } : {}),
+    ...(opts.stack ? { stack: opts.stack } : {}),
   };
   const emit = () => opts.onChange?.(run);
 
@@ -219,6 +237,16 @@ export function startRun(opts: StartRunOptions): RunHandle {
       });
     },
   };
+
+  ctx.branch = opts.branch;
+  ctx.baseBranch = opts.baseBranch;
+  if (opts.share) {
+    // Shared workspace: the sandbox (and whatever was set up in it) belongs to the run that owns it.
+    const owner = opts.share;
+    for (const k of ["sandbox", "branch", "baseBranch", "installedSkills", "preparedPacks", "cleanup"] as const) {
+      Object.defineProperty(ctx, k, { get: () => owner[k], set: (v) => ((owner as unknown as Record<string, unknown>)[k] = v), enumerable: true });
+    }
+  }
 
   let steps = 0;
 
@@ -409,17 +437,19 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
   const done = (async () => {
     try {
-      await runGraph(flow, "", 0);
+      const r = await runGraph(flow, "", opts.depth ?? 0, opts.entry);
+      if (opts.entry) run.result = r;
       run.status = ctx.abort.signal.aborted ? "cancelled" : "done";
     } catch (e) {
       run.status = ctx.abort.signal.aborted ? "cancelled" : "failed";
       if (run.status === "failed") {
         run.error = (e as Error).message;
         ctx.log("error", run.error);
-        ctx.flag("error", `Run failed: ${run.error}`);
+        // A stack child's failure is reported by its stack (it may be retried).
+        if (!opts.parent) ctx.flag("error", `Run failed: ${run.error}`);
       }
     } finally {
-      for (const fn of ctx.cleanup.splice(0)) {
+      for (const fn of opts.share ? [] : ctx.cleanup.splice(0)) {
         try {
           await fn();
         } catch (e) {

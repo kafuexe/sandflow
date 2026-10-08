@@ -124,7 +124,24 @@ export function summarize(r: RunState): RunSummary {
     prompt: r.prompt,
     pendingQuestion: r.pendingQuestion,
     flags: flagCounts(r),
+    parent: r.parent,
+    stack: r.stack,
   };
+}
+
+/**
+ * The newest `limit` top-level runs plus every child run under them. `runs` must be newest first; a child always
+ * starts after its parent, so it comes before it.
+ */
+export function limitRuns(runs: RunSummary[], limit: number): RunSummary[] {
+  const parentOf = new Map(runs.filter((r) => r.parent).map((r) => [r.id, r.parent!.runId]));
+  const rootOf = (id: string) => {
+    let cur = id;
+    for (let i = 0; i < 20 && parentOf.has(cur); i++) cur = parentOf.get(cur)!;
+    return cur;
+  };
+  const roots = new Set(runs.filter((r) => !r.parent).slice(0, limit).map((r) => r.id));
+  return runs.filter((r) => roots.has(r.parent ? rootOf(r.id) : r.id));
 }
 
 export interface StorageOptions extends PackStoreOptions {
@@ -212,17 +229,19 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
       } catch {
         return [];
       }
-      return names
-        .sort()
-        .reverse()
-        .slice(0, limit)
-        .flatMap((n) => {
-          try {
-            return [summarize(settleInterrupted(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState))];
-          } catch {
-            return [];
-          }
-        });
+      const out: RunSummary[] = [];
+      let roots = 0;
+      // Newest first; stop at the limit-th top-level run — anything older can't be a child of the ones we keep.
+      for (const n of names.sort().reverse()) {
+        try {
+          const s = summarize(settleInterrupted(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState));
+          out.push(s);
+          if (!s.parent && ++roots >= limit) break;
+        } catch {
+          /* unreadable run file */
+        }
+      }
+      return limitRuns(out, limit);
     },
     saveArtifact(runId: string, nodeId: string, n: number, text: string) {
       runFile(runId);

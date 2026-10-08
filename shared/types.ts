@@ -509,6 +509,25 @@ export interface RunFlag {
   dismissed?: boolean;
 }
 
+/** Where a stack child run sits in its stack. */
+export interface StackRunInfo {
+  /** One per stack execution (a looping parent gets a new group each time it reaches the stack). */
+  groupId: string;
+  /** The stack node's label. */
+  name: string;
+  /** Task position from the split (0-based). */
+  index: number;
+  total: number;
+  /** Task name from the split. */
+  task: string;
+  /** 1-based. */
+  attempt: number;
+  maxAttempts: number;
+  outcome?: "succeeded" | "rejected" | "dropped";
+  /** Isolated workspace: the child's own branch. */
+  branch?: string;
+}
+
 export interface RunState {
   id: string;
   flowId: string;
@@ -530,6 +549,11 @@ export interface RunState {
   /** Trigger node that fired (absent for manual runs). */
   triggerNodeId?: string;
   flags?: RunFlag[];
+  /** Set on a run started by another run's stack node. */
+  parent?: { runId: string; nodeKey: string };
+  stack?: StackRunInfo;
+  /** A run started with an input (stack children): the Flow output it reached and what it handed back. */
+  result?: { exit?: string; outputs?: NodeIO };
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -608,4 +632,6 @@ export interface RunSummary {
   pendingQuestion?: PendingQuestion;
   /** Undismissed flags by severity (absent when there are none). */
   flags?: { warning: number; error: number };
+  parent?: { runId: string; nodeKey: string };
+  stack?: StackRunInfo;
 }

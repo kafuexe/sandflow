@@ -14,7 +14,7 @@ import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
-import { dismissFlag, settleInterrupted, summarize, type Storage } from "./storage";
+import { dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
 import { startWebhookServer, type WebhookServer } from "./webhooks";
 
@@ -509,7 +509,7 @@ export function createApi(
         const live = [...runs.values()].map((h) => summarize(h.state));
         const liveIds = new Set(live.map((r) => r.id));
         const saved = storage.listRuns(50).filter((r) => !liveIds.has(r.id));
-        const all = [...live, ...saved].sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+        const all = limitRuns([...live, ...saved].sort((a, b) => b.startedAt - a.startedAt), 50);
         return send(res, 200, all);
       }
 
