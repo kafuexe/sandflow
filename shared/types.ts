@@ -17,7 +17,22 @@ export type EdgeInputKind = "artifact" | "steer";
  * subflow – runs another flow inside this one; its exits are the child flow's Flow output blocks.
  * flow-input / flow-output – where a flow used as a subflow receives its input / hands its result back.
  */
-export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "flow-input" | "flow-output";
+export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "stack" | "flow-input" | "flow-output";
+
+/** A Box Stack: an orchestrator splits the input, runs `flowId` once per task (several at once) and combines the results. */
+export interface StackConfig {
+  flowId: string;
+  /** Child exits that count as success; any other exit, or an error, rejects the attempt. */
+  successExits: string[];
+  /** shared = every child works in this run's sandbox; isolated = a worktree and branch per child. */
+  workspace: "shared" | "isolated";
+  maxConcurrent: number;
+  maxChildren: number;
+  /** Per task: how many times a rejected task is tried again. */
+  maxRetries: number;
+  splitInstructions: string;
+  combineInstructions: string;
+}
 
 export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment";
 
@@ -222,6 +237,8 @@ export interface BlockConfig {
   subflow?: { flowId?: string };
   /** flow-output blocks: the exit this output becomes on the subflow node. */
   flowOutput?: { name?: string };
+  /** stack blocks. */
+  stack?: Partial<StackConfig>;
 }
 
 export interface BlockDef {
@@ -259,6 +276,7 @@ export interface ResolvedConfig {
   script: { run: string; where: "sandbox" | "host"; exits: string[]; timeoutSeconds?: number };
   subflow: { flowId: string };
   flowOutput: { name: string };
+  stack: StackConfig;
 }
 
 export interface FlowNodeData {

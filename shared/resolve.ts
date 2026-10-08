@@ -7,6 +7,7 @@ import type {
   SkillRef,
 } from "./types";
 import { skillKey } from "./skills";
+import { DEFAULT_COMBINE, DEFAULT_SPLIT } from "./stack";
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
   kind: "ai",
@@ -29,6 +30,16 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   script: { run: "", where: "sandbox", exits: [] },
   subflow: { flowId: "" },
   flowOutput: { name: "done" },
+  stack: {
+    flowId: "",
+    successExits: ["done"],
+    workspace: "isolated",
+    maxConcurrent: 3,
+    maxChildren: 12,
+    maxRetries: 1,
+    splitInstructions: DEFAULT_SPLIT,
+    combineInstructions: DEFAULT_COMBINE,
+  },
 };
 
 const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
@@ -71,6 +82,7 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
     script: { ...base.script, ...stripUndef(patch.script) },
     subflow: { ...base.subflow, ...stripUndef(patch.subflow) },
     flowOutput: { ...base.flowOutput, ...stripUndef(patch.flowOutput) },
+    stack: { ...base.stack, ...stripUndef(patch.stack) },
   };
 }
 
@@ -164,8 +176,8 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
         e.nodes.push({ id, label });
         env.set(name, e);
       }
-      if (cfg.kind === "subflow") {
-        const child = flows.find((x) => x.id === cfg.subflow.flowId);
+      if (cfg.kind === "subflow" || cfg.kind === "stack") {
+        const child = flows.find((x) => x.id === (cfg.kind === "stack" ? cfg.stack.flowId : cfg.subflow.flowId));
         if (child && !seen.has(child.id)) visit(child, `${id}/`, `${label} › `, new Set([...seen, child.id]), true);
       }
     }

@@ -22,6 +22,7 @@ const KIND_LABEL: Record<ResolvedConfig["kind"], string> = {
   condition: "IF",
   script: "SCRIPT",
   subflow: "SUBFLOW",
+  stack: "STACK",
   "flow-input": "INPUT",
   "flow-output": "OUTPUT",
 };

@@ -8,6 +8,7 @@ export const SUBFLOW_BLOCK = `${CORE_PACK}/subflow`;
 export const FLOW_INPUT_BLOCK = `${CORE_PACK}/flow-input`;
 export const FLOW_OUTPUT_BLOCK = `${CORE_PACK}/flow-output`;
 export const SCRIPT_BLOCK = `${CORE_PACK}/script`;
+export const STACK_BLOCK = `${CORE_PACK}/stack`;
 
 export const CORE_BLOCKS: BlockDef[] = [
   {
@@ -20,6 +21,23 @@ export const CORE_BLOCKS: BlockDef[] = [
       description: "Runs another flow as one step. Its inputs come from that flow's Flow input, its exits from its Flow outputs.",
       color: "#a855f7",
       icon: "workflow",
+      inputs: { artifact: true, steer: true, startingPrompt: false },
+      outputs: { artifact: false, steer: false },
+    },
+  },
+  {
+    id: STACK_BLOCK,
+    name: "Box Stack",
+    isTemplate: false,
+    pack: CORE_PACK,
+    config: {
+      kind: "stack",
+      description:
+        "An orchestrator splits the input into tasks, runs a flow for each task (several at once) and combines the " +
+        "results into one output. Leaves through done, or failed when no task succeeded.",
+      color: "#f97316",
+      icon: "layers",
+      env: ["REPO_PATH"],
       inputs: { artifact: true, steer: true, startingPrompt: false },
       outputs: { artifact: false, steer: false },
     },

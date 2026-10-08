@@ -2,8 +2,8 @@
 // batched edit operations and auto-layout. Agents never send coordinates or edge ids.
 
 import { nodeLabel, resolveNode } from "./resolve";
-import { exitName, isExitHandle, resolveNodeIn, subflowCycle } from "./subflow";
-import type { BlockConfig, BlockDef, EdgeInputKind, Flow, FlowEdge, FlowNode, ResolvedConfig, SourceHandle } from "./types";
+import { exitName, flowInterface, isExitHandle, resolveNodeIn, subflowCycle } from "./subflow";
+import type { BlockConfig, BlockDef, EdgeInputKind, Flow, FlowEdge, FlowNode, ResolvedConfig, SourceHandle, StackConfig } from "./types";
 
 export const NODE_ID_RE = /^[A-Za-z][\w-]{0,63}$/;
 const SOURCE_HANDLES: SourceHandle[] = ["artifact", "steer", "true", "false"];
@@ -125,6 +125,7 @@ export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = [])
       else if (!flows.some((f) => f.id === cfg.subflow.flowId)) errors.push(`Subflow "${n.id}" runs unknown flow "${cfg.subflow.flowId}"`);
       else if (!cfg.exits.length) warnings.push(`Subflow "${n.id}": its flow has no Flow output block, so nothing continues after it`);
     }
+    if (cfg.kind === "stack") errors.push(...stackProblems(n.id, cfg.stack, flows, blocks));
     const out = flow.edges.filter((e) => e.source === n.id);
     const targets = new Set(out.map((e) => e.target));
     if (cfg.kind === "manager" && targets.size < 2) {
@@ -134,6 +135,22 @@ export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = [])
     if (flow.nodes.length > 1 && !out.length && !incoming.has(n.id)) warnings.push(`Node "${n.id}" isn't connected to anything`);
   }
   return { errors, warnings };
+}
+
+function stackProblems(id: string, s: StackConfig, flows: Flow[], blocks: BlockDef[]): string[] {
+  const out: string[] = [];
+  const child = flows.find((f) => f.id === s.flowId);
+  if (!s.flowId) out.push(`Box Stack "${id}" doesn't say which flow to run for each task (set overrides.stack.flowId)`);
+  else if (!child) out.push(`Box Stack "${id}" runs unknown flow "${s.flowId}"`);
+  else {
+    const fi = flowInterface(child, blocks);
+    if (!fi.hasInput) out.push(`Box Stack "${id}": flow "${child.name}" has no Flow input, so tasks can't be handed to it`);
+    for (const x of s.successExits) if (!fi.exits.includes(x)) out.push(`Box Stack "${id}": success exit "${x}" isn't one of "${child.name}"'s outputs (${fi.exits.join(", ") || "none"})`);
+  }
+  if (!(s.maxConcurrent >= 1)) out.push(`Box Stack "${id}" must run at least 1 at once`);
+  if (!(s.maxChildren >= s.maxConcurrent)) out.push(`Box Stack "${id}": max children (${s.maxChildren}) must be at least max concurrent (${s.maxConcurrent})`);
+  if (!(s.maxRetries >= 0)) out.push(`Box Stack "${id}": retries can't be negative`);
+  return out;
 }
 
 // ---------- operations ----------
@@ -384,6 +401,7 @@ export function describeBlocks(blocks: BlockDef[]): string {
       const out =
         cfg.kind === "condition" ? "true, false"
         : cfg.kind === "subflow" ? "exit:<name> per Flow output of the flow it runs (set overrides.subflow.flowId)"
+        : cfg.kind === "stack" ? "exit:done, exit:failed (set overrides.stack.flowId: the flow run once per task)"
         : cfg.kind === "script" && cfg.script.exits.length ? cfg.script.exits.map((x) => `exit:${x}`).join(", ")
         : ioList(cfg.outputs) || "-";
       const env = cfg.env.length ? `; env: ${cfg.env.join(", ")}` : "";

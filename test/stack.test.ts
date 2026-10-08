@@ -54,3 +54,79 @@ describe("storage: listing runs with children", () => {
     expect(list.filter((r) => r.parent)).toHaveLength(20);
   });
 });
+
+// ---------- Task 3: the stack block ----------
+
+import { STACK_BLOCK } from "../shared/core";
+import { validateFlow } from "../shared/flowOps";
+import { flowRequirements, resolveNode } from "../shared/resolve";
+import { DEFAULT_COMBINE, DEFAULT_SPLIT, normaliseTasks, parseSplit } from "../shared/stack";
+import { resolveNodeIn, subflowCycle } from "../shared/subflow";
+
+const stackNode = (over: BlockConfig["stack"] = {}) => n("s", STACK_BLOCK, { stack: { flowId: "area", ...over } });
+const parentWith = (over: BlockConfig["stack"] = {}): Flow => ({
+  id: "big", name: "Big", nodes: [n("plan", "plan"), stackNode(over), n("mr", "create-mr")],
+  edges: [e("plan", "s"), e("s", "mr", "exit:done")],
+});
+
+describe("stack block", () => {
+  it("resolves with the spec's defaults", () => {
+    const cfg = resolveNode(stackNode(), blocks);
+    expect(cfg.kind).toBe("stack");
+    expect(cfg.stack).toEqual({
+      flowId: "area", successExits: ["done"], workspace: "isolated", maxConcurrent: 3, maxChildren: 12, maxRetries: 1,
+      splitInstructions: DEFAULT_SPLIT, combineInstructions: DEFAULT_COMBINE,
+    });
+  });
+
+  it("always has the exits done and failed, and takes artifact + steer", () => {
+    const cfg = resolveNodeIn(stackNode(), blocks, [area]);
+    expect(cfg.exits).toEqual(["done", "failed"]);
+    expect(cfg.inputs).toMatchObject({ artifact: true, steer: true });
+    expect(validateFlow(parentWith(), blocks, [area]).errors).toEqual([]);
+  });
+
+  it("reports each bad setting", () => {
+    const errs = (over: BlockConfig["stack"], flows = [area]) => validateFlow(parentWith(over), blocks, flows).errors.join("\n");
+    expect(errs({ flowId: "" })).toMatch(/doesn't say which flow/);
+    expect(errs({ flowId: "ghost" })).toMatch(/unknown flow "ghost"/);
+    const noInput: Flow = { ...area, nodes: area.nodes.filter((x) => x.id !== "in"), edges: [e("work", "out")] };
+    expect(errs({}, [noInput])).toMatch(/has no Flow input/);
+    expect(errs({ maxConcurrent: 0 })).toMatch(/at least 1 at once/);
+    expect(errs({ maxConcurrent: 4, maxChildren: 3 })).toMatch(/max children .* at least max concurrent/i);
+    expect(errs({ maxRetries: -1 })).toMatch(/retries can't be negative/);
+    expect(errs({ successExits: ["approved"] })).toMatch(/success exit "approved"/);
+  });
+
+  it("asks for what its child flow and orchestrator need", () => {
+    const req = flowRequirements(parentWith(), blocks, [area]);
+    expect(req.env.find((x) => x.name === "ANTHROPIC_API_KEY")!.nodes).toContainEqual({ id: "s/work", label: "Box Stack › Plan" });
+    expect(req.env.find((x) => x.name === "REPO_PATH")!.nodes).toContainEqual({ id: "s", label: "Box Stack" });
+  });
+
+  it("follows stacks when looking for flow loops", () => {
+    const loopy: Flow = { ...area, nodes: [...area.nodes, n("again", STACK_BLOCK, { stack: { flowId: "big" } })] };
+    expect(subflowCycle("big", [parentWith(), loopy], blocks)).toBe("Big › Area › Big");
+  });
+});
+
+describe("parsing the split", () => {
+  it("reads a bare or fenced JSON object, anywhere in the text", () => {
+    expect(parseSplit('{"tasks":[{"name":"auth","input":"do auth"}]}')).toEqual({ tasks: [{ name: "auth", input: "do auth" }] });
+    expect(parseSplit('Here you go:\n```json\n{"tasks": [{"name": "a", "input": "x"}]}\n```\nDone.')).toEqual({ tasks: [{ name: "a", input: "x" }] });
+  });
+
+  it("explains what's wrong otherwise", () => {
+    expect(parseSplit("no json here")).toEqual({ error: expect.stringMatching(/no JSON object/i) });
+    expect(parseSplit('{"tasks": "nope"}')).toEqual({ error: expect.stringMatching(/"tasks" must be a list/) });
+    expect(parseSplit('{"tasks": [{"name": "a"}]}')).toEqual({ error: expect.stringMatching(/task 1 has no "input"/) });
+  });
+
+  it("normalises names: empty → task-n, duplicates get a suffix, slugs are branch-safe", () => {
+    expect(normaliseTasks([{ name: "Auth & Login", input: "1" }, { name: "", input: "2" }, { name: "Auth & Login", input: "3" }])).toEqual([
+      { name: "Auth & Login", slug: "auth-login", input: "1" },
+      { name: "task-2", slug: "task-2", input: "2" },
+      { name: "Auth & Login-2", slug: "auth-login-2", input: "3" },
+    ]);
+  });
+});
