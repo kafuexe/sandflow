@@ -4,24 +4,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { startRun, type NodeRunner } from "../backend/engine";
 import { createStorage } from "../backend/storage";
-import { CORE_BLOCKS, FLOW_INPUT_BLOCK, FLOW_OUTPUT_BLOCK } from "../shared/core";
-import { BUILTIN_BLOCKS } from "../shared/library";
-import type { BlockConfig, Flow, FlowEdge, RunState, Settings } from "../shared/types";
-
-export const blocks = [...CORE_BLOCKS, ...BUILTIN_BLOCKS];
-export const settings: Settings = { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 };
-export const n = (id: string, blockId: string, overrides?: BlockConfig, y = 0) => ({ id, type: "block" as const, position: { x: 0, y }, data: { blockId, ...(overrides ? { overrides } : {}) } });
-export const e = (source: string, target: string, sourceHandle: FlowEdge["sourceHandle"] = "artifact", targetHandle: FlowEdge["targetHandle"] = "artifact"): FlowEdge => ({
-  id: `${source}-${sourceHandle}-${target}-${targetHandle}`, source, target, sourceHandle, targetHandle,
-});
-
-/** Child: input → work → output "done". */
-export const area: Flow = {
-  id: "area",
-  name: "Area",
-  nodes: [n("in", FLOW_INPUT_BLOCK), n("work", "plan"), n("out", FLOW_OUTPUT_BLOCK, { flowOutput: { name: "done" } })],
-  edges: [e("in", "work"), e("in", "work", "steer", "steer"), e("work", "out")],
-};
+import type { BlockConfig, Flow, RunState } from "../shared/types";
+import { area, blocks, e, n, parentWith, settings, stackNode } from "./stackFixtures";
 
 describe("child runs", () => {
   it("a run started with `entry` runs from its Flow input and records the exit it reached", async () => {
@@ -62,12 +46,6 @@ import { validateFlow } from "../shared/flowOps";
 import { flowRequirements, resolveNode } from "../shared/resolve";
 import { DEFAULT_COMBINE, DEFAULT_SPLIT, normaliseTasks, parseSplit } from "../shared/stack";
 import { resolveNodeIn, subflowCycle } from "../shared/subflow";
-
-const stackNode = (over: BlockConfig["stack"] = {}) => n("s", STACK_BLOCK, { stack: { flowId: "area", ...over } });
-const parentWith = (over: BlockConfig["stack"] = {}): Flow => ({
-  id: "big", name: "Big", nodes: [n("plan", "plan"), stackNode(over), n("mr", "create-mr")],
-  edges: [e("plan", "s"), e("s", "mr", "exit:done")],
-});
 
 describe("stack block", () => {
   it("resolves with the spec's defaults", () => {

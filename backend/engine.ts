@@ -23,6 +23,7 @@ import type {
   SkillFileRef,
 } from "../shared/types";
 import type { PackRuntimeInfo } from "./packs";
+import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
 
 export interface NodeResult {
@@ -345,6 +346,41 @@ export function startRun(opts: StartRunOptions): RunHandle {
           if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
           if (r.exit === undefined) ctx.log("warn", `Flow "${child.name}" ended without reaching a Flow output — nothing continues after it`, k);
           result = { outputs: r.outputs ?? {}, exit: r.exit };
+        } else if (cfg.kind === "stack") {
+          if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
+          result = await runStack(
+            {
+              ctx,
+              scoped: gctx,
+              nodeKey: k,
+              label: label(nodeId),
+              ai: runners.ai,
+              spawn: (child, o) => {
+                const h = startRun({
+                  ...opts,
+                  flow: child,
+                  trigger: run.trigger,
+                  startNodeId: undefined,
+                  prompt: undefined,
+                  settings,
+                  entry: o.entry,
+                  depth: depth + 1,
+                  parent: { runId: run.id, nodeKey: k },
+                  stack: o.stack,
+                  share: o.shared ? ctx : undefined,
+                  branch: o.branch,
+                  baseBranch: o.baseBranch,
+                  onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
+                });
+                opts.onSpawn?.(h);
+                return h;
+              },
+              settled: (h) => opts.onChange?.(h.state),
+            },
+            node,
+            cfg,
+            inputs,
+          );
         } else if (cfg.kind === "script") {
           if (!runners.script) throw new Error("Script blocks aren't supported here");
           result = await runners.script(gctx, node, cfg, inputs);
@@ -365,7 +401,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
       // Named exits (Script / subflow): the result leaves through one exit and keeps both artifact and steer.
       const exits = cfg.kind === "script" ? cfg.script.exits.filter(Boolean) : cfg.kind === "subflow" ? null : [];
       let exit: string | undefined;
-      if (cfg.kind === "subflow") exit = result.exit;
+      if (cfg.kind === "subflow" || cfg.kind === "stack") exit = result.exit;
       else if (exits?.length) {
         exit = result.exit;
         if (!exit || !exits.includes(exit)) {
@@ -373,7 +409,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
           exit = exits[0];
         }
       }
-      const byExit = exit !== undefined || cfg.kind === "subflow";
+      const byExit = exit !== undefined || cfg.kind === "subflow" || cfg.kind === "stack";
 
       const outputs: NodeIO = {};
       if ((byExit || cfg.outputs.artifact) && result.outputs.artifact !== undefined) outputs.artifact = result.outputs.artifact;
