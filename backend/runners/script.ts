@@ -1,7 +1,8 @@
 // Script blocks: run a command that comes with a pack (any language, scripts, executables).
 //
 // Contract: the script gets its inputs as JSON on stdin (also in the file $SANDFLOW_INPUT) and writes
-// `{"artifact": …, "steer": …, "exit": "<name>"}` to $SANDFLOW_OUTPUT — or just prints the artifact.
+// `{"artifact": …, "steer": …, "exit": "<name>", "flags": [{"severity", "message", "details"}]}` to $SANDFLOW_OUTPUT —
+// or just prints the artifact.
 // $PACK_DIR is a writable copy of the pack where its `setup` already ran and its `bin` executables are on PATH,
 // so each pack's dependencies stay inside its own copy and never clash with another pack's.
 //
@@ -47,7 +48,13 @@ export function parseScriptOutput(outputFile: string | undefined, stdout: string
     const o = j as Record<string, unknown>;
     const str = (v: unknown) => (v === undefined || v === null ? undefined : typeof v === "string" ? v : JSON.stringify(v, null, 2));
     const exit = str(o.exit ?? o.route);
-    return { outputs: { artifact: str(o.artifact) ?? (stdout.trim() || undefined), steer: str(o.steer) }, exit };
+    // {"flags": [{"severity": "warning" | "error", "message": "…", "details": "…"}]} raises flags on the run.
+    const flags = (Array.isArray(o.flags) ? o.flags : []).flatMap((f: { severity?: unknown; message?: unknown; details?: unknown }) =>
+      typeof f?.message === "string" && f.message.trim()
+        ? [{ severity: f.severity === "error" ? ("error" as const) : ("warning" as const), message: f.message, ...(typeof f.details === "string" ? { details: f.details } : {}) }]
+        : [],
+    );
+    return { outputs: { artifact: str(o.artifact) ?? (stdout.trim() || undefined), steer: str(o.steer) }, exit, ...(flags.length ? { flags } : {}) };
   }
   return { outputs: { artifact: stdout.trim() } };
 }

@@ -56,8 +56,8 @@ export const CORE_BLOCKS: BlockDef[] = [
         "cut from, one task at a time. A conflict fails the step.",
       color: "#f97316",
       icon: "git-merge",
-      inputs: { artifact: true, steer: false, startingPrompt: false },
-      outputs: { artifact: true, steer: false },
+      inputs: { artifact: true, steer: true, startingPrompt: false },
+      outputs: { artifact: true, steer: true },
     },
   },
   {
@@ -100,7 +100,7 @@ export const CORE_BLOCKS: BlockDef[] = [
       kind: "script",
       description:
         "Runs a command in a container (or on this machine when trusted). Gets its inputs as JSON on stdin and " +
-        "writes {artifact, steer, exit} to $SANDFLOW_OUTPUT (or prints the artifact).",
+        "writes {artifact, steer, exit, flags} to $SANDFLOW_OUTPUT (or prints the artifact).",
       color: "#0d9488",
       icon: "file-code",
       inputs: { artifact: true, steer: true, startingPrompt: false },

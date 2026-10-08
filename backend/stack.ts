@@ -130,10 +130,16 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
         return;
       }
       if (ctx.abort.signal.aborted) return;
-      reason = why;
-      stack.outcome = attempt < maxAttempts ? "rejected" : "dropped";
+      // Stopped by hand (the stack itself is still going): that's a decision, not a failure to retry.
+      const stopped = final.status === "cancelled";
+      reason = stopped ? "stopped by you" : why;
+      stack.outcome = attempt < maxAttempts && !stopped ? "rejected" : "dropped";
       deps.settled(h);
-      ctx.log("warn", `Task "${t.name}" attempt ${attempt}/${maxAttempts} rejected: ${clip(why, 300)}`, nodeKey);
+      ctx.log("warn", `Task "${t.name}" attempt ${attempt}/${maxAttempts} ${stopped ? "stopped" : `rejected: ${clip(why, 300)}`}`, nodeKey);
+      if (stopped) {
+        outcomes[index] = { ok: false, name: t.name, reason, attempts: attempt };
+        return;
+      }
     }
     outcomes[index] = { ok: false, name: t.name, reason, attempts: maxAttempts };
   }

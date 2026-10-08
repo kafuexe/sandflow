@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { startRun, type NodeRunner } from "../backend/engine";
 import { createStorage } from "../backend/storage";
 import type { BlockConfig, Flow, RunState } from "../shared/types";
@@ -37,6 +37,24 @@ describe("storage: listing runs with children", () => {
     const list = storage.listRuns(2);
     expect(list.filter((r) => !r.parent).map((r) => r.id)).toEqual([id(2), id(1)]);
     expect(list.filter((r) => r.parent)).toHaveLength(20);
+  });
+
+  it("only re-reads run files that changed since the last listing", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-stack-"));
+    const storage = createStorage(dir);
+    const id = (i: number) => `2026-01-01T00-00-${String(i).padStart(2, "0")}-000Z-${String(i).padStart(8, "0")}`;
+    const r = (i: number, status: RunState["status"] = "done"): RunState => ({ id: id(i), flowId: "f", flowName: "F", status, startedAt: i, finishedAt: i, nodes: {}, logs: [] });
+    for (let i = 0; i < 5; i++) storage.saveRun(r(i));
+    storage.listRuns(50);
+    const reads = vi.spyOn(fs, "readFileSync");
+    const runReads = () => reads.mock.calls.filter(([p]) => String(p).includes(`${path.sep}runs${path.sep}`)).length;
+    storage.listRuns(50);
+    expect(runReads()).toBe(0);
+    storage.saveRun({ ...r(3, "failed"), logs: [{ ts: 1, level: "info", msg: "changed" }] });
+    const list = storage.listRuns(50);
+    expect(runReads()).toBe(1);
+    expect(list.find((x) => x.id === id(3))?.status).toBe("failed");
+    reads.mockRestore();
   });
 });
 
@@ -75,6 +93,7 @@ describe("stack block", () => {
     expect(errs({ maxConcurrent: 4, maxChildren: 3 })).toMatch(/max children .* at least max concurrent/i);
     expect(errs({ maxRetries: -1 })).toMatch(/retries can't be negative/);
     expect(errs({ successExits: ["approved"] })).toMatch(/success exit "approved"/);
+    expect(errs({ successExits: [] })).toMatch(/needs at least one success exit/);
   });
 
   it("asks for what its child flow and orchestrator need", () => {

@@ -32,6 +32,8 @@ export interface NodeResult {
   route?: string;
   /** script / subflow: the named exit it leaves through. */
   exit?: string;
+  /** Flags to raise on the run, from this node (e.g. a script's `flags` output). */
+  flags?: { severity: FlagSeverity; message: string; details?: string }[];
 }
 
 export type NodeRunner = (
@@ -405,6 +407,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
         ns.error = (e as Error).message;
         throw new Error(`${label(nodeId)}: ${(e as Error).message}`);
       }
+
+      for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
 
       // Named exits (Script / subflow): the result leaves through one exit and keeps both artifact and steer.
       const exits = cfg.kind === "script" ? cfg.script.exits.filter(Boolean) : cfg.kind === "subflow" ? null : [];

@@ -6,6 +6,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createApi } from "../backend/api";
 import { startRun, type NodeRunner } from "../backend/engine";
+import { parseScriptOutput } from "../backend/runners/script";
 import { createStorage, dismissFlag, settleInterrupted, summarize } from "../backend/storage";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW } from "../shared/library";
 import type { RunFlag, RunState, Settings } from "../shared/types";
@@ -60,6 +61,22 @@ describe("run flags: engine", () => {
   });
 });
 
+describe("run flags: scripts", () => {
+  it("a script raises flags by listing them in its output", () => {
+    const out = JSON.stringify({ artifact: "ok", flags: [{ severity: "error", message: "secrets in diff", details: "AWS key in .env" }, { message: "tests skipped" }, { severity: "warning" }] });
+    expect(parseScriptOutput(out, "").flags).toEqual([
+      { severity: "error", message: "secrets in diff", details: "AWS key in .env" },
+      { severity: "warning", message: "tests skipped" },
+    ]);
+  });
+
+  it("flags a node hands back are raised on the run, from that node", async () => {
+    const { h } = go(async (_c, node) => ({ outputs: { artifact: "a" }, route: "n-create-mr", ...(node.id === "n-plan" ? { flags: [{ severity: "warning" as const, message: "tests skipped" }] } : {}) }));
+    const final = await h.done;
+    expect(final.flags).toEqual([expect.objectContaining({ message: "tests skipped", nodeKey: "n-plan" })]);
+  });
+});
+
 describe("run flags: storage", () => {
   it("summaries count only undismissed flags", () => {
     const s = summarize(stale({ finishedAt: 2, status: "done", flags: [flag(), flag({ id: "f2", severity: "error" }), flag({ id: "f3", dismissed: true })] }));
@@ -72,6 +89,12 @@ describe("run flags: storage", () => {
     expect(settled.flags).toEqual([expect.objectContaining({ id: "interrupted", severity: "error" })]);
     const again = settleInterrupted({ ...stale(), flags: [flag({ id: "interrupted", severity: "error", dismissed: true })] });
     expect(again.flags).toEqual([expect.objectContaining({ id: "interrupted", dismissed: true })]);
+  });
+
+  it("an interrupted stack task isn't flagged on its own (its top-level run is)", () => {
+    const settled = settleInterrupted(stale({ parent: { runId: "p", nodeKey: "s" } }));
+    expect(settled.status).toBe("cancelled");
+    expect(settled.flags ?? []).toEqual([]);
   });
 
   it("dismissFlag marks one flag dismissed", () => {

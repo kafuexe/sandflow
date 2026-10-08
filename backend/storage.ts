@@ -77,6 +77,8 @@ export function migrateLegacy(blocks: BlockDef[], flows: Flow[]): { blocks: Bloc
 
 export type Storage = ReturnType<typeof createStorage>;
 
+const INTERRUPTED_FLAG = "interrupted";
+
 /**
  * A saved run without `finishedAt` was active when Sandflow last stopped (e.g. a crash) — nothing will
  * ever finish it, so report it as cancelled instead of forever "running".
@@ -92,11 +94,10 @@ export function settleInterrupted(r: RunState): RunState {
     finishedAt: last,
     pendingQuestion: undefined,
     error,
-    flags: flags.some((f) => f.id === INTERRUPTED_FLAG) ? flags : [...flags, { id: INTERRUPTED_FLAG, severity: "error", message: error, at: last }],
+    // A stack task's interruption shows on its top-level run, which was interrupted too.
+    flags: r.parent || flags.some((f) => f.id === INTERRUPTED_FLAG) ? flags : [...flags, { id: INTERRUPTED_FLAG, severity: "error", message: error, at: last }],
   };
 }
-
-const INTERRUPTED_FLAG = "interrupted";
 
 /** Mark one of the run's flags as looked at. False when the run has no such flag. */
 export function dismissFlag(r: RunState, flagId: string): boolean {
@@ -141,6 +142,8 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
   const packs = opts.packs ?? createPackStore(dir, { tokens, ...opts });
   let baseChecked = false;
   const write = (name: string, value: unknown) => writeAtomic(file(name), JSON.stringify(value, null, 2));
+  /** Run summaries by file name, with the file's mtime/size when it was read. */
+  const summaryCache = new Map<string, { mtimeMs: number; size: number; summary: RunSummary }>();
   const runFile = (id: string) => {
     if (!RUN_ID_RE.test(id)) throw new Error("Invalid run id");
     return path.join(dir, "runs", `${id}.json`);
@@ -213,9 +216,16 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
       // Newest first; stop at the limit-th top-level run — anything older can't be a child of the ones we keep.
       for (const n of names.sort().reverse()) {
         try {
-          const s = summarize(settleInterrupted(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState));
-          out.push(s);
-          if (!s.parent && ++roots >= limit) break;
+          const file = path.join(dir, "runs", n);
+          // The UI polls this list: only parse run files that changed since last time.
+          const st = fs.statSync(file);
+          let s = summaryCache.get(n);
+          if (!s || s.mtimeMs !== st.mtimeMs || s.size !== st.size) {
+            s = { mtimeMs: st.mtimeMs, size: st.size, summary: summarize(settleInterrupted(JSON.parse(fs.readFileSync(file, "utf8")) as RunState)) };
+            summaryCache.set(n, s);
+          }
+          out.push(s.summary);
+          if (!s.summary.parent && ++roots >= limit) break;
         } catch {
           /* unreadable run file */
         }

@@ -97,8 +97,9 @@ describe("merge into parent branch", () => {
 
   it("merges the task's branch into the branch the stack was cut from", async () => {
     const { repo, git, ctx, node, cfg } = setup(false);
-    const r = await runAuto(ctx, node, cfg, {});
-    expect(r.outputs.artifact).toMatch(/Merged child into main/);
+    const r = await runAuto(ctx, node, cfg, { artifact: "Ported the auth screens", steer: "watch the tests" });
+    expect(r.outputs.artifact).toMatch(/^Ported the auth screens[\s\S]*Merged child into main/);
+    expect(r.outputs.steer).toBe("watch the tests");
     expect(git("log", "--format=%s", "main")).toContain("child.txt: from child");
     fs.rmSync(repo, { recursive: true, force: true });
   }, 30_000);

@@ -64,7 +64,7 @@ export function commentCommand(event: TriggerEvent | undefined, body: string): {
 }
 
 /** Merge a Box Stack task's branch into the parent run's branch, in the parent's worktree, one task at a time. */
-async function mergeIntoParent(ctx: RunContext, node: FlowNode): Promise<NodeResult> {
+async function mergeIntoParent(ctx: RunContext, node: FlowNode, inputs: NodeIO): Promise<NodeResult> {
   const branch = ctx.run.stack?.branch;
   const parent = ctx.parentContext;
   if (!branch || !parent || !ctx.run.stack) {
@@ -81,7 +81,9 @@ async function mergeIntoParent(ctx: RunContext, node: FlowNode): Promise<NodeRes
       throw new Error(`Merge conflict merging ${branch} into ${target} — merge aborted. ${(e as Error).message}`);
     }
     ctx.log("info", `Merged ${branch} into ${target}`, node.id);
-    return { outputs: { artifact: `Merged ${branch} into ${target}` } };
+    // Hand the task's own result on, so the stack's combine step still sees what the task did.
+    const merged = `Merged ${branch} into ${target}`;
+    return { outputs: { artifact: inputs.artifact?.trim() ? `${inputs.artifact}\n\n${merged}` : merged, steer: inputs.steer } };
   });
 }
 
@@ -115,7 +117,7 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
     return { outputs: { artifact: url ?? out.trim() } };
   }
 
-  if (cfg.autoAction === "merge-parent") return mergeIntoParent(ctx, node);
+  if (cfg.autoAction === "merge-parent") return mergeIntoParent(ctx, node, inputs);
 
   const repo = requireEnv(env, "REPO_PATH");
   switch (cfg.autoAction) {

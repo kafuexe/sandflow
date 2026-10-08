@@ -182,4 +182,23 @@ describe("running a stack", () => {
     expect(child.flags).toEqual([expect.objectContaining({ message: "tests skipped" })]);
     expect(final.flags).toEqual([expect.objectContaining({ message: "tests skipped", fromRunId: child.id })]);
   });
+
+  it("stopping a task's run by hand drops that task instead of retrying it", async () => {
+    let started = 0;
+    const { h, children, calls } = stackRun({ maxRetries: 2 }, {
+      split: () => tasks("a", "b"),
+      work: (i, ctx) => {
+        started++;
+        if (i.artifact === "b") return { artifact: "fine" };
+        return new Promise((_r, rej) => ctx.abort.signal.addEventListener("abort", () => rej(new Error("Run cancelled"))));
+      },
+    });
+    while (children.length < 2) await new Promise((r) => setTimeout(r, 1));
+    children.find((c) => c.state.stack?.task === "a")!.cancel();
+    const final = await h.done;
+    expect(started).toBe(2);
+    expect(final.nodes.s.exit).toBe("done");
+    expect(calls.combine[0].artifact).toMatch(/a \(1 attempt\): stopped by you/);
+    expect(final.flags).toEqual([expect.objectContaining({ message: "1 of 2 tasks dropped after retries: a" })]);
+  });
 });

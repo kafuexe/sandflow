@@ -145,6 +145,7 @@ function stackProblems(id: string, s: StackConfig, flows: Flow[], blocks: BlockD
   else {
     const fi = flowInterface(child, blocks);
     if (!fi.hasInput) out.push(`Box Stack "${id}": flow "${child.name}" has no Flow input, so tasks can't be handed to it`);
+    if (!s.successExits.length) out.push(`Box Stack "${id}" needs at least one success exit, or every task is rejected`);
     for (const x of s.successExits) if (!fi.exits.includes(x)) out.push(`Box Stack "${id}": success exit "${x}" isn't one of "${child.name}"'s outputs (${fi.exits.join(", ") || "none"})`);
   }
   if (!(s.maxConcurrent >= 1)) out.push(`Box Stack "${id}" must run at least 1 at once`);
