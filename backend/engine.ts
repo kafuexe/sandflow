@@ -15,6 +15,8 @@ import type {
   NodeIO,
   QuestionRecord,
   ResolvedConfig,
+  RunFlag,
+  FlagSeverity,
   RunState,
   Settings,
   SkillFileRef,
@@ -66,6 +68,8 @@ export interface RunContext {
   log(level: LogLine["level"], msg: string, nodeId?: string): void;
   /** Pause the run until the user answers (rejects when the run is cancelled). */
   ask(nodeId: string, question: string): Promise<string>;
+  /** Raise a flag on the run: saved with it, shown in the run list and as an alert. */
+  flag(severity: FlagSeverity, message: string, o?: { nodeKey?: string; details?: string; fromRunId?: string }): RunFlag;
   /** Teardown callbacks run when the run ends (e.g. sandbox.close()). */
   cleanup: Array<() => Promise<unknown>>;
   /** Where agent logs are written (per node). */
@@ -97,6 +101,8 @@ export interface StartRunOptions {
   startNodeId?: string;
   /** Starting prompt for this run only; overrides `settings.startingPrompt`. */
   prompt?: string;
+  /** Called for every flag raised on this run. */
+  onFlag?: (run: RunState, flag: RunFlag) => void;
 }
 
 export interface RunHandle {
@@ -124,6 +130,7 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string): RunContext 
     flow,
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
+    flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
   };
   return new Proxy(ctx, {
@@ -174,6 +181,13 @@ export function startRun(opts: StartRunOptions): RunHandle {
       run.logs.push({ ts: Date.now(), level, nodeId, msg });
       if (run.logs.length > MAX_LOGS) run.logs.splice(0, run.logs.length - MAX_LOGS);
       emit();
+    },
+    flag(severity, message, o = {}) {
+      const f: RunFlag = { id: randomUUID().slice(0, 8), severity, message, at: Date.now(), ...o };
+      (run.flags ??= []).push(f);
+      ctx.log(severity === "error" ? "error" : "warn", `⚑ ${message}`, o.nodeKey);
+      opts.onFlag?.(run, f);
+      return f;
     },
     ask(nodeId, question) {
       if (ctx.abort.signal.aborted) return Promise.reject(new Error("Run cancelled"));
@@ -402,6 +416,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (run.status === "failed") {
         run.error = (e as Error).message;
         ctx.log("error", run.error);
+        ctx.flag("error", `Run failed: ${run.error}`);
       }
     } finally {
       for (const fn of ctx.cleanup.splice(0)) {

@@ -7,14 +7,14 @@ import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
-import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunState, Settings, TriggerEvent } from "../shared/types";
+import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
 import { startRun, type NodeRunner, type RunHandle, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
-import { settleInterrupted, summarize, type Storage } from "./storage";
+import { dismissFlag, settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
 import { startWebhookServer, type WebhookServer } from "./webhooks";
 
@@ -87,6 +87,12 @@ export function createApi(
     rev++;
     dataListeners.forEach((fn) => fn({ rev, ...c }));
   }
+  /** Flag events go out on the same stream as data changes, so every view hears about them. */
+  const flagListeners = new Set<(event: "flag" | "flag-dismissed", data: object) => void>();
+  function announceFlag(run: RunState, flag: RunFlag) {
+    const runTitle = run.trigger?.title || run.prompt?.split("\n")[0]?.slice(0, 80) || run.flowName;
+    flagListeners.forEach((fn) => fn("flag", { runId: run.id, runTitle, flowName: run.flowName, flag }));
+  }
   function checkRev(url: URL) {
     const seen = url.searchParams.get("rev");
     if (seen !== null && Number(seen) !== rev) {
@@ -142,6 +148,7 @@ export function createApi(
       loadSkill: skills.read,
       packs: runPacks,
       ...extra,
+      onFlag: announceFlag,
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
         if (s.finishedAt || Date.now() - lastSave > 2000) {
@@ -304,6 +311,16 @@ export function createApi(
     const route = `${method} /${parts.map((p, i) => (isId(i) ? ":id" : p)).join("/")}`;
     noteHost(req.headers.host);
 
+    if (method === "POST" && parts[0] === "runs" && parts[2] === "flags" && parts[4] === "dismiss" && parts.length === 5) {
+      const live = runs.get(parts[1]);
+      const run = live?.state ?? getRun(parts[1]);
+      if (!dismissFlag(run, parts[3])) throw new HttpError(404, "Flag not found");
+      storage.saveRun(run);
+      if (live && !run.finishedAt) listeners.get(run.id)?.forEach((fn) => fn(run));
+      flagListeners.forEach((fn) => fn("flag-dismissed", { runId: run.id, flagId: parts[3] }));
+      return send(res, 200, { ok: true });
+    }
+
     switch (route) {
       case "GET /data":
         return send(res, 200, { ...storage.load(), rev });
@@ -313,10 +330,13 @@ export function createApi(
         const push = (c: DataChange) => res.write(`event: change\ndata: ${JSON.stringify(c)}\n\n`);
         push({ rev, source: "ui" });
         dataListeners.add(push);
+        const pushFlag = (event: string, data: object) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        flagListeners.add(pushFlag);
         const beat = setInterval(() => res.write(": ping\n\n"), 15_000);
         req.on("close", () => {
           clearInterval(beat);
           dataListeners.delete(push);
+          flagListeners.delete(pushFlag);
         });
         return;
       }

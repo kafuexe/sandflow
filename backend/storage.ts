@@ -83,13 +83,32 @@ export type Storage = ReturnType<typeof createStorage>;
 export function settleInterrupted(r: RunState): RunState {
   if (r.finishedAt) return r;
   const last = r.logs.at(-1)?.ts ?? r.startedAt;
+  const error = r.error ?? "Interrupted — Sandflow stopped while this run was active";
+  const flags = r.flags ?? [];
   return {
     ...r,
     status: "cancelled",
     finishedAt: last,
     pendingQuestion: undefined,
-    error: r.error ?? "Interrupted — Sandflow stopped while this run was active",
+    error,
+    flags: flags.some((f) => f.id === INTERRUPTED_FLAG) ? flags : [...flags, { id: INTERRUPTED_FLAG, severity: "error", message: error, at: last }],
   };
+}
+
+const INTERRUPTED_FLAG = "interrupted";
+
+/** Mark one of the run's flags as looked at. False when the run has no such flag. */
+export function dismissFlag(r: RunState, flagId: string): boolean {
+  const f = r.flags?.find((x) => x.id === flagId);
+  if (!f) return false;
+  f.dismissed = true;
+  return true;
+}
+
+function flagCounts(r: RunState): RunSummary["flags"] {
+  const open = (r.flags ?? []).filter((f) => !f.dismissed);
+  if (!open.length) return undefined;
+  return { warning: open.filter((f) => f.severity === "warning").length, error: open.filter((f) => f.severity === "error").length };
 }
 
 export function summarize(r: RunState): RunSummary {
@@ -104,6 +123,7 @@ export function summarize(r: RunState): RunSummary {
     trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
     prompt: r.prompt,
     pendingQuestion: r.pendingQuestion,
+    flags: flagCounts(r),
   };
 }
 

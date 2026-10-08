@@ -492,6 +492,23 @@ export interface LogLine {
   msg: string;
 }
 
+export type FlagSeverity = "warning" | "error";
+
+/** Something that went wrong in a run and needs a look — saved on the run until it's cleared. */
+export interface RunFlag {
+  id: string;
+  severity: FlagSeverity;
+  /** Node key that raised it (`stack1`, `stack1/cr`), if any. */
+  nodeKey?: string;
+  message: string;
+  /** Longer text shown when the flag is expanded. */
+  details?: string;
+  /** Set when the flag was copied up from a child run. */
+  fromRunId?: string;
+  at: number;
+  dismissed?: boolean;
+}
+
 export interface RunState {
   id: string;
   flowId: string;
@@ -512,6 +529,7 @@ export interface RunState {
   trigger?: TriggerEvent;
   /** Trigger node that fired (absent for manual runs). */
   triggerNodeId?: string;
+  flags?: RunFlag[];
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -588,4 +606,6 @@ export interface RunSummary {
   trigger?: { source: TriggerType; type: string; author?: string; title?: string };
   prompt?: string;
   pendingQuestion?: PendingQuestion;
+  /** Undismissed flags by severity (absent when there are none). */
+  flags?: { warning: number; error: number };
 }
