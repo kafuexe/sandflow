@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { nodeLabel } from "../../shared/resolve";
 import type { FlowNode, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
+import { withMergeLock } from "../stack";
 import { codeOwner, trustedOnHost } from "./trust";
 
 const execFileP = promisify(execFile);
@@ -62,6 +63,28 @@ export function commentCommand(event: TriggerEvent | undefined, body: string): {
   };
 }
 
+/** Merge a Box Stack task's branch into the parent run's branch, in the parent's worktree, one task at a time. */
+async function mergeIntoParent(ctx: RunContext, node: FlowNode): Promise<NodeResult> {
+  const branch = ctx.run.stack?.branch;
+  const parent = ctx.parentContext;
+  if (!branch || !parent || !ctx.run.stack) {
+    throw new Error("Merge into parent branch only works inside an isolated Box Stack task");
+  }
+  const worktree = (parent.sandbox as { worktreePath?: string } | undefined)?.worktreePath;
+  if (!worktree) throw new Error("The parent run has no worktree to merge into yet");
+  const target = parent.run.branch ?? "the parent branch";
+  return withMergeLock(ctx.run.stack.groupId, async () => {
+    try {
+      await run("git", ["-c", "user.name=Sandflow", "-c", "user.email=sandflow@localhost", "merge", "--no-edit", branch], worktree, ctx.abort.signal);
+    } catch (e) {
+      await run("git", ["merge", "--abort"], worktree).catch(() => {});
+      throw new Error(`Merge conflict merging ${branch} into ${target} — merge aborted. ${(e as Error).message}`);
+    }
+    ctx.log("info", `Merged ${branch} into ${target}`, node.id);
+    return { outputs: { artifact: `Merged ${branch} into ${target}` } };
+  });
+}
+
 export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
   const env = ctx.blockEnv(cfg);
   const signal = ctx.abort.signal;
@@ -91,6 +114,8 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
     ctx.log("info", `Posted comment on ${ctx.run.trigger?.repo} ${ctx.run.trigger?.target === "merge_request" ? "MR" : "issue"} ${ctx.run.trigger?.number}`, node.id);
     return { outputs: { artifact: url ?? out.trim() } };
   }
+
+  if (cfg.autoAction === "merge-parent") return mergeIntoParent(ctx, node);
 
   const repo = requireEnv(env, "REPO_PATH");
   switch (cfg.autoAction) {

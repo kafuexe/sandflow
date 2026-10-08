@@ -9,6 +9,7 @@ export const FLOW_INPUT_BLOCK = `${CORE_PACK}/flow-input`;
 export const FLOW_OUTPUT_BLOCK = `${CORE_PACK}/flow-output`;
 export const SCRIPT_BLOCK = `${CORE_PACK}/script`;
 export const STACK_BLOCK = `${CORE_PACK}/stack`;
+export const MERGE_PARENT_BLOCK = `${CORE_PACK}/merge-parent`;
 
 export const CORE_BLOCKS: BlockDef[] = [
   {
@@ -40,6 +41,23 @@ export const CORE_BLOCKS: BlockDef[] = [
       env: ["REPO_PATH"],
       inputs: { artifact: true, steer: true, startingPrompt: false },
       outputs: { artifact: false, steer: false },
+    },
+  },
+  {
+    id: MERGE_PARENT_BLOCK,
+    name: "Merge into parent branch",
+    isTemplate: false,
+    pack: CORE_PACK,
+    config: {
+      kind: "auto",
+      autoAction: "merge-parent",
+      description:
+        "Inside a Box Stack task with an isolated workspace: merges this task's branch into the branch the stack was " +
+        "cut from, one task at a time. A conflict fails the step.",
+      color: "#f97316",
+      icon: "git-merge",
+      inputs: { artifact: true, steer: false, startingPrompt: false },
+      outputs: { artifact: true, steer: false },
     },
   },
   {

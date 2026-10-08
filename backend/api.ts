@@ -129,13 +129,24 @@ export function createApi(
     }
   }
 
+  /** Saves of live runs are throttled per run; a finished run is always saved. */
+  const lastSave = new Map<string, number>();
+  function track(handle: RunHandle) {
+    runs.set(handle.state.id, handle);
+    void handle.done.then((s) => {
+      storage.saveRun(s);
+      lastSave.delete(s.id);
+      setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
+      if (!s.parent) drainQueue(s.flowId);
+    });
+  }
+
   /** Start a run (manual, or fired by a trigger node). */
   function launch(
     flow: Flow,
     data: AppData,
     extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string } = {},
   ): RunHandle {
-    let lastSave = 0;
     const handle = startRun({
       flow,
       blocks: data.blocks,
@@ -149,20 +160,17 @@ export function createApi(
       packs: runPacks,
       ...extra,
       onFlag: announceFlag,
+      // Stack children are runs of their own: answerable, cancellable and streamed like any other.
+      onSpawn: track,
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
-        if (s.finishedAt || Date.now() - lastSave > 2000) {
-          lastSave = Date.now();
+        if (s.finishedAt || Date.now() - (lastSave.get(s.id) ?? 0) > 2000) {
+          lastSave.set(s.id, Date.now());
           storage.saveRun(s);
         }
       },
     });
-    runs.set(handle.state.id, handle);
-    void handle.done.then((s) => {
-      storage.saveRun(s);
-      setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
-      drainQueue(s.flowId);
-    });
+    track(handle);
     return handle;
   }
 
@@ -171,7 +179,7 @@ export function createApi(
   /** Triggered runs waiting because their flow is busy (overlap: queue). */
   const queues = new Map<string, { nodeId: string; event: TriggerEvent }[]>();
   const MAX_QUEUE = 50;
-  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.finishedAt);
+  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.parent && !h.state.finishedAt);
 
   function startTriggered(flowId: string, nodeId: string, event: TriggerEvent): FireOutcome {
     const data = storage.load();

@@ -103,9 +103,19 @@ export function sandboxBranch(ctx: RunContext): string {
   return ctx.branch || ctx.env.BRANCH_NAME?.trim() || `sandflow/${ctx.run.id}`;
 }
 
-/** The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted. */
+/**
+ * The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted.
+ * Calls that arrive while it's being created wait for the same one (stack children sharing a workspace run at once).
+ */
 export async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   if (ctx.sandbox) return ctx.sandbox as SandboxLike;
+  ctx.sandboxPending ??= createRunSandbox(ctx).finally(() => {
+    ctx.sandboxPending = undefined;
+  });
+  return (await ctx.sandboxPending) as SandboxLike;
+}
+
+async function createRunSandbox(ctx: RunContext): Promise<SandboxLike> {
   const sc = await import("@ai-hero/sandcastle");
   const kind = ctx.settings.sandbox;
   // Docker/Podman: the image must already be loaded (offline bundle) — never let `docker run` try to pull it.
@@ -125,7 +135,7 @@ export async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   ctx.log("info", `Creating ${kind} sandbox on branch ${branch}…`);
   const sandbox = await sc.createSandbox({
     branch,
-    baseBranch: ctx.env.BASE_BRANCH?.trim() || undefined,
+    baseBranch: ctx.baseBranch || ctx.env.BASE_BRANCH?.trim() || undefined,
     sandbox: provider as Parameters<typeof sc.createSandbox>[0]["sandbox"],
     cwd: repo,
   });

@@ -34,6 +34,20 @@ export function parentBranch(ctx: RunContext): string {
   return ctx.run.branch || ctx.branch || ctx.env.BRANCH_NAME?.trim() || `sandflow/${ctx.run.id}`;
 }
 
+const mergeLocks = new Map<string, Promise<unknown>>();
+
+/** Run `fn` once every earlier merge of this stack group is over (so parallel tasks never race on one branch). */
+export function withMergeLock<T>(groupId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = mergeLocks.get(groupId) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  const tail = run.catch(() => {});
+  mergeLocks.set(groupId, tail);
+  void tail.then(() => {
+    if (mergeLocks.get(groupId) === tail) mergeLocks.delete(groupId);
+  });
+  return run;
+}
+
 const clip = (s: string, n = REASON_CHARS) => (s.length > n ? `${s.slice(0, n)}…` : s);
 
 /** Why an attempt didn't count as a success, or undefined when it did. */

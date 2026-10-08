@@ -34,7 +34,7 @@ export interface StackConfig {
   combineInstructions: string;
 }
 
-export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment";
+export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment" | "merge-parent";
 
 /** Where a condition's result leaves the block. */
 export type BranchHandle = "true" | "false";

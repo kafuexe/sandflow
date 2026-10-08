@@ -65,6 +65,10 @@ export interface RunContext {
   baseBranch?: string;
   /** Lazily created sandcastle sandbox, shared by every AI block of the run. */
   sandbox?: unknown;
+  /** The sandbox while it's being created. */
+  sandboxPending?: Promise<unknown>;
+  /** A Box Stack task with an isolated workspace: the context of the run that started it (where it merges into). */
+  parentContext?: RunContext;
   abort: AbortController;
   installedSkills: Set<string>;
   /** Only the env vars the block declares — never leak all globals. */
@@ -118,6 +122,7 @@ export interface StartRunOptions {
   /** Sandbox branch for this run, and the branch it's cut from. */
   branch?: string;
   baseBranch?: string;
+  parentContext?: RunContext;
   /** Called when this run starts a child run (a stack's task), so the caller can track, save and stream it. */
   onSpawn?: (child: RunHandle) => void;
 }
@@ -241,10 +246,11 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
   ctx.branch = opts.branch;
   ctx.baseBranch = opts.baseBranch;
+  ctx.parentContext = opts.parentContext;
   if (opts.share) {
     // Shared workspace: the sandbox (and whatever was set up in it) belongs to the run that owns it.
     const owner = opts.share;
-    for (const k of ["sandbox", "branch", "baseBranch", "installedSkills", "preparedPacks", "cleanup"] as const) {
+    for (const k of ["sandbox", "sandboxPending", "branch", "baseBranch", "installedSkills", "preparedPacks", "cleanup"] as const) {
       Object.defineProperty(ctx, k, { get: () => owner[k], set: (v) => ((owner as unknown as Record<string, unknown>)[k] = v), enumerable: true });
     }
   }
@@ -370,6 +376,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
                   share: o.shared ? ctx : undefined,
                   branch: o.branch,
                   baseBranch: o.baseBranch,
+                  parentContext: o.shared ? undefined : ctx,
                   onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
                 });
                 opts.onSpawn?.(h);
