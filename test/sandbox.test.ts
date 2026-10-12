@@ -2,7 +2,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureSandboxReady, importSandboxImage, sandboxImageStatus, sandboxProviderOptions, type Exec } from "../backend/sandbox";
+import {
+  ensureSandboxReady,
+  importSandboxImage,
+  loadBundledSandboxImage,
+  sandboxImageStatus,
+  sandboxProviderOptions,
+  setBundledSandboxImage,
+  type Exec,
+} from "../backend/sandbox";
 import { DEFAULT_SANDBOX_IMAGE, validateSettings } from "../shared/settings";
 import type { Settings } from "../shared/types";
 
@@ -12,7 +20,10 @@ const tmp = () => {
   dirs.push(d);
   return d;
 };
-afterEach(() => dirs.splice(0).forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+afterEach(() => {
+  setBundledSandboxImage(undefined);
+  dirs.splice(0).forEach((d) => fs.rmSync(d, { recursive: true, force: true }));
+});
 
 const base: Settings = { startingPrompt: "", sandbox: "docker", maxSteps: 40 };
 
@@ -34,7 +45,7 @@ describe("sandbox image", () => {
 
   it("reports runtime and image presence using docker or podman", async () => {
     const ok = fakeExec({ version: { code: 0, stdout: "27.0" }, "image inspect": { code: 0, stdout: "sha256:abc" } });
-    expect(await sandboxImageStatus(base, ok.exec)).toEqual({ runtime: "docker", runtimeAvailable: true, image: DEFAULT_SANDBOX_IMAGE, imagePresent: true });
+    expect(await sandboxImageStatus(base, ok.exec)).toEqual({ runtime: "docker", runtimeAvailable: true, image: DEFAULT_SANDBOX_IMAGE, imagePresent: true, bundled: false });
     expect(ok.calls[1]).toEqual(["docker", "image", "inspect", DEFAULT_SANDBOX_IMAGE, "--format", "{{.Id}}"]);
 
     const missing = fakeExec({ version: { code: 0 }, "image inspect": { code: 1, stderr: "No such image" } });
@@ -67,6 +78,47 @@ describe("sandbox image", () => {
     await expect(ensureSandboxReady(base, ok.exec)).resolves.toBeUndefined();
     await expect(ensureSandboxReady({ ...base, sandbox: "none" }, ok.exec)).resolves.toBeUndefined();
     expect(ok.calls.every((c) => c[1] !== "pull")).toBe(true);
+  });
+
+  it("loads the bundle shipped with the app when the default image is missing", async () => {
+    const file = path.join(tmp(), "sandflow-agent.tar.gz");
+    fs.writeFileSync(file, "x");
+    setBundledSandboxImage(file);
+    let loaded = false;
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      if (args[0] === "load") loaded = true;
+      if (args[0] === "image") return { code: loaded ? 0 : 1, stdout: "", stderr: "" };
+      return { code: 0, stdout: "Loaded image: x", stderr: "" };
+    };
+    expect(await sandboxImageStatus(base, exec)).toMatchObject({ imagePresent: false, bundled: true });
+    await expect(ensureSandboxReady(base, exec)).resolves.toBeUndefined();
+    expect(calls.filter((c) => c[1] === "load")).toEqual([["docker", "load", "-i", file]]);
+  });
+
+  it("never loads the bundle for a custom image, sandbox none, or when none ships", async () => {
+    const file = path.join(tmp(), "sandflow-agent.tar.gz");
+    fs.writeFileSync(file, "x");
+    setBundledSandboxImage(file);
+    const missing = fakeExec({ version: { code: 0 }, "image inspect": { code: 1 } });
+    const custom = { ...base, sandboxImage: "acme/agent:1" };
+    expect(await sandboxImageStatus(custom, missing.exec)).toMatchObject({ bundled: false });
+    await expect(ensureSandboxReady(custom, missing.exec)).rejects.toThrow(/isn't loaded/);
+    await expect(loadBundledSandboxImage({ ...base, sandbox: "none" }, missing.exec)).rejects.toThrow(/doesn't ship/);
+    expect(missing.calls.some((c) => c[1] === "load")).toBe(false);
+
+    setBundledSandboxImage(path.join(tmp(), "absent.tar.gz"));
+    expect(await sandboxImageStatus(base, missing.exec)).toMatchObject({ bundled: false });
+  });
+
+  it("shares one load between concurrent callers", async () => {
+    const file = path.join(tmp(), "sandflow-agent.tar.gz");
+    fs.writeFileSync(file, "x");
+    setBundledSandboxImage(file);
+    const f = fakeExec({ load: { code: 0, stdout: "Loaded image: x" } });
+    await Promise.all([loadBundledSandboxImage(base, f.exec), loadBundledSandboxImage(base, f.exec)]);
+    expect(f.calls.filter((c) => c[1] === "load")).toHaveLength(1);
   });
 
   it("builds provider options: image name and a read-only agent tools mount", () => {

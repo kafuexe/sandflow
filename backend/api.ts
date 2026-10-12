@@ -12,7 +12,15 @@ import { createChatService, type AssistantRunner } from "./chats";
 import { startRun, type NodeRunner, type RunHandle, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
-import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
+import {
+  ensureSandboxReady,
+  execCli,
+  importSandboxImage,
+  loadBundledSandboxImage,
+  sandboxImageStatus,
+  setBundledSandboxImage,
+  type Exec,
+} from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
 import { settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
@@ -61,6 +69,8 @@ export interface ApiOptions {
   assistant?: AssistantRunner;
   /** Try to pull the base pack from GitHub at start while the installed one is the copy shipped with the app. */
   fetchBasePack?: boolean;
+  /** The sandbox image bundle shipped with the app; loaded automatically while the default image is missing. */
+  bundledSandboxImage?: string;
 }
 
 export function createApi(
@@ -75,6 +85,12 @@ export function createApi(
     runtimeRoot: path.join(storage.dir, "packs-runtime"),
   };
   const exec = opts.exec ?? execCli;
+  setBundledSandboxImage(opts.bundledSandboxImage);
+  if (opts.bundledSandboxImage) {
+    // First start after an install / update: load the shipped image in the background so the first run
+    // doesn't wait for it. Quietly skipped when Docker / Podman isn't running yet — runs retry it.
+    void ensureSandboxReady(storage.load().settings, exec).catch(() => {});
+  }
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
 
@@ -458,7 +474,10 @@ export function createApi(
       case "POST /sandbox/import": {
         const { path: file } = (await readJson<{ path?: string }>(req)) ?? {};
         try {
-          return send(res, 200, { output: await importSandboxImage(storage.load().settings, String(file ?? ""), exec) });
+          const settings = storage.load().settings;
+          // No file picked = load the bundle that shipped with the app.
+          const output = file ? await importSandboxImage(settings, String(file), exec) : await loadBundledSandboxImage(settings, exec);
+          return send(res, 200, { output });
         } catch (e) {
           throw new HttpError(400, (e as Error).message);
         }

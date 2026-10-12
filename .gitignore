@@ -7,3 +7,4 @@ dist
 .sandflow
 dist-electron
 release
+build/sandbox

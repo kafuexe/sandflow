@@ -18,6 +18,8 @@ export interface AppServerOptions {
   bundledSkillsDir?: string;
   /** Packs shipped with the app (`<dir>/base/manifest.json`); installed on first start. */
   bundledPacksDir?: string;
+  /** `sandflow-agent:<version>` image bundle shipped with the app (resources/sandbox/). */
+  bundledSandboxImage?: string;
   /** Fetch the base pack from GitHub at start (default true). */
   fetchBasePack?: boolean;
   /** Default 0 = pick a free port. */
@@ -48,6 +50,7 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
   const api = createApi(createStorage(opts.dataDir, { bundledDir: opts.bundledPacksDir }), opts.runners, {
     bundledSkillsDir: opts.bundledSkillsDir,
     fetchBasePack: opts.fetchBasePack ?? true,
+    bundledSandboxImage: opts.bundledSandboxImage,
   });
   const root = path.resolve(opts.webRoot);
   let allowedHosts = new Set<string>();
