@@ -105,6 +105,8 @@ export interface StartRunOptions {
   startNodeId?: string;
   /** Starting prompt for this run only; overrides `settings.startingPrompt`. */
   prompt?: string;
+  /** Longest each cleanup step (e.g. closing a sandbox) may take before the run ends without it. Default 20 s. */
+  cleanupTimeoutMs?: number;
 }
 
 export interface RunHandle {
@@ -115,6 +117,7 @@ export interface RunHandle {
 }
 
 const MAX_LOGS = 2000;
+const CLEANUP_TIMEOUT_MS = 20_000;
 
 /** Where a graph run ended up: a subflow reached one of its Flow outputs (or ran out of nodes). */
 interface GraphResult {
@@ -217,6 +220,18 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
   let steps = 0;
 
+  /** Rejects as soon as the run is stopped: a node's runner is raced against it, so Stop never waits on a runner. */
+  const stopped = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error("Run cancelled"));
+    if (ctx.abort.signal.aborted) fail();
+    else ctx.abort.signal.addEventListener("abort", fail, { once: true });
+  });
+  stopped.catch(() => {});
+  const untilStopped = <T>(p: Promise<T>): Promise<T> => {
+    p.catch(() => {}); // it may still fail after the run was stopped — nobody waits for it any more
+    return Promise.race([p, stopped]);
+  };
+
   /**
    * Run one flow's graph. Top level (`entry` undefined): starts at the trigger node or every node without inputs.
    * As a subflow: starts at its Flow input blocks with the parent's inputs, and returns as soon as a Flow output
@@ -265,6 +280,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         throw new Error(`Max steps exceeded (${settings.maxSteps}) — is the flow stuck in a loop?`);
       }
       const { nodeId, inputs } = queue.shift()!;
+      if (ctx.abort.signal.aborted) return {};
       const k = key(nodeId);
       const node = byId.get(nodeId)!;
       const cfg = resolveNode(node, blocks);
@@ -314,14 +330,14 @@ export function startRun(opts: StartRunOptions): RunHandle {
           result = { outputs: r.outputs ?? {}, exit: r.exit };
         } else if (cfg.kind === "script") {
           if (!runners.script) throw new Error("Script blocks aren't supported here");
-          result = await runners.script(gctx, node, cfg, inputs);
+          result = await untilStopped(runners.script(gctx, node, cfg, inputs));
         } else {
-          result = await (cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs);
+          result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs));
         }
       } catch (e) {
         if (ctx.abort.signal.aborted) {
-          ns.status = "failed";
-          ns.error = "Cancelled";
+          ns.status = "idle";
+          ns.error = "Stopped";
           return {};
         }
         ns.status = "failed";
@@ -413,17 +429,28 @@ export function startRun(opts: StartRunOptions): RunHandle {
         ctx.log("error", run.error);
       }
     } finally {
+      // Each step is bounded: a sandbox that won't close must not keep the run (and Stop) hanging.
+      const limit = opts.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
       for (const fn of ctx.cleanup.splice(0)) {
+        let timer: NodeJS.Timeout | undefined;
         try {
-          await fn();
+          const step = Promise.resolve().then(fn);
+          step.catch(() => {});
+          const timedOut = await Promise.race([
+            step.then(() => false),
+            new Promise<boolean>((r) => (timer = setTimeout(() => r(true), limit))),
+          ]);
+          if (timedOut) ctx.log("warn", `Cleanup step didn't finish within ${Math.round(limit / 1000)}s — continuing without it`);
         } catch (e) {
           ctx.log("warn", `Cleanup failed: ${(e as Error).message}`);
+        } finally {
+          clearTimeout(timer);
         }
       }
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
       run.finishedAt = Date.now();
-      if (run.status === "cancelled") ctx.log("warn", "Run cancelled");
+      if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
       emit();
     }
     return run;
@@ -438,9 +465,17 @@ export function startRun(opts: StartRunOptions): RunHandle {
       return true;
     },
     cancel() {
-      if (run.finishedAt) return;
+      // Idempotent: a second Stop (or one after the run ended) does nothing.
+      if (run.finishedAt || ctx.abort.signal.aborted) return;
+      // Show it right away; the run finishes once cleanup (closing sandboxes) is done.
+      run.status = "cancelled";
+      const active = Object.entries(run.nodes).filter(([, ns]) => ns.status === "running" || ns.status === "waiting");
+      ctx.log("warn", `Stop requested — cancelling ${active.length ? active.map(([id]) => id).join(", ") : "the run"} and killing its processes`);
       ctx.abort.abort(new Error("Run cancelled"));
       pending?.reject(new Error("Run cancelled"));
+      run.pendingQuestion = undefined;
+      for (const ns of Object.values(run.nodes)) if (ns.status === "queued") ns.status = "idle";
+      emit();
     },
   };
 }

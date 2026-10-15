@@ -631,9 +631,10 @@ export function createApi(
 
       case "POST /runs/:id/cancel": {
         const h = runs.get(parts[1]);
-        if (!h) throw new HttpError(404, "Run not active");
+        // Stopping a run that already ended (e.g. a second click on Stop) is fine; an unknown run is not.
+        if (!h) return send(res, 200, { ok: true, status: getRun(parts[1]).status });
         h.cancel();
-        return send(res, 200, { ok: true });
+        return send(res, 200, { ok: true, status: h.state.status });
       }
     }
     throw new HttpError(404, `No route ${method} ${url.pathname}`);

@@ -1,7 +1,6 @@
 // "Edit with AI" chats: saved per flow under <data>/chats/. Each turn runs the chat's agent CLI (any agent a block
 // can use) on the host; its only way to change things is Sandflow's MCP server, scoped to the chat's flow.
 
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,6 +12,7 @@ import { validateAssistantAgent } from "../shared/settings";
 import type { AppData, AssistantAgent, Chat, ChatMessage, ChatSummary } from "../shared/types";
 import { ADAPTERS, MCP_BRIDGE, type AdapterTurn, type AssistantEvent } from "./assistantAgents";
 import type { Mcp } from "./mcp";
+import { killTree, spawnTree } from "./proc";
 
 export type { AssistantEvent } from "./assistantAgents";
 
@@ -88,10 +88,11 @@ export const cliRunner: AssistantRunner = async function* (turn) {
   const bin = resolveCli(adapter.bins, turn.env);
   const opts = { cwd: turn.workDir, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
   const child = bin.viaCmd
-    ? spawn(turn.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", cmdLine(bin.cmd, command.args)], { ...opts, env: turn.env, windowsVerbatimArguments: true })
-    : spawn(bin.cmd, [...bin.args, ...command.args], { ...opts, env: bin.args.length ? { ...turn.env, ELECTRON_RUN_AS_NODE: "1" } : turn.env });
+    ? spawnTree(turn.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", cmdLine(bin.cmd, command.args)], { ...opts, env: turn.env, windowsVerbatimArguments: true })
+    : spawnTree(bin.cmd, [...bin.args, ...command.args], { ...opts, env: bin.args.length ? { ...turn.env, ELECTRON_RUN_AS_NODE: "1" } : turn.env });
 
-  const kill = () => child.kill();
+  // The agent CLI starts tools / MCP servers of its own: Stop kills all of them.
+  const kill = () => killTree(child);
   turn.signal.addEventListener("abort", kill, { once: true });
   let stderr = "";
   child.stderr.on("data", (d: Buffer) => (stderr = (stderr + d.toString()).slice(-4000)));
@@ -128,7 +129,7 @@ export const cliRunner: AssistantRunner = async function* (turn) {
     }
   } finally {
     turn.signal.removeEventListener("abort", kill);
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode === null) killTree(child);
   }
 };
 

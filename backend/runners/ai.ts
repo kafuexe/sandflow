@@ -12,7 +12,7 @@ import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
-import { ensureSandboxReady, execCli, sandboxProviderOptions } from "../sandbox";
+import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
 
@@ -171,12 +171,16 @@ export async function getSandbox(ctx: RunContext, kind: SandboxKind = ctx.settin
   const packMounts = (ctx.packs?.dirs() ?? [])
     .filter((p) => existsSync(p.dir))
     .map((p) => ({ hostPath: p.dir, sandboxPath: `${SANDBOX_PACKS_DIR}/${p.id}` }));
-  const provider =
+  const signal = ctx.abort.signal;
+  if (signal.aborted) throw new Error("Run cancelled");
+  const baseProvider =
     kind === "docker"
       ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxProviderOptions(settings, packMounts))
       : kind === "podman"
         ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(settings, packMounts))
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
+  // Stopping the run kills the agent's processes / container, not just the wait for them.
+  const provider = stoppableProvider(baseProvider, kind, signal);
   const scratch = usesScratchWorkspace(ctx);
   const repo = scratch ? await scratchWorkspace(ctx, kind === "none") : ctx.env[PROJECT_ENV]!.trim();
   const branch = sandboxBranch(ctx);
@@ -189,6 +193,11 @@ export async function getSandbox(ctx: RunContext, kind: SandboxKind = ctx.settin
     sandbox: provider as Parameters<typeof sc.createSandbox>[0]["sandbox"],
     cwd: repo,
   });
+  // Stopped while the sandbox was starting: the run's cleanup has already run, so tear this one down now.
+  if (signal.aborted) {
+    await sandbox.close().catch(() => {});
+    throw new Error("Run cancelled");
+  }
   if (isDefault) ctx.sandbox = sandbox;
   else (ctx.sandboxes ??= {})[kind] = sandbox;
   // A scratch branch exists nowhere after the run — don't report it as the run's branch.
