@@ -158,6 +158,9 @@ export const useStore = create<State>((set, get) => {
   async function fetchData() {
     try {
       const { rev: r, ...server } = await api.getData();
+      // Flow/block edits made while this was loading: leave them (and the old rev) alone — their save gets a 409 and
+      // reloads, saying the edit was replaced. Applying the server's copy here would drop them without a word.
+      if (saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) return;
       rev = r;
       const local = get().data;
       const data: AppData = {
@@ -186,8 +189,10 @@ export const useStore = create<State>((set, get) => {
 
   function watchData() {
     unsubscribeData?.();
-    unsubscribeData = subscribeData((c) => {
-      if (c.rev <= rev) return; // our own save, or already loaded
+    unsubscribeData = subscribeData((c, initial) => {
+      // On (re)connect the server says where it is: any other revision means we missed changes, or the server
+      // restarted (its revisions start over, so later changes would look old and be skipped).
+      if (initial ? c.rev === rev : c.rev <= rev) return; // our own save, or already loaded
       // A scheduled save of local flow/block edits will get a 409 and reload. Without one (e.g. the last
       // save failed) nothing else would pick the change up, so reload now — the server's version wins.
       if (saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) return;

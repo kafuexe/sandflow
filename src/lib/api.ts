@@ -99,10 +99,19 @@ export const api = {
   cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
 };
 
-/** Flows/blocks changed on the server (e.g. by the assistant). */
-export function subscribeData(onChange: (c: DataChange) => void): () => void {
+/**
+ * Flows/blocks changed on the server (e.g. by the assistant). `initial` marks the server's current revision, sent
+ * first on every (re)connect — after a server restart it can be lower than the one the client saw.
+ */
+export function subscribeData(onChange: (c: DataChange, initial: boolean) => void): () => void {
   const es = new EventSource("/api/data/events");
-  es.addEventListener("change", (ev) => onChange(JSON.parse((ev as MessageEvent).data) as DataChange));
+  let initial = true;
+  es.addEventListener("open", () => (initial = true));
+  es.addEventListener("change", (ev) => {
+    const first = initial;
+    initial = false;
+    onChange(JSON.parse((ev as MessageEvent).data) as DataChange, first);
+  });
   return () => es.close();
 }
 

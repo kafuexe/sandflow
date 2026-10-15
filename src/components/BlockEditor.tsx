@@ -76,17 +76,34 @@ export function BlockEditor() {
   const [draft, setDraft] = useState<BlockDef | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [envInput, setEnvInput] = useState("");
+  /** The saved block the draft was copied from (to follow changes made elsewhere, e.g. by the assistant). */
+  const [source, setSource] = useState<BlockDef | null>(null);
 
   useEffect(() => {
     setErrors([]);
     setEnvInput("");
-    if (!target || !data) return setDraft(null);
-    if ("create" in target) setDraft(newBlock(target.create === "template", data.blocks));
-    else {
+    if (!target || !data) {
+      setSource(null);
+      return setDraft(null);
+    }
+    if ("create" in target) {
+      setSource(null);
+      setDraft(newBlock(target.create === "template", data.blocks));
+    } else {
       const b = data.blocks.find((x) => x.id === target.id);
+      setSource(b ?? null);
       setDraft(b ? structuredClone(b) : null);
     }
   }, [target, data?.blocks.length]);
+
+  // The block changed while the dialog is open (the assistant saved it): show the new version, unless you've
+  // started editing — then your draft stays and saving it wins.
+  const stored = target && "id" in target ? data?.blocks.find((x) => x.id === target.id) : undefined;
+  useEffect(() => {
+    if (!stored || !source || stored === source) return;
+    if (JSON.stringify(draft) === JSON.stringify(source)) setDraft(structuredClone(stored));
+    setSource(stored);
+  }, [stored]);
 
   const blocks = useMemo(() => {
     if (!data || !draft) return [];

@@ -21,9 +21,20 @@ class NodeEventSource {
   private handlers = new Map<string, ((ev: { data: string }) => void)[]>();
   constructor(url: string) {
     sources.push(this);
-    void (async () => {
+    void this.connect(url);
+  }
+  /** Like a browser's EventSource: when the stream ends (server gone), reconnect shortly after. */
+  private async connect(url: string) {
+    await this.read(url);
+    if (this.ctrl.signal.aborted) return;
+    await new Promise((r) => setTimeout(r, 50));
+    if (!this.ctrl.signal.aborted) void this.connect(url);
+  }
+  private async read(url: string) {
+    {
       try {
         const res = await realFetch(origin + url, { signal: this.ctrl.signal });
+        this.handlers.get("open")?.forEach((fn) => fn({ data: "" }));
         const reader = res.body!.getReader();
         const dec = new TextDecoder();
         let buf = "";
@@ -45,9 +56,9 @@ class NodeEventSource {
           }
         }
       } catch {
-        /* closed */
+        /* closed, or the server went away */
       }
-    })();
+    }
   }
   addEventListener(name: string, fn: (ev: { data: string }) => void) {
     this.handlers.set(name, [...(this.handlers.get(name) ?? []), fn]);
@@ -60,14 +71,19 @@ class NodeEventSource {
 /** Client-side hooks into the bridged fetch. */
 let hooks: { failPut?: boolean; delayNextGet?: number; gets: number };
 
-beforeEach(async () => {
-  dir = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-live-"));
+/** Serve a fresh API (revisions start at 0) over the data dir, on `port` (0 = any). */
+async function serve(port = 0) {
   const noop = async () => ({ outputs: {} });
   const api = createApi(createStorage(dir), { auto: noop, ai: noop }, { exec: async () => ({ code: 1, stdout: "", stderr: "" }) });
   server = createServer((req, res) => api(req, res, () => ((res.statusCode = 404), res.end())));
-  server.listen(0);
+  server.listen(port);
   await new Promise((r) => server.once("listening", r));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+beforeEach(async () => {
+  dir = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-live-"));
+  await serve();
   hooks = { gets: 0 };
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     if (init?.method === "PUT" && hooks.failPut) {
@@ -154,6 +170,34 @@ describe("live data: assistant edits reach the store (and the Inputs panel)", ()
     expect(await s().flushSaves()).toBe(false);
     await tool("edit_flow", { ops: [{ op: "add_node", id: "x1", block: "base/plan", overrides: { env: ["AFTER_FAILURE"] } }] });
     await waitFor(() => requiredEnv().includes("AFTER_FAILURE"));
+  });
+
+  it("keeps working after the server restarts (its revisions start over)", async () => {
+    const { tool, requiredEnv } = await setup();
+    await tool("edit_flow", { ops: [{ op: "add_node", id: "x1", block: "base/plan", overrides: { env: ["BEFORE_RESTART"] } }] });
+    await waitFor(() => requiredEnv().includes("BEFORE_RESTART"));
+    const port = Number(new URL(origin).port);
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+    await serve(port);
+    await sleep(200); // the event stream reconnects
+    await tool("edit_flow", { ops: [{ op: "update_node", id: "x1", overrides: { env: ["AFTER_RESTART"] } }] });
+    await waitFor(() => requiredEnv().includes("AFTER_RESTART"));
+  });
+
+  it("an edit made while a reload is loading isn't dropped silently", async () => {
+    const { s, tool, requiredEnv } = await setup();
+    const node = s().data!.flows.find((f) => f.id === s().currentFlowId)!.nodes[0];
+    hooks.delayNextGet = 300;
+    const before = hooks.gets;
+    await tool("edit_flow", { ops: [{ op: "add_node", id: "x1", block: "base/plan", overrides: { env: ["ASSISTANT"] } }] });
+    await waitFor(() => hooks.gets > before); // the reload is on its way
+    s().updateNodeData(node.id, { label: "Mine, typed meanwhile" });
+    await sleep(350); // the slow reload has landed — the local edit is still there, waiting for its save
+    expect(s().data!.flows.find((f) => f.id === s().currentFlowId)!.nodes[0].data.label).toBe("Mine, typed meanwhile");
+    // Its save meets the assistant's newer version: that one wins, and you're told.
+    await waitFor(() => !!s().saveNotice);
+    expect(requiredEnv()).toContain("ASSISTANT");
   });
 
   it("a slow reload can't put back an older version", async () => {

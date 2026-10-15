@@ -29,6 +29,11 @@ interface AgentState {
   answer(id: string, text: string): Promise<boolean>;
 }
 
+/**
+ * Live run streams. Only the selected run is followed live — the list is kept fresh by the 4s poll. Every stream holds
+ * one of the browser's ~6 connections per host (HTTP/1.1); one per unfinished run used them all up with a few runs going,
+ * which stalled every other request, e.g. the reload that shows an assistant edit in the builder.
+ */
 const subs = new Map<string, () => void>();
 
 function toSummary(r: RunState): RunSummary {
@@ -57,6 +62,13 @@ export const useAgent = create<AgentState>((set, get) => {
   }
 
   function watch(id: string) {
+    // Drop streams of runs that are no longer selected.
+    for (const [other, off] of subs) {
+      if (other !== id) {
+        off();
+        subs.delete(other);
+      }
+    }
     if (subs.has(id)) return;
     subs.set(
       id,
@@ -89,11 +101,16 @@ export const useAgent = create<AgentState>((set, get) => {
       // Live subscriptions are fresher than the list for the runs they cover.
       const detail = get().detail;
       set({ list: fresh.map((r) => (subs.has(r.id) && detail[r.id] ? toSummary(detail[r.id]) : r)) });
-      for (const r of fresh) if (!r.finishedAt) watch(r.id);
+      const selected = get().selectedId;
+      if (selected && fresh.some((r) => r.id === selected && !r.finishedAt)) watch(selected);
     },
     select(id) {
       set({ selectedId: id, error: undefined });
-      if (id) void open(id);
+      if (!id) return;
+      void open(id).then(() => {
+        const run = get().detail[id];
+        if (get().selectedId === id && (!run || !run.finishedAt)) watch(id);
+      });
     },
     setDraft(draft) {
       set({ draft });
@@ -113,8 +130,8 @@ export const useAgent = create<AgentState>((set, get) => {
         }
         const { runId } = await api.startRun(flowId, draft.trim());
         apply(await api.getRun(runId));
-        watch(runId);
         set({ selectedId: runId, draft: "" });
+        watch(runId);
       } catch (e) {
         const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
         set({ error: missing ? `Missing inputs: ${missing.join(", ")}` : (e as Error).message });
