@@ -2,3 +2,7 @@
 skills/** text eol=lf
 sandbox/** text eol=lf
 packs/** text eol=lf
+
+# Build scripts: keep native line endings for each OS.
+scripts/*.sh text eol=lf
+scripts/*.bat text eol=crlf
