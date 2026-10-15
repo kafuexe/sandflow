@@ -169,3 +169,57 @@ describe("api", () => {
     expect(list.find((x) => x.id === id)).toMatchObject({ status: "cancelled" });
   });
 });
+
+describe("concurrent runs", () => {
+  it("runs the same flow twice at once, each with its own state, and warns about a shared BRANCH_NAME", async () => {
+    // Nodes hold until the test opens the gate, so both runs are provably in progress at the same time.
+    const entered = new Set<string>();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const seen: Record<string, string[]> = {};
+    await start(async (ctx, node) => {
+      (seen[ctx.run.id] ??= []).push(node.id);
+      entered.add(ctx.run.id);
+      await gate;
+      if (node.id === "n-manager") return { outputs: {}, route: "n-create-mr" };
+      return { outputs: { artifact: `from ${ctx.run.id}`, steer: "s" } };
+    });
+    await fetch(`${base}/env`, json("PUT", env));
+    await fetch(`${base}/settings`, json("PUT", { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 }));
+
+    const r1 = (await (await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline", prompt: "first" }))).json()) as { runId: string; warning?: string };
+    const r2 = (await (await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline", prompt: "second" }))).json()) as { runId: string; warning?: string };
+    expect(r1.runId).not.toBe(r2.runId);
+    // Same REPO_PATH + explicit BRANCH_NAME: allowed, but the second run is told it shares the branch.
+    expect(r1.warning).toBeUndefined();
+    expect(r2.warning).toMatch(/branch b/);
+    expect(r2.warning).toContain(r1.runId);
+
+    for (let i = 0; i < 200 && entered.size < 2; i++) await new Promise((r) => setTimeout(r, 5));
+    expect([...entered].sort()).toEqual([r1.runId, r2.runId].sort());
+    const live = (await (await fetch(`${base}/runs`)).json()) as RunSummary[];
+    expect(live.filter((r) => r.flowId === "feature-pipeline" && !r.finishedAt).map((r) => r.id).sort()).toEqual([r1.runId, r2.runId].sort());
+
+    open();
+    const finish = async (id: string) => {
+      for (let i = 0; i < 200; i++) {
+        const s = (await (await fetch(`${base}/runs/${id}`)).json()) as RunState;
+        if (s.finishedAt) return s;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`run ${id} did not finish`);
+    };
+    const [s1, s2] = await Promise.all([finish(r1.runId), finish(r2.runId)]);
+    for (const [s, other, prompt] of [[s1, s2, "first"], [s2, s1, "second"]] as const) {
+      expect(s.status).toBe("done");
+      expect(s.prompt).toBe(prompt);
+      const outputs = Object.values(s.nodes).map((n) => n.outputs?.artifact).filter(Boolean);
+      expect(outputs.length).toBeGreaterThan(0);
+      expect(outputs.every((a) => a === `from ${s.id}`)).toBe(true);
+      expect(JSON.stringify(s.logs.filter((l) => l.level !== "warn"))).not.toContain(other.id);
+    }
+    expect(s2.logs.some((l) => l.level === "warn" && /branch b/.test(l.msg))).toBe(true);
+    expect(s1.logs.some((l) => l.level === "warn" && /branch b/.test(l.msg))).toBe(false);
+    expect(seen[s1.id]).toEqual(seen[s2.id]);
+  });
+});

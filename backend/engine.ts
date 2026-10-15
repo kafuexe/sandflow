@@ -107,6 +107,8 @@ export interface StartRunOptions {
   prompt?: string;
   /** Longest each cleanup step (e.g. closing a sandbox) may take before the run ends without it. Default 20 s. */
   cleanupTimeoutMs?: number;
+  /** Logged as warnings when the run starts (e.g. it shares a branch with another run). */
+  warnings?: string[];
 }
 
 export interface RunHandle {
@@ -217,6 +219,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
       });
     },
   };
+
+  for (const w of opts.warnings ?? []) ctx.log("warn", w);
 
   let steps = 0;
 

@@ -17,6 +17,7 @@ import type {
 import { cloneFlow, newFlow } from "../../shared/flows";
 import { api, ApiError, subscribeData, subscribeRun, type TriggersInfo } from "./api";
 import { pickFlowId, saveFlowId, savedFlowIds } from "./activeFlow";
+import { mergeRun, runToShow } from "./runSelection";
 
 type Section = "blocks" | "flows" | "settings" | "env";
 export type SaveStatus = "saved" | "pending" | "saving" | "error";
@@ -36,7 +37,10 @@ interface State {
   /** Packs dialog open. */
   packsOpen: boolean;
   sideTab: SideTab;
+  /** The run shown on the canvas and in the Run tab (several may be going; see `runs`). */
   run?: RunState;
+  /** A warning the server gave when starting a run (e.g. it shares a branch with another run). */
+  runWarning?: { runId: string; message: string };
   /** Recent runs (manual + triggered), newest first. */
   runs: RunSummary[];
   triggers?: TriggersInfo;
@@ -89,12 +93,14 @@ interface State {
   setPacksOpen(open: boolean): void;
   setSideTab(tab: SideTab): void;
   // runs
+  /** Start a run of the current flow — also while other runs (of this or other flows) are going. */
   startRun(): Promise<void>;
   /** Show this run in the Run tab (and on the canvas if it belongs to the current flow). */
   watch(runId: string): Promise<void>;
   /** Refresh the runs list + trigger status (polled while the app is open). */
   refreshActivity(): Promise<void>;
-  cancelRun(): Promise<void>;
+  /** Stop a run (default: the one shown). */
+  cancelRun(runId?: string): Promise<void>;
   answer(text: string): Promise<void>;
 }
 
@@ -228,7 +234,9 @@ export const useStore = create<State>((set, get) => {
     unsubscribeRun?.();
     unsubscribeRun = subscribeRun(runId, (run) => {
       const prev = get().run;
-      set({ run });
+      // Ignore a late event of a run we've since switched away from.
+      if (prev && prev.id !== run.id) return;
+      set({ run, runs: mergeRun(get().runs, run) });
       if (run.pendingQuestion && !prev?.pendingQuestion) set({ sideTab: "run" });
     });
   }
@@ -299,6 +307,19 @@ export const useStore = create<State>((set, get) => {
 
     setCurrentFlow(id) {
       set({ currentFlowId: id, selectedNodeId: null });
+      // Show that flow's latest active run on the canvas (without pulling the side panel to the Run tab).
+      const { runs, run } = get();
+      const show = runToShow(runs, id, run);
+      if (show && show !== run?.id) {
+        void api.getRun(show).then(
+          (r) => {
+            if (get().currentFlowId !== id) return;
+            set({ run: r });
+            watchRun(r.id);
+          },
+          () => {},
+        );
+      }
     },
     createFlow(name, fromFlowId) {
       const source = fromFlowId ? get().data?.flows.find((f) => f.id === fromFlowId) : undefined;
@@ -459,17 +480,27 @@ export const useStore = create<State>((set, get) => {
       }
       try {
         set({ runError: undefined });
-        const { runId } = await api.startRun(flowId);
-        set({ run: await api.getRun(runId), sideTab: "run" });
+        const { runId, warning } = await api.startRun(flowId);
+        const run = await api.getRun(runId);
+        // The new run becomes the one shown; runs already going carry on (top bar → "N running" to switch back).
+        set({ run, runs: mergeRun(get().runs, run), sideTab: "run", runWarning: warning ? { runId, message: warning } : undefined });
         watchRun(runId);
       } catch (e) {
         const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
         set({ runError: missing ? `Missing: ${missing.join(", ")}` : (e as Error).message });
       }
     },
-    async cancelRun() {
+    async cancelRun(runId) {
       const run = get().run;
-      if (run && !run.finishedAt) await api.cancel(run.id).catch(() => {});
+      const id = runId ?? (run && !run.finishedAt ? run.id : undefined);
+      if (!id) return;
+      try {
+        await api.cancel(id);
+      } catch (e) {
+        // Already finished (404) is fine; anything else is worth showing.
+        if (!(e instanceof ApiError && e.status === 404)) set({ runError: (e as Error).message });
+      }
+      void get().refreshActivity();
     },
     async answer(text) {
       const run = get().run;

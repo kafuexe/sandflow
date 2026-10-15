@@ -10,6 +10,7 @@ import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
+import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
 import { startRun, type NodeRunner, type RunHandle, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
@@ -129,8 +130,12 @@ export function createApi(
     flow: Flow,
     data: AppData,
     extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string } = {},
-  ): RunHandle {
+  ): RunHandle & { warning?: string } {
     let lastSave = 0;
+    // Runs are independent (own context, sandbox, branch and logs), so any number may run at once — the one thing
+    // they can share is an explicit BRANCH_NAME in the same REPO_PATH. Say so instead of refusing the run.
+    const branchKey = sharedBranchKey(data.env);
+    const warning = branchConflictWarning(data.env, activeRuns());
     const handle = startRun({
       flow,
       blocks: data.blocks,
@@ -143,6 +148,7 @@ export function createApi(
       loadSkill: skills.read,
       packs: runPacks,
       ...extra,
+      warnings: warning ? [warning] : undefined,
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
         if (s.finishedAt || Date.now() - lastSave > 2000) {
@@ -152,12 +158,22 @@ export function createApi(
       },
     });
     runs.set(handle.state.id, handle);
+    if (branchKey) branchKeys.set(handle.state.id, branchKey);
     void handle.done.then((s) => {
+      branchKeys.delete(s.id);
       storage.saveRun(s);
       setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
       drainQueue(s.flowId);
     });
-    return handle;
+    return Object.assign(handle, { warning });
+  }
+
+  /** Runs still going, with the branch they share (if any) — for the concurrency warning. */
+  const branchKeys = new Map<string, string>();
+  function activeRuns(): ActiveRunInfo[] {
+    return [...runs.values()]
+      .filter((h) => !h.state.finishedAt)
+      .map((h) => ({ id: h.state.id, flowName: h.state.flowName, startedAt: h.state.startedAt, branchKey: branchKeys.get(h.state.id) }));
   }
 
   // ---------- triggers ----------
@@ -483,7 +499,8 @@ export function createApi(
         if (!flow) throw new HttpError(404, "Flow not found");
         const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt, data.flows);
         if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
-        return send(res, 200, { runId: launch(flow, data, { prompt }).state.id });
+        const started = launch(flow, data, { prompt });
+        return send(res, 200, { runId: started.state.id, ...(started.warning ? { warning: started.warning } : {}) });
       }
 
       case "GET /runs": {

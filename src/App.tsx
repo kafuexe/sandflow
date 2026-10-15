@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { BotMessageSquare, Check, CloudUpload, Info, Loader2, MessagesSquare, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves, Workflow } from "lucide-react";
+import { BotMessageSquare, Check, CloudUpload, Info, Loader2, MessagesSquare, Pencil, Play, Plus, Settings, Trash2, TriangleAlert, Waves, Workflow } from "lucide-react";
 import { ChatPanel } from "@/components/ChatPanel";
 import { useChatStore } from "@/lib/chatStore";
 import { Button } from "@/components/ui/button";
@@ -13,12 +13,14 @@ import { useMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { PacksDialog } from "@/components/PacksDialog";
 import { Palette } from "@/components/Palette";
+import { RunsIndicator } from "@/components/RunsIndicator";
 import { SidePanel } from "@/components/SidePanel";
 import { Switch } from "@/components/ui/switch";
 import { resolveNode } from "../shared/resolve";
 import { AgentScreen } from "@/components/agent/AgentScreen";
 import { useWaitingCount } from "@/lib/agent";
 import { useCurrentFlow, useStore, type View } from "@/lib/store";
+import { activeRunsOf } from "@/lib/runSelection";
 import { cn } from "@/lib/utils";
 
 function SaveIndicator() {
@@ -147,15 +149,15 @@ function ViewSwitch() {
 
 function TopBar() {
   const flow = useCurrentFlow();
-  const run = useStore((s) => s.run);
   const view = useStore((s) => s.view);
-  const { renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
+  const anyActive = useStore((s) => !!flow && activeRunsOf(s.runs, flow.id, s.run).length > 0);
+  const { renameFlow, deleteFlow, setSettingsOpen, startRun, setSideTab } = useStore.getState();
   const missing = useMissingInputs();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
-  const active = run && !run.finishedAt;
-  const canRun = !!flow && flow.nodes.length > 0 && missing.length === 0 && !active && !starting;
+  // Runs don't block each other: Run stays available while earlier runs (of this or other flows) are going.
+  const canRun = !!flow && flow.nodes.length > 0 && missing.length === 0 && !starting;
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
@@ -204,15 +206,12 @@ function TopBar() {
         <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
           <Settings /> Settings
         </Button>
-        {view === "agent" ? null : active ? (
-          <Button size="sm" variant="destructive" onClick={() => void cancelRun()}>
-            <Square /> Cancel
-          </Button>
-        ) : (
+        {view !== "agent" && flow && <RunsIndicator flowId={flow.id} />}
+        {view === "agent" ? null : (
           <Button
             size="sm"
             disabled={!canRun}
-            title={missing.length ? `Missing: ${missing.join(", ")}` : undefined}
+            title={missing.length ? `Missing: ${missing.join(", ")}` : anyActive ? "Start another run of this flow" : undefined}
             onClick={async () => {
               setStarting(true);
               await startRun();

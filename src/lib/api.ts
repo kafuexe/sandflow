@@ -77,7 +77,7 @@ export const api = {
   saveSettings: (settings: Settings) => request("PUT", "/settings", settings),
   saveEnv: (env: EnvValues) => request("PUT", "/env", env),
   /** `prompt` overrides the global starting prompt for this run only. */
-  startRun: (flowId: string, prompt?: string) => request<{ runId: string }>("POST", "/runs", { flowId, prompt }),
+  startRun: (flowId: string, prompt?: string) => request<{ runId: string; warning?: string }>("POST", "/runs", { flowId, prompt }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   sandboxStatus: () =>
