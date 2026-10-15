@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 import { nodeLabel } from "../../../shared/resolve";
 import type { RunSummary } from "../../../shared/types";
 import { RUN_TONE, RunStatusIcon, ago, useNow } from "./status";
+import { ResizablePanel } from "@/components/ui/resizable";
+import { PANELS } from "@/lib/panelSize";
 
 function RunRow({ run, selected, now }: { run: RunSummary; selected: boolean; now: number }) {
   const select = useAgent((s) => s.select);
@@ -72,7 +74,7 @@ export function RunList() {
   const earlier = list.filter((r) => r.finishedAt);
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r bg-card/30" aria-label="Runs">
+    <ResizablePanel panel={PANELS.runList} edge="right" label="Resize runs list" className="flex flex-col border-r bg-card/30" aria-label="Runs">
       <div className="p-3 pb-1">
         <Button
           className="w-full justify-start"
@@ -95,6 +97,6 @@ export function RunList() {
           )}
         </nav>
       </ScrollArea>
-    </aside>
+    </ResizablePanel>
   );
 }
