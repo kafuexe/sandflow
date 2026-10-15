@@ -422,6 +422,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
     return {};
   }
 
+  /** Set once the graph has ended (done / failed / cancelled): a Stop during cleanup no longer changes the outcome. */
+  let settled = false;
   const done = (async () => {
     try {
       await runGraph(flow, "", 0);
@@ -433,6 +435,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         ctx.log("error", run.error);
       }
     } finally {
+      settled = true;
       // Each step is bounded: a sandbox that won't close must not keep the run (and Stop) hanging.
       const limit = opts.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
       for (const fn of ctx.cleanup.splice(0)) {
@@ -471,6 +474,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
     cancel() {
       // Idempotent: a second Stop (or one after the run ended) does nothing.
       if (run.finishedAt || ctx.abort.signal.aborted) return;
+      if (settled) {
+        // The run already ended and is only closing its sandboxes: hurry that along (kills containers / processes)
+        // but keep its real outcome — it finished, it wasn't stopped.
+        ctx.abort.abort(new Error("Run cancelled"));
+        return;
+      }
       // Show it right away; the run finishes once cleanup (closing sandboxes) is done.
       run.status = "cancelled";
       const active = Object.entries(run.nodes).filter(([, ns]) => ns.status === "running" || ns.status === "waiting");

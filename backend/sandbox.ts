@@ -82,6 +82,9 @@ interface ProviderLike {
 
 const STREAM_TAIL = 64 * 1024;
 
+/** A docker / podman container id as the container sees it in /etc/hostname (short 12 or full 64 hex). */
+export const CONTAINER_ID_RE = /^[0-9a-f]{12,64}$/;
+
 /**
  * Make a sandcastle sandbox provider stop for real when the run is stopped. sandcastle's own abort only stops
  * *waiting* for the agent: the `sh -c <agent>` it started on this computer, or the agent inside the container
@@ -118,14 +121,13 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
       kill = () => {}; // runTree kills its own trees on abort
     } else {
       runExec = (command, o) => handle.exec(command, o);
+      // The container's hostname is its (short) id. Read it now, before anything of the agent's runs in there: by
+      // the time Stop comes, whatever is inside could have rewritten /etc/hostname (e.g. to another run's container).
+      const id = signal.aborted ? "" : await handle.exec("cat /etc/hostname").then((r) => r.stdout.trim(), () => "");
       kill = () => {
-        // The container's hostname is its (short) id: remove it — everything in it dies, `docker exec` clients return.
-        void handle
-          .exec("cat /etc/hostname")
-          .then((r) => r.stdout.trim())
-          .catch(() => "")
-          .then((id) => (id && /^[\w.-]+$/.test(id) ? exec(kind, ["rm", "-f", id]) : close()))
-          .catch(() => {});
+        // Remove the container: everything in it dies and the `docker exec` clients return. Only ever a container
+        // id (hex) — never something that could be read as an option — and passed as one argv entry, no shell.
+        void (CONTAINER_ID_RE.test(id) ? exec(kind, ["rm", "-f", id]) : close()).catch(() => {});
       };
     }
     const onAbort = () => kill();

@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { startRun, type NodeRunner, type RunContext, type RunPacks } from "../backend/engine";
 import { createPackStore } from "../backend/packs";
-import { runTree } from "../backend/proc";
+import { exitHooksInstalled, runTree } from "../backend/proc";
 import { runAuto } from "../backend/runners/auto";
 import { runScript } from "../backend/runners/script";
 import { stoppableProvider } from "../backend/sandbox";
@@ -163,6 +163,74 @@ describe("sandbox containers", () => {
   });
 });
 
+describe("sandbox containers: which container Stop removes", () => {
+  const fakeWith = (hostname: () => string) => {
+    let closed = 0;
+    const fake = {
+      create: async (_o: { env?: Record<string, string> }) => ({
+        worktreePath: "/home/agent/workspace",
+        exec: async (cmd: string) => ({ stdout: cmd === "cat /etc/hostname" ? hostname() : "", stderr: "", exitCode: 0 }),
+        close: async () => void closed++,
+      }),
+    };
+    return { fake, closed: () => closed };
+  };
+  const recorder = () => {
+    const calls: string[][] = [];
+    const exec = async (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args]);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    return { calls, exec };
+  };
+
+  it("uses the id read when the sandbox started — not what the agent later wrote to /etc/hostname", async () => {
+    let host = "abc123def456\n";
+    const { fake } = fakeWith(() => host);
+    const { calls, exec } = recorder();
+    const abort = new AbortController();
+    await stoppableProvider(fake, "docker", abort.signal, exec).create({ env: {} });
+    host = "0123456789ab\n"; // e.g. another run's container
+    abort.abort();
+    await sleep(20);
+    expect(calls).toEqual([["docker", "rm", "-f", "abc123def456"]]);
+  });
+
+  it("never passes a hostname that isn't a container id (could be read as an option); closes the sandbox instead", async () => {
+    for (const bad of ["--help", "-v", "my-box", "abc;rm -rf /", ""]) {
+      const { fake, closed } = fakeWith(() => bad);
+      const { calls, exec } = recorder();
+      const abort = new AbortController();
+      await stoppableProvider(fake, "docker", abort.signal, exec).create({ env: {} });
+      abort.abort();
+      await sleep(10);
+      expect(calls).toEqual([]);
+      expect(closed()).toBe(1);
+    }
+  });
+});
+
+describe.runIf(posix)("exit hooks", () => {
+  it("listen for signals only while a process group runs, without piling up listeners", async () => {
+    const before = process.listenerCount("SIGTERM");
+    const ps = Array.from({ length: 15 }, () => runTree("sleep 0.2", null));
+    expect(exitHooksInstalled()).toBe(true);
+    expect(process.listenerCount("SIGTERM")).toBe(before + 1);
+    expect(process.listenerCount("exit")).toBeLessThanOrEqual(10);
+    const rs = await Promise.all(ps);
+    expect(rs.every((r) => r.code === 0)).toBe(true);
+    await sleep(20);
+    expect(exitHooksInstalled()).toBe(false);
+    expect(process.listenerCount("SIGTERM")).toBe(before);
+  });
+
+  it("a normal command keeps its stdin, stdout and exit code", async () => {
+    const r = await runTree("cat; echo err >&2; exit 3", null, { stdin: "hello" });
+    expect(r).toMatchObject({ code: 3, stdout: "hello", killed: undefined });
+    expect(r.stderr.trim()).toBe("err");
+  });
+});
+
 describe("engine stop", () => {
   function run(runner: NodeRunner, flow: Flow = DEFAULT_FLOW, extra: { cleanupTimeoutMs?: number } = {}) {
     return startRun({ flow, blocks: BUILTIN_BLOCKS, env, settings, runners: { auto: runner, ai: runner }, ...extra });
@@ -211,6 +279,23 @@ describe("engine stop", () => {
     expect(final.nodes["n-plan"].status).toBe("idle");
     h.cancel();
     expect(final.logs.filter((l) => /Stop requested/.test(l.msg))).toHaveLength(1);
+  });
+
+  it("Stop while a finished run is still cleaning up keeps its real outcome", async () => {
+    let releaseCleanup!: () => void;
+    const runner: NodeRunner = async (ctx) => {
+      if (!ctx.cleanup.length) ctx.cleanup.push(() => new Promise<void>((r) => (releaseCleanup = r)));
+      return { outputs: { artifact: "a" }, route: "n-create-mr" };
+    };
+    const h = run(runner);
+    while (!releaseCleanup) await sleep(5);
+    expect(h.state.status).toBe("done");
+    h.cancel();
+    expect(h.state.status).toBe("done");
+    releaseCleanup();
+    const final = await h.done;
+    expect(final.status).toBe("done");
+    expect(final.logs.some((l) => /Run stopped/.test(l.msg))).toBe(false);
   });
 
   it("a cleanup step that hangs can't hang the stop", async () => {

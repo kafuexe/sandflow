@@ -110,22 +110,24 @@ function awaitPrep(entry: { promise: Promise<string>; abort: AbortController; wa
   if (signal.aborted) return Promise.reject(new Error("Run cancelled"));
   entry.waiters++;
   return new Promise<string>((resolve, reject) => {
+    // Each waiter leaves exactly once: by its own Stop, or when the preparation settles.
+    let left = false;
+    const leave = () => {
+      if (left) return false;
+      left = true;
+      signal.removeEventListener("abort", onAbort);
+      entry.waiters--;
+      return true;
+    };
     const onAbort = () => {
-      if (--entry.waiters <= 0) entry.abort.abort();
+      if (!leave()) return;
+      if (entry.waiters <= 0) entry.abort.abort();
       reject(new Error("Run cancelled"));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     entry.promise.then(
-      (v) => {
-        signal.removeEventListener("abort", onAbort);
-        entry.waiters--;
-        resolve(v);
-      },
-      (e) => {
-        signal.removeEventListener("abort", onAbort);
-        entry.waiters--;
-        reject(e);
-      },
+      (v) => leave() && resolve(v),
+      (e) => leave() && reject(e),
     );
   });
 }

@@ -10,25 +10,54 @@ const isWindows = process.platform === "win32";
 
 /** Process groups still running — killed if Sandflow itself exits, so nothing is left behind. */
 const live = new Set<number>();
-let exitHookInstalled = false;
+
+function killLive() {
+  for (const p of live) {
+    try {
+      process.kill(-p, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }
+  live.clear();
+}
+
+// Own process groups no longer get the terminal's Ctrl+C, and a signal ends Node without its "exit" event: kill
+// them on those signals too. Installed only while something runs, and re-raised when nobody else handles the
+// signal, so Sandflow still exits the way it would have.
+const SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+const onSignal = (sig: NodeJS.Signals) => {
+  killLive();
+  detach();
+  if (process.listenerCount(sig) === 0) process.kill(process.pid, sig);
+};
+let attached = false;
+function attach() {
+  if (attached) return;
+  attached = true;
+  process.on("exit", killLive);
+  for (const s of SIGNALS) process.on(s, onSignal);
+}
+function detach() {
+  if (!attached) return;
+  attached = false;
+  process.removeListener("exit", killLive);
+  for (const s of SIGNALS) process.removeListener(s, onSignal);
+}
+
 function track(child: ChildProcess) {
   const pid = child.pid;
   if (!pid || isWindows) return;
   live.add(pid);
-  child.once("exit", () => live.delete(pid));
-  if (!exitHookInstalled) {
-    exitHookInstalled = true;
-    process.once("exit", () => {
-      for (const p of live) {
-        try {
-          process.kill(-p, "SIGKILL");
-        } catch {
-          /* already gone */
-        }
-      }
-    });
-  }
+  attach();
+  child.once("exit", () => {
+    live.delete(pid);
+    if (!live.size) detach();
+  });
 }
+
+/** For tests: whether Sandflow currently listens for exit signals on behalf of running process groups. */
+export const exitHooksInstalled = () => attached;
 
 /** Kill a process and everything it started. Safe to call more than once / after it exited. */
 export function killTree(child: ChildProcess): void {
