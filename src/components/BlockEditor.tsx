@@ -358,7 +358,7 @@ export function BlockEditor() {
             {cfg.env.includes(PROJECT_ENV) && envOptionalFor(cfg, PROJECT_ENV) && (
               <p className="mt-1.5 text-[11px] text-muted-foreground">
                 <code>{PROJECT_ENV}</code> is optional for agents: leave it empty for tasks that don&apos;t need a project (summarising, answering,
-                drafting) and the agent works in a fresh, empty temporary folder that is deleted after the run.
+                drafting) and the agent works in a fresh, empty temporary folder, deleted after the run (kept when the agent ran on this computer).
               </p>
             )}
           </Field>

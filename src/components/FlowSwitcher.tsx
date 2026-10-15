@@ -187,6 +187,8 @@ export function FlowSwitcher({ onNewFlow, className }: { onNewFlow: () => void; 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() !== "k" || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      // Not from behind a dialog (block editor, settings…): the list would open where it can't be seen or focused.
+      if (!open && document.querySelector('[role="dialog"][data-state="open"]')) return;
       e.preventDefault();
       if (open) close();
       else show();

@@ -96,12 +96,12 @@ export function InputsPanel() {
                     autoComplete="off"
                     onChange={(ev) => setEnv(e.name, ev.target.value)}
                     aria-invalid={!e.optional && !value.trim()}
-                    placeholder={e.optional && e.name === PROJECT_ENV ? "Leave empty to run agents in an empty scratch workspace" : undefined}
+                    placeholder={e.optional && e.name === PROJECT_ENV ? "Empty = scratch workspace" : undefined}
                     className="h-8 font-mono text-xs"
                   />
                   {e.optional && e.name === PROJECT_ENV && (
                     <div className="text-[11px] text-muted-foreground">
-                      Only agent blocks use it. Without a project path they work in a fresh, empty temporary folder that is deleted after the run.
+                      Only agent blocks use it. Without a project path they work in a fresh, empty temporary folder, deleted after the run (kept, and its path logged, when an agent ran on this computer).
                     </div>
                   )}
                   <NodeChips nodes={e.nodes} />
