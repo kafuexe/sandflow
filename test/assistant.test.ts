@@ -128,6 +128,59 @@ describe("MCP server", () => {
   });
 });
 
+describe("MCP block helpers", () => {
+  it("lists blocks by kind, explains one block, and places + wires a block in one call", async () => {
+    await start();
+    const all = (await rpc("tools/list")).result.tools.map((t: { name: string }) => t.name);
+    expect(all).toEqual(expect.arrayContaining(["get_block", "add_node", "update_node", "connect"]));
+
+    const triggers = (await callTool("list_blocks", { kind: "trigger" })).content[0].text as string;
+    expect(triggers).toContain("base/schedule-trigger");
+    expect(triggers).not.toContain("base/plan:");
+
+    const shell = (await callTool("get_block", { block: "shell" })).content[0].text as string;
+    expect(shell).toContain("base/shell — Shell command");
+    expect(shell).toContain('"shellCommand":"npm test"');
+    expect((await callTool("get_block", { block: "plann" })).content[0].text).toMatch(/Did you mean "base\/plan"/);
+
+    const added = await callTool("add_node", { block: "shell", from: "n-implement", overrides: { shellCommand: "npm test" } }, "feature-pipeline");
+    expect(added.isError).toBeUndefined();
+    expect(added.content[0].text).toContain("+ node shell (Shell command, block base/shell)");
+    expect(added.content[0].text).toContain("+ edge n-implement.artifact -> shell.artifact");
+
+    const bad = await callTool("update_node", { id: "shell", overrides: { command: "ls" } }, "feature-pipeline");
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0].text).toMatch(/overrides.command isn't a block setting.*Settable on auto blocks: shellCommand/);
+    expect(bad.content[0].text).toMatch(/Nothing was saved. Nodes in "feature-pipeline": .*shell/);
+
+    const dry = await callTool("edit_flow", { dryRun: true, ops: [{ op: "remove_node", id: "shell" }] }, "feature-pipeline");
+    expect(dry.content[0].text).toMatch(/^Dry run — nothing saved/);
+    expect((await callTool("get_flow", {}, "feature-pipeline")).content[0].text).toContain("- shell: Shell command");
+
+    const wired = await callTool("connect", { from: "shell", to: "n-cr" }, "feature-pipeline");
+    expect(wired.content[0].text).toContain("+ edge shell.artifact -> n-cr.artifact");
+  });
+
+  it("builds a flow from nodes with from/to only and checks save_block configs", async () => {
+    await start();
+    const created = await callTool("create_flow", {
+      name: "Nightly tests",
+      nodes: [
+        { id: "nightly", block: "schedule-trigger", overrides: { trigger: { schedule: { kind: "cron", expr: "0 0 2 * * *" } } } },
+        { id: "tests", block: "shell", from: "nightly", overrides: { shellCommand: "npm test" } },
+      ],
+    });
+    expect(created.content[0].text).toContain("+ edge nightly.artifact -> tests.artifact");
+    expect(created.content[0].text).toContain("Valid: no errors.");
+
+    const typo = await callTool("save_block", { id: "lint", name: "Lint", extends: "tpl-auto-git", config: { shellComand: "npm run lint" } });
+    expect(typo.isError).toBe(true);
+    expect(typo.content[0].text).toMatch(/config.shellComand isn't a block setting. Did you mean shellCommand/);
+    const ok = await callTool("save_block", { id: "lint", name: "Lint", extends: "tpl-auto-git", config: { autoAction: "shell", shellCommand: "npm run lint", inputs: { artifact: true }, outputs: { artifact: true } } });
+    expect(ok.content[0].text).toContain('Created block "Lint"');
+  });
+});
+
 describe("data revisions", () => {
   it("rejects a UI save based on a stale revision with 409", async () => {
     await start();
@@ -366,7 +419,7 @@ describe("stdio MCP bridge", () => {
     await new Promise((r) => child.once("close", r));
     const lines = out.trim().split("\n").map((l) => JSON.parse(l) as { id: number; result: any });
     expect(lines.map((l) => l.id).sort()).toEqual([1, 2]);
-    expect(lines.find((l) => l.id === 2)!.result.content[0].text).toBe("Valid: no errors.");
+    expect(lines.find((l) => l.id === 2)!.result.content[0].text).toMatch(/^Valid: no errors.\n/);
   });
 });
 
