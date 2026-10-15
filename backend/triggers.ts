@@ -112,6 +112,9 @@ export function createTriggerService(deps: TriggerDeps) {
     const outcome = deps.fire(flow, a.nodeId, event);
     a.status.lastFired = Date.now();
     const what = `${event.type}${event.author ? ` by ${event.author}` : ""}`;
+    // Missing inputs show on the trigger (and the Active switch) until a run starts.
+    if (outcome.status === "skipped" && outcome.reason.startsWith("missing inputs")) a.status.lastError = `Run skipped: ${outcome.reason}`;
+    else if (/^(Run skipped|Webhook rejected)/.test(a.status.lastError ?? "")) a.status.lastError = undefined;
     if (outcome.status === "started") note(a, "info", `${what} → started run ${outcome.runId}`);
     else if (outcome.status === "queued") note(a, "info", `${what} → queued (flow is already running)`);
     else note(a, "warn", `${what} → skipped: ${outcome.reason}`);
@@ -274,7 +277,8 @@ export function createTriggerService(deps: TriggerDeps) {
     const secretName = t.secretEnv?.trim();
     const secret = secretName ? deps.load().env[secretName] : undefined;
     if (!secret) {
-      note(a, "error", `Webhook rejected: set the secret in ${secretName ?? "the trigger's secret env var"}`);
+      a.status.lastError = `Webhook rejected: set ${secretName ?? "the trigger's secret env var"} in Inputs`;
+      note(a, "error", a.status.lastError);
       return { status: 403, message: "Webhook secret is not configured in Sandflow" };
     }
     const header = (n: string) => {

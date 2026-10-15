@@ -72,6 +72,31 @@ describe("missingInputs", () => {
   });
 });
 
+describe("missingInputs for trigger-started runs", () => {
+  const node = (id: string, blockId: string, overrides?: Record<string, unknown>) => ({
+    id,
+    type: "block" as const,
+    position: { x: 0, y: 0 },
+    data: { blockId, ...(overrides ? { overrides } : {}) },
+  });
+  const flow: Flow = { id: "f", name: "F", nodes: [node("t", "gitlab-trigger"), node("p", "plan")], edges: [] };
+  const env = { ANTHROPIC_API_KEY: "k", GITLAB_WEBHOOK_SECRET: "s" };
+
+  it("doesn't require a starting prompt (the event stands in for it); manual runs still do", () => {
+    expect(missingInputs(flow, BUILTIN_BLOCKS, env, "", [], { triggered: true })).toEqual([]);
+    expect(missingInputs(flow, BUILTIN_BLOCKS, env, "")).toEqual(["Starting prompt"]);
+  });
+
+  it("still requires env vars and the webhook secret — also when the mode is left at its webhook default", () => {
+    expect(missingInputs(flow, BUILTIN_BLOCKS, {}, "", [], { triggered: true })).toEqual(["ANTHROPIC_API_KEY", "GITLAB_WEBHOOK_SECRET"]);
+    const noMode = { ...flow, nodes: [node("t", "gitlab-trigger", { trigger: { mode: undefined } }), flow.nodes[1]] };
+    const blocks = BUILTIN_BLOCKS.map((b) => (b.id === "gitlab-trigger" ? { ...b, config: { ...b.config, trigger: { ...b.config.trigger!, mode: undefined } } } : b));
+    expect(missingInputs(noMode, blocks, { ANTHROPIC_API_KEY: "k" }, "", [], { triggered: true })).toEqual(["GITLAB_WEBHOOK_SECRET"]);
+    const poll = { ...flow, nodes: [node("t", "gitlab-trigger", { trigger: { mode: "poll" } }), flow.nodes[1]] };
+    expect(missingInputs(poll, BUILTIN_BLOCKS, { ANTHROPIC_API_KEY: "k" }, "", [], { triggered: true })).toEqual([]);
+  });
+});
+
 describe("optional project path for agents", () => {
   const flowOf = (...blockIds: string[]): Flow => ({
     id: "f",

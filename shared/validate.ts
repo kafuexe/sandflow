@@ -119,11 +119,21 @@ export function edgeAllowed(
   return source.kind !== "condition" && !sourceExits.length && source.outputs[handle] === true;
 }
 
-/** Human-readable list of inputs a flow still needs before it can run (empty = ready). */
-export function missingInputs(flow: Flow, blocks: BlockDef[], env: EnvValues, startingPrompt: string, flows: Flow[] = []): string[] {
+/**
+ * Human-readable list of inputs a flow still needs before it can run (empty = ready). `triggered`: for runs started
+ * by a trigger — the event stands in for the starting prompt, so it isn't required.
+ */
+export function missingInputs(
+  flow: Flow,
+  blocks: BlockDef[],
+  env: EnvValues,
+  startingPrompt: string,
+  flows: Flow[] = [],
+  opts: { triggered?: boolean } = {},
+): string[] {
   const req = flowRequirements(flow, blocks, flows);
   const missing: string[] = [];
-  if (req.startingPromptNodes.length && !startingPrompt.trim()) missing.push("Starting prompt");
+  if (!opts.triggered && req.startingPromptNodes.length && !startingPrompt.trim()) missing.push("Starting prompt");
   for (const e of req.env) if (!e.optional && !env[e.name]?.trim()) missing.push(e.name);
   return missing;
 }

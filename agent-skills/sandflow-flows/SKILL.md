@@ -78,6 +78,7 @@ Shell command step:
 Triggers:
 - Schedule: `{"op": "add_node", "id": "nightly", "block": "base/schedule-trigger", "overrides": {"trigger": {"schedule": {"kind": "cron", "expr": "0 0 9 * * 1-5"}}}}` (cron has a seconds field; also `{"kind": "interval", "every": 2, "unit": "hours"}`)
 - GitHub/GitLab: `{"op": "add_node", "id": "gh", "block": "base/github-trigger", "overrides": {"trigger": {"repo": "acme/web", "events": ["merge_request.comment"]}}}`
+- The user switches the flow Active (top bar) to arm its triggers; no manual run is needed first. Runs started by a trigger need the env vars (incl. the webhook secret) but no starting prompt: the event stands in for it.
 
 If branch:
 `{"op": "add_node", "id": "only-mine", "block": "base/if", "from": "gh", "to": "answer", "overrides": {"condition": {"match": "all", "rules": [{"field": "trigger.author", "op": "equals", "value": "alice"}]}}}`

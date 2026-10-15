@@ -104,6 +104,49 @@ describe("triggers through the API", () => {
     expect(ran).toEqual(["answer", "post"]);
   });
 
+  it("a never-run flow switched Active arms right away; the first event starts a run without a starting prompt", async () => {
+    const seen: { node: string; prompt: string }[] = [];
+    await start(async (ctx, node) => {
+      seen.push({ node: node.id, prompt: ctx.settings.startingPrompt });
+      return { outputs: { artifact: "ok" } };
+    });
+    const port = await freePort();
+    // Inputs filled in the Inputs tab (no starting prompt), never run — then switched Active.
+    const flow: Flow = {
+      id: "fresh",
+      name: "Fresh",
+      nodes: [
+        { id: "t", type: "block", position: { x: 0, y: 0 }, data: { blockId: "base/gitlab-trigger" } },
+        { id: "p", type: "block", position: { x: 1, y: 0 }, data: { blockId: "base/plan" } },
+      ],
+      edges: [{ id: "e1", source: "t", sourceHandle: "artifact", target: "p", targetHandle: "artifact" }],
+    };
+    await put("/env", { GITLAB_WEBHOOK_SECRET: "tok", ANTHROPIC_API_KEY: "k" });
+    await put("/settings", { startingPrompt: "", sandbox: "none", maxSteps: 40, webhooks: { enabled: true, host: "127.0.0.1", port } });
+    await put("/flows", [flow]);
+    expect((await (await fetch(`${base}/triggers`)).json()).triggers).toEqual([]);
+    expect((await put("/flows", [{ ...flow, active: true }])).status).toBe(200);
+    const t = await (await fetch(`${base}/triggers`)).json();
+    expect(t.triggers).toMatchObject([{ flowId: "fresh", nodeId: "t", type: "gitlab", mode: "webhook" }]);
+    expect(await (await fetch(`${base}/runs`)).json()).toEqual([]);
+
+    await waitFor(async () => ((await (await fetch(`${base}/triggers`)).json()).webhooks.listening ? true : undefined));
+    const res = await fetch(`http://127.0.0.1:${port}/hooks/gitlab/fresh/t`, {
+      method: "POST",
+      headers: { "x-gitlab-token": "tok" },
+      body: note("ofek", "@sandflow please look"),
+    });
+    expect(await res.text()).toBe("started");
+    const summary = await waitFor(async () => {
+      const list = (await (await fetch(`${base}/runs`)).json()) as RunSummary[];
+      return list.find((r) => r.finishedAt);
+    });
+    expect(summary).toMatchObject({ status: "done", trigger: { source: "gitlab", author: "ofek" } });
+    // The event stands in for the starting prompt.
+    expect(seen.map((s) => s.node)).toEqual(["p"]);
+    expect(seen[0].prompt).toContain("@sandflow please look");
+  });
+
   it("queues events while the flow is busy, and skips inactive flows", async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
