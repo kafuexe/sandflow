@@ -108,7 +108,7 @@ export function createMcp(deps: McpDeps) {
     const req = flowRequirements(flow, data.blocks, flows);
     const needs = [
       ...(req.startingPromptNodes.length && !data.settings.startingPrompt.trim() ? ["Starting prompt"] : []),
-      ...req.env.filter((e) => !data.env[e.name]?.trim()).map((e) => e.name),
+      ...req.env.filter((e) => !data.env[e.name]?.trim()).map((e) => (e.optional ? `${e.name} (optional)` : e.name)),
     ];
     if (needs.length) parts.push(`Still empty in the Inputs tab (the user fills these in): ${needs.join(", ")}`);
     return parts.join("\n");

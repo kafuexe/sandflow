@@ -224,6 +224,7 @@ describe("export", () => {
       id: "parent",
       name: "Parent",
       color: "violet",
+      runOn: "host",
       nodes: [
         { id: "a", type: "block", position: { x: 0, y: 0 }, data: { blockId: "my-blk" } },
         { id: "b", type: "block", position: { x: 0, y: 0 }, data: { blockId: "base/plan" } },
@@ -259,6 +260,7 @@ describe("export", () => {
     expect(sharedParent.nodes.map((n) => n.data.blockId)).toEqual(["shared/my-blk", "base/plan", "sandflow/subflow"]);
     expect(sharedParent.nodes[2].data.overrides?.subflow?.flowId).toBe("shared/child");
     expect(sharedParent.color).toBe("violet");
+    expect(sharedParent.runOn).toBe("host"); // still needs the pack to be trusted when it runs
     expect(after.flows.find((f) => f.id === "shared/child")).not.toHaveProperty("color");
     expect(after.packs!.find((x) => x.id === "shared")!.problems).toEqual([]);
   });

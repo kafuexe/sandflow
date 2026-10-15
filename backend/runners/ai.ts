@@ -202,12 +202,12 @@ export async function getSandbox(ctx: RunContext, kind: SandboxKind = ctx.settin
   return sandbox as unknown as SandboxLike;
 }
 
-/** The flow a top-level run started from (subflows see their own flow as `ctx.flow`). */
-const rootFlow = (ctx: RunContext): Flow | undefined => ctx.flows?.find((f) => f.id === ctx.run.flowId);
+/** The node's flow, then the flows around it (subflows), innermost first. */
+const flowChain = (ctx: RunContext): Flow[] => [ctx.flow, ...(ctx.outerFlows ?? [])].filter((f): f is Flow => !!f);
 
-/** Where an agent node runs: its own `runOn` (node, then block chain), then its flow's, then Settings → Sandbox. */
+/** Where an agent node runs: its own `runOn` (node, then block chain), then its flow's and the enclosing flows', then Settings → Sandbox. */
 export function agentRunOn(ctx: RunContext, cfg: ResolvedConfig): RunOn {
-  return resolveRunOn([cfg.runOn, ctx.flow?.runOn, rootFlow(ctx)?.runOn], ctx.settings.sandbox)!;
+  return resolveRunOn([cfg.runOn, ...flowChain(ctx).map((f) => f.runOn)], ctx.settings.sandbox)!;
 }
 
 /** The sandbox kind for an agent node: `none` on this computer; a container otherwise (Docker when Settings say None). */
@@ -226,7 +226,8 @@ export function hostChoiceOwner(ctx: RunContext, node: FlowNode, cfg: ResolvedCo
     if (node.data.overrides?.runOn === "host") return packOf(ctx.flow);
     return codeOwner(ctx, node, (c) => (c.runOn === "host" ? c.runOn : undefined));
   }
-  if (cfg.runOn === "inherit") return packOf(ctx.flow?.runOn ? ctx.flow : rootFlow(ctx));
+  // Inherited: the innermost flow that chose.
+  if (cfg.runOn === "inherit") return packOf(flowChain(ctx).find((f) => f.runOn === "sandbox" || f.runOn === "host"));
   return undefined;
 }
 
@@ -290,7 +291,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const kind = agentSandboxKind(ctx, cfg);
   const onHost = kind === "none";
   // Chosen on the block / node / flow (not just Settings → Sandbox: None): use the local CLI's own login.
-  const explicitHost = resolveRunOn([cfg.runOn, ctx.flow?.runOn, rootFlow(ctx)?.runOn]) === "host";
+  const explicitHost = resolveRunOn([cfg.runOn, ...flowChain(ctx).map((f) => f.runOn)]) === "host";
   if (explicitHost) {
     const owner = hostChoiceOwner(ctx, node, cfg);
     if (owner && !trustedOnHost(ctx, owner)) {

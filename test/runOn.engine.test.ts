@@ -35,6 +35,7 @@ vi.mock("../backend/sandbox", async (orig) => {
 const { startRun } = await import("../backend/engine");
 const { runAi } = await import("../backend/runners/ai");
 const { BUILTIN_BLOCKS } = await import("../shared/library");
+const { CORE_BLOCKS } = await import("../shared/core");
 type Flow = import("../shared/types").Flow;
 type Settings = import("../shared/types").Settings;
 
@@ -52,8 +53,8 @@ const flow = (runOn?: "host" | "sandbox", nodeRunOn?: "host" | "sandbox"): Flow 
 const settings: Settings = { startingPrompt: "do it", sandbox: "docker", maxSteps: 10 };
 const noop = async () => ({ outputs: {} });
 
-async function run(f: Flow, env: Record<string, string>, s: Settings = settings) {
-  const h = startRun({ flow: f, blocks: BUILTIN_BLOCKS, env, settings: s, runners: { ai: runAi, auto: noop } });
+async function run(f: Flow, env: Record<string, string>, s: Settings = settings, flows?: Flow[]) {
+  const h = startRun({ flow: f, blocks: [...CORE_BLOCKS, ...BUILTIN_BLOCKS], flows, env, settings: s, runners: { ai: runAi, auto: noop } });
   return h.done;
 }
 
@@ -91,6 +92,17 @@ describe("engine: where agents run", () => {
     expect(created.map((c) => c.tag)).toEqual(["bind-mount", "none"]);
     expect(execCalls).toEqual([["preflight", "docker"]]);
     expect(final.status).toBe("done");
+  });
+
+  it("a subflow inside a subflow inherits where to run from the flow in between", async () => {
+    const at = { x: 0, y: 0 };
+    const sub = (id: string, flowId: string) => ({ id, type: "block" as const, position: at, data: { blockId: "sandflow/subflow", overrides: { subflow: { flowId } } } });
+    const inner: Flow = { id: "inner", name: "Inner", nodes: [{ id: "plan", type: "block" as const, position: at, data: { blockId: "plan" } }], edges: [] };
+    const middle: Flow = { id: "middle", name: "Middle", runOn: "host", nodes: [sub("in", "inner")], edges: [] };
+    const root: Flow = { id: "root", name: "Root", nodes: [sub("mid", "middle")], edges: [] };
+    const final = await run(root, { REPO_PATH: "/repo" }, settings, [root, middle, inner]);
+    expect(final.status).toBe("done");
+    expect(created.map((c) => c.tag)).toEqual(["none"]);
   });
 
   it("without a project path, agents on this computer work in a scratch git repo", async () => {

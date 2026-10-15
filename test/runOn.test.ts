@@ -111,7 +111,7 @@ function fakeSandbox(stdout = "<artifact>done</artifact>") {
   };
 }
 
-function ctx(opts: { settings?: Partial<Settings>; flow?: Flow; flows?: Flow[]; trusted?: boolean } = {}) {
+function ctx(opts: { settings?: Partial<Settings>; flow?: Flow; flows?: Flow[]; outerFlows?: Flow[]; trusted?: boolean } = {}) {
   const env: Record<string, string> = { REPO_PATH: "/r", ANTHROPIC_API_KEY: "k" };
   const container = fakeSandbox("<artifact>container</artifact>");
   const host = fakeSandbox("<artifact>host</artifact>");
@@ -122,6 +122,7 @@ function ctx(opts: { settings?: Partial<Settings>; flow?: Flow; flows?: Flow[]; 
     env,
     flow,
     flows: opts.flows ?? [flow],
+    outerFlows: opts.outerFlows,
     blocks: BUILTIN_BLOCKS,
     sandbox: container.sandbox,
     sandboxes: { none: host.sandbox },
@@ -150,7 +151,22 @@ describe("agentSandboxKind", () => {
     expect(agentSandboxKind(ctx({ flow: flowOf([], { runOn: "host" }) }).c, cfg)).toBe("none");
     expect(agentSandboxKind(ctx({ flow: flowOf([], { runOn: "host" }) }).c, { ...cfg, runOn: "sandbox" })).toBe("docker");
     const root = flowOf([], { id: "root", runOn: "host" });
-    expect(agentSandboxKind(ctx({ flow: flowOf([], { id: "sub" }), flows: [root] }).c, cfg)).toBe("none");
+    expect(agentSandboxKind(ctx({ flow: flowOf([], { id: "sub" }), flows: [root], outerFlows: [root] }).c, cfg)).toBe("none");
+  });
+  it("inherits from every enclosing flow, innermost first (subflows nested in subflows)", () => {
+    const root = flowOf([], { id: "root" });
+    const middle = flowOf([], { id: "middle", runOn: "host" });
+    const inner = flowOf([], { id: "inner" });
+    expect(agentSandboxKind(ctx({ flow: inner, flows: [root, middle, inner], outerFlows: [middle, root] }).c, cfg)).toBe("none");
+    const sandboxed = flowOf([], { id: "inner", runOn: "sandbox" });
+    expect(agentSandboxKind(ctx({ flow: sandboxed, flows: [root, middle, sandboxed], outerFlows: [middle, root] }).c, cfg)).toBe("docker");
+  });
+  it("blames the pack of the enclosing flow that chose this computer", () => {
+    const root = flowOf([], { id: "root" });
+    const middle = { ...flowOf([], { id: "acme/middle", runOn: "host" }), pack: "acme" };
+    const n = node("p", "plan");
+    const c = ctx({ flow: flowOf([], { id: "inner" }), flows: [root, middle], outerFlows: [middle, root] }).c;
+    expect(hostChoiceOwner(c, n, resolveBlock("plan", BUILTIN_BLOCKS))).toBe("acme");
   });
   it("uses Docker for a container agent when Settings → Sandbox is None", () => {
     expect(agentSandboxKind(ctx({ settings: { sandbox: "none" } }).c, { ...cfg, runOn: "sandbox" })).toBe("docker");

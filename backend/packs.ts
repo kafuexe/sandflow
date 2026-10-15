@@ -165,7 +165,7 @@ export function readPack(reader: PackReader): LoadedPack {
         const f = raw as Flow;
         if (!f || typeof f !== "object" || typeof f.id !== "string" || !PACK_ITEM_ID_RE.test(f.id)) throw new Error("each flow needs an id (letters, digits, _ and -)");
         if (!Array.isArray(f.nodes) || !Array.isArray(f.edges)) throw new Error(`flow "${f.id}" needs nodes and edges arrays`);
-        flows.push(qualifyFlow({ id: f.id, name: String(f.name ?? f.id), description: f.description, ...(isFlowColor(f.color) ? { color: f.color } : {}), nodes: f.nodes, edges: f.edges }, pack));
+        flows.push(qualifyFlow({ id: f.id, name: String(f.name ?? f.id), description: f.description, ...(isFlowColor(f.color) ? { color: f.color } : {}), ...(f.runOn === "host" || f.runOn === "sandbox" ? { runOn: f.runOn } : {}), nodes: f.nodes, edges: f.edges }, pack));
       }
     } catch (e) {
       problems.push(`${rel}: ${(e as Error).message}`);
@@ -884,7 +884,7 @@ export async function buildPack(req: ExportRequest): Promise<FileMap> {
         throw new Error(`"${fl.name}" uses your block "${n.data.blockId}" — export that block too`);
       }
     }
-    files.set(`flows/${fl.id}.json`, enc({ id: fl.id, name: fl.name, ...(fl.description ? { description: fl.description } : {}), ...(isFlowColor(fl.color) ? { color: fl.color } : {}), nodes: fl.nodes, edges: fl.edges }));
+    files.set(`flows/${fl.id}.json`, enc({ id: fl.id, name: fl.name, ...(fl.description ? { description: fl.description } : {}), ...(isFlowColor(fl.color) ? { color: fl.color } : {}), ...(fl.runOn ? { runOn: fl.runOn } : {}), nodes: fl.nodes, edges: fl.edges }));
   }
   for (const b of req.blocks) {
     if (b.extends && !b.extends.includes("/") && !req.blocks.some((x) => x.id === b.extends)) throw new Error(`"${b.name}" extends your template "${b.extends}" — export it too`);
