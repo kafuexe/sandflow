@@ -6,6 +6,7 @@ import type {
   BlockDef,
   EnvValues,
   Flow,
+  FlowColor,
   FlowEdge,
   FlowNode,
   RunState,
@@ -60,6 +61,8 @@ interface State {
   /** New empty flow, or a copy of `fromFlowId` (any flow, including a pack's). */
   createFlow(name: string, fromFlowId?: string): void;
   renameFlow(id: string, name: string): void;
+  /** Tag a flow with a palette colour, or clear it (undefined). */
+  setFlowColor(id: string, color: FlowColor | undefined): void;
   /** Turn a flow's triggers on/off. */
   setFlowActive(id: string, active: boolean): void;
   deleteFlow(id: string): void;
@@ -287,6 +290,14 @@ export const useStore = create<State>((set, get) => {
     renameFlow(id, name) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, name } : f)) }), "flows");
+    },
+    setFlowColor(id, color) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      const recolor = (f: Flow): Flow => {
+        const { color: _old, ...rest } = f;
+        return color ? { ...rest, color } : rest;
+      };
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? recolor(f) : f)) }), "flows");
     },
     deleteFlow(id) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;

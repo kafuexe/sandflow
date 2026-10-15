@@ -223,6 +223,7 @@ describe("export", () => {
     const parent: Flow = {
       id: "parent",
       name: "Parent",
+      color: "violet",
       nodes: [
         { id: "a", type: "block", position: { x: 0, y: 0 }, data: { blockId: "my-blk" } },
         { id: "b", type: "block", position: { x: 0, y: 0 }, data: { blockId: "base/plan" } },
@@ -257,6 +258,8 @@ describe("export", () => {
     const sharedParent = after.flows.find((f) => f.id === "shared/parent")!;
     expect(sharedParent.nodes.map((n) => n.data.blockId)).toEqual(["shared/my-blk", "base/plan", "sandflow/subflow"]);
     expect(sharedParent.nodes[2].data.overrides?.subflow?.flowId).toBe("shared/child");
+    expect(sharedParent.color).toBe("violet");
+    expect(after.flows.find((f) => f.id === "shared/child")).not.toHaveProperty("color");
     expect(after.packs!.find((x) => x.id === "shared")!.problems).toEqual([]);
   });
 

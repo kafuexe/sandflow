@@ -296,7 +296,12 @@ export interface Flow {
   description?: string;
   /** Pack this flow comes from (read-only; set when packs load). Absent = one of your own flows. */
   pack?: string;
+  /** Optional label colour shown in the flow switcher (one of `FLOW_COLORS`). Absent = no colour. */
+  color?: FlowColor;
 }
+
+/** The curated palette a flow can be tagged with. */
+export type FlowColor = "red" | "orange" | "amber" | "green" | "teal" | "blue" | "violet" | "pink";
 
 export type SandboxKind = "docker" | "podman" | "none";
 

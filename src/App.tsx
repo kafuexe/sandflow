@@ -5,10 +5,10 @@ import { ChatPanel } from "@/components/ChatPanel";
 import { useChatStore } from "@/lib/chatStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { BlockEditor } from "@/components/BlockEditor";
 import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
 import { FlowCanvas } from "@/components/FlowCanvas";
+import { FlowSwitcher } from "@/components/FlowSwitcher";
 import { useMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { PacksDialog } from "@/components/PacksDialog";
@@ -146,11 +146,10 @@ function ViewSwitch() {
 }
 
 function TopBar() {
-  const flows = useStore((s) => s.data?.flows ?? []);
   const flow = useCurrentFlow();
   const run = useStore((s) => s.run);
   const view = useStore((s) => s.view);
-  const { setCurrentFlow, renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
+  const { renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
   const missing = useMissingInputs();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -173,21 +172,10 @@ function TopBar() {
             setRenaming(null);
           }}
         >
-          <Input autoFocus value={renaming} onChange={(e) => setRenaming(e.target.value)} onBlur={() => setRenaming(null)} className="h-8 w-56" />
+          <Input autoFocus value={renaming} onChange={(e) => setRenaming(e.target.value)} onBlur={() => setRenaming(null)} className="h-8 w-60" />
         </form>
       ) : (
-        <Select value={flow?.id ?? ""} onValueChange={setCurrentFlow}>
-          <SelectTrigger size="sm" className="w-56">
-            <SelectValue placeholder="No flows" />
-          </SelectTrigger>
-          <SelectContent>
-            {flows.map((f) => (
-              <SelectItem key={f.id} value={f.id}>
-                {f.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <FlowSwitcher onNewFlow={() => setNewOpen(true)} />
       )}
       {view === "builder" && (
         <>
