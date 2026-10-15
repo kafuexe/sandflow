@@ -58,6 +58,18 @@ describe("api", () => {
     expect(again.env).toEqual(env);
   });
 
+  it("round-trips a flow's colour and drops one outside the palette", async () => {
+    const data = (await (await fetch(`${base}/data`)).json()) as AppData;
+    const own = data.flows.filter((f) => !f.pack);
+    const flows = [{ ...own[0], color: "teal" }, { id: "odd", name: "Odd", nodes: [], edges: [], color: "#ff00ff" }];
+    expect((await fetch(`${base}/flows`, json("PUT", flows))).status).toBe(200);
+    const again = (await (await fetch(`${base}/data`)).json()) as AppData;
+    expect(again.flows.find((f) => f.id === own[0].id)?.color).toBe("teal");
+    const odd = again.flows.find((f) => f.id === "odd")!;
+    expect(odd).toBeDefined();
+    expect("color" in odd).toBe(false);
+  });
+
   it("rejects a run with missing inputs, then runs to completion", async () => {
     const r1 = await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline" }));
     expect(r1.status).toBe(400);
