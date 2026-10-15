@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { BlockIcon, ICONS } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { ENDPOINT_ENV } from "../../shared/agents";
-import { applyConfig, ENV_NAME_RE, resolveInherited, wouldCycle } from "../../shared/resolve";
+import { applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, resolveInherited, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
 import { ConditionEditor } from "./ConditionEditor";
@@ -337,6 +337,12 @@ export function BlockEditor() {
                 </Button>
               </form>
             </div>
+            {cfg.env.includes(PROJECT_ENV) && envOptionalFor(cfg, PROJECT_ENV) && (
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
+                <code>{PROJECT_ENV}</code> is optional for agents: leave it empty for tasks that don&apos;t need a project (summarising, answering,
+                drafting) and the agent works in a fresh, empty temporary folder that is deleted after the run.
+              </p>
+            )}
           </Field>
 
           <Separator />

@@ -1,9 +1,11 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { ENDPOINT_ENV } from "../../shared/agents";
-import { nodeLabel, resolveNode } from "../../shared/resolve";
+import { nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
 import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, FlowNode, NodeIO, QaPair, ResolvedConfig, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
@@ -103,7 +105,32 @@ export function sandboxBranch(ctx: RunContext): string {
   return ctx.branch || ctx.env.BRANCH_NAME?.trim() || `sandflow/${ctx.run.id}`;
 }
 
-/** The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted. */
+const execFileP = promisify(execFile);
+
+/** No REPO_PATH: agents of this run work in an empty scratch workspace instead of a project checkout. */
+export const usesScratchWorkspace = (ctx: RunContext) => !ctx.env[PROJECT_ENV]?.trim();
+
+/**
+ * A fresh, empty workspace for a run without a project: a temp dir made a git repo with one empty commit, so
+ * sandcastle's worktree/branch handling works unchanged (the history is throwaway). Removed with the run.
+ */
+export async function createScratchWorkspace(): Promise<string> {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sandflow-scratch-")));
+  const git = (...args: string[]) => execFileP("git", args, { cwd: dir, windowsHide: true });
+  try {
+    await git("init", "-q");
+    await git("-c", "user.name=Sandflow", "-c", "user.email=sandflow@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Empty workspace");
+  } catch (e) {
+    await fs.rm(dir, { recursive: true, force: true });
+    throw new Error(`Could not create a scratch workspace (is git installed?): ${(e as Error).message}`);
+  }
+  return dir;
+}
+
+/**
+ * The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted.
+ * Without REPO_PATH it is a worktree of a per-run scratch workspace (see `createScratchWorkspace`), deleted afterwards.
+ */
 export async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
   if (ctx.sandbox) return ctx.sandbox as SandboxLike;
   const sc = await import("@ai-hero/sandcastle");
@@ -119,23 +146,33 @@ export async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
       : kind === "podman"
         ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(ctx.settings, packMounts))
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
-  const repo = ctx.env.REPO_PATH?.trim();
-  if (!repo) throw new Error("Missing env var REPO_PATH");
+  const scratch = usesScratchWorkspace(ctx);
+  const repo = scratch ? await createScratchWorkspace() : ctx.env[PROJECT_ENV]!.trim();
+  const removeScratch = () => fs.rm(repo, { recursive: true, force: true });
   const branch = sandboxBranch(ctx);
-  ctx.log("info", `Creating ${kind} sandbox on branch ${branch}…`);
-  const sandbox = await sc.createSandbox({
-    branch,
-    baseBranch: ctx.env.BASE_BRANCH?.trim() || undefined,
-    sandbox: provider as Parameters<typeof sc.createSandbox>[0]["sandbox"],
-    cwd: repo,
-  });
+  ctx.log("info", scratch ? `No ${PROJECT_ENV} — creating ${kind} sandbox in an empty scratch workspace…` : `Creating ${kind} sandbox on branch ${branch}…`);
+  let sandbox: Awaited<ReturnType<typeof sc.createSandbox>>;
+  try {
+    sandbox = await sc.createSandbox({
+      branch,
+      // A scratch workspace has only its own branch to fork from.
+      baseBranch: scratch ? undefined : ctx.env.BASE_BRANCH?.trim() || undefined,
+      sandbox: provider as Parameters<typeof sc.createSandbox>[0]["sandbox"],
+      cwd: repo,
+    });
+  } catch (e) {
+    if (scratch) await removeScratch();
+    throw e;
+  }
   ctx.sandbox = sandbox;
-  ctx.run.branch ??= branch;
+  // A scratch branch exists nowhere after the run — don't report it as the run's branch.
+  if (!scratch) ctx.run.branch ??= branch;
   ctx.cleanup.push(async () => {
     const res = await sandbox.close();
-    if (res.preservedWorktreePath) ctx.log("warn", `Worktree had uncommitted changes, preserved at ${res.preservedWorktreePath}`);
+    if (res.preservedWorktreePath && !scratch) ctx.log("warn", `Worktree had uncommitted changes, preserved at ${res.preservedWorktreePath}`);
   });
-  ctx.log("info", `Sandbox ready (worktree ${sandbox.worktreePath})`);
+  if (scratch) ctx.cleanup.push(removeScratch);
+  ctx.log("info", `Sandbox ready (${scratch ? "scratch workspace" : "worktree"} ${sandbox.worktreePath})`);
   return sandbox as unknown as SandboxLike;
 }
 
@@ -253,7 +290,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     sandbox.run({
       ...baseOptions,
       agent,
-      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes, packDir }),
+      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes, packDir, scratch: usesScratchWorkspace(ctx) }),
       maxIterations: cfg.maxIterations,
     });
   // Follow up in the same agent session when possible, otherwise re-run with the extra context in the prompt.
