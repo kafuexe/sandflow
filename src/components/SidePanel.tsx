@@ -17,6 +17,7 @@ import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../
 import type { BlockDef, Flow, FlowNode, ResolvedConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
+import { NodeRunOn } from "./RunOnSelect";
 import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
 import { ResizablePanel } from "@/components/ui/resizable";
@@ -390,6 +391,7 @@ function BlockPanel() {
             <ConditionEditor value={cfg.condition} onChange={(condition) => updateNodeOverrides(node.id, { condition })} />
           </div>
         )}
+        {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && <NodeRunOn flow={flow} node={node} cfg={cfg} />}
         {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && (
           <label className="flex items-center justify-between text-sm">
             Allow questions

@@ -221,7 +221,7 @@ export function createMcp(deps: McpDeps) {
           name: { type: "string" },
           isTemplate: { type: "boolean" },
           extends: { type: ["string", "null"], description: "Template id to inherit from" },
-          config: { type: "object", description: "Partial BlockConfig: kind, description, color, icon, inputs, outputs, env, instructions, autoAction, shellCommand, agent, maxIterations, allowQuestions, condition, trigger" },
+          config: { type: "object", description: "Partial BlockConfig: kind, description, color, icon, inputs, outputs, env, instructions, autoAction, shellCommand, agent, runOn (ai/manager: inherit | sandbox | host = this computer), maxIterations, allowQuestions, condition, trigger" },
         },
       },
       run: (a) => {

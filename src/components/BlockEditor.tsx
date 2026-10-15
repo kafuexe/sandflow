@@ -17,6 +17,7 @@ import { applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, resolveInherited
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
 import { ConditionEditor } from "./ConditionEditor";
+import { HostWarning, RunOnSelect } from "./RunOnSelect";
 import { SkillsEditor } from "./SkillsEditor";
 import { TriggerEditor } from "./TriggerEditor";
 
@@ -474,6 +475,10 @@ export function BlockEditor() {
                   </Select>
                 </Field>
               </div>
+              <Field label="Run on" overridden={c.runOn !== undefined} onReset={() => setCfg({ runOn: undefined })} inheritable>
+                <RunOnSelect value={cfg.runOn} onChange={(runOn) => setCfg({ runOn })} inheritLabel="Flow default (else Settings → Sandbox)" />
+              </Field>
+              {cfg.runOn === "host" && <HostWarning />}
               <div className="grid grid-cols-[2fr_1fr] gap-4">
                 <Field label="Endpoint (on-prem / proxy — empty = provider default)" overridden={c.agent?.endpoint !== undefined} onReset={() => setAgent("endpoint", undefined)} inheritable>
                   <Input

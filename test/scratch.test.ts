@@ -17,7 +17,7 @@ vi.mock("@ai-hero/sandcastle", () => ({
 }));
 vi.mock("@ai-hero/sandcastle/sandboxes/no-sandbox", () => ({ noSandbox: () => ({ tag: "none" }) }));
 
-const { createScratchWorkspace, getSandbox, usesScratchWorkspace } = await import("../backend/runners/ai");
+const { createScratchWorkspace, getSandbox, scratchWorkspace, usesScratchWorkspace } = await import("../backend/runners/ai");
 
 function ctx(env: Record<string, string>): RunContext {
   return {
@@ -55,7 +55,7 @@ describe("scratch workspace (no REPO_PATH)", () => {
     }
   });
 
-  it("runs the sandbox in a fresh workspace and removes it after the run", async () => {
+  it("runs the sandbox in a fresh workspace; on this computer it's kept after the run", async () => {
     const c = ctx({ BASE_BRANCH: "develop" });
     await getSandbox(c);
     expect(created).toHaveLength(1);
@@ -66,6 +66,17 @@ describe("scratch workspace (no REPO_PATH)", () => {
     expect(fs.existsSync(dir)).toBe(true);
     for (const fn of c.cleanup) await fn();
     expect(closed).toEqual([dir]);
+    // Sandbox "none" = the agent ran on this computer: the folder stays so the user can look at the result.
+    expect(fs.existsSync(dir)).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a scratch workspace only used by container agents is removed after the run, once per run", async () => {
+    const c = ctx({});
+    const dir = await scratchWorkspace(c);
+    expect(await scratchWorkspace(c)).toBe(dir);
+    expect(c.cleanup).toHaveLength(1);
+    for (const fn of c.cleanup) await fn();
     expect(fs.existsSync(dir)).toBe(false);
   });
 

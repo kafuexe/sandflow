@@ -62,7 +62,7 @@ Block kinds:
 
 - **trigger** — starts the flow (Manual start, Schedule, GitHub/GitLab event). Takes no inputs; outputs an artifact describing the event. Use at most one per start.
 - **auto** — deterministic step on the host: Create task (makes the branch), Create MR, Shell command, Post comment.
-- **ai** — an agent in a sandbox: Plan, Implement, CR, CR fix, Answer comment, or custom blocks. `REPO_PATH` is optional for agents: without it they work in an empty scratch folder (fine for summarising, answering, drafting). Auto/git steps still need it.
+- **ai** — an agent in a sandbox: Plan, Implement, CR, CR fix, Answer comment, or custom blocks. `REPO_PATH` is optional for agents: without it they work in an empty scratch folder (fine for summarising, answering, drafting). Auto/git steps still need it. To run an agent on the user's own computer (their installed CLI and login, no container) set the node override `{"runOn": "host"}` (`"sandbox"` = container, `"inherit"` = flow / Settings default). Only when the user asks for it — the agent then has access to their machine.
 - **manager** — an agent that sends the task down exactly ONE of its outgoing edges. Give it 2+ targets.
 - **condition** (If) — deterministic rules; continues out of `true` or `false`. An unconnected branch ends that path.
 

@@ -9,6 +9,7 @@ import type {
   FlowColor,
   FlowEdge,
   FlowNode,
+  RunOn,
   RunState,
   RunSummary,
   Settings,
@@ -66,6 +67,8 @@ interface State {
   setFlowColor(id: string, color: FlowColor | undefined): void;
   /** Turn a flow's triggers on/off. */
   setFlowActive(id: string, active: boolean): void;
+  /** Where the flow's agents run by default (undefined = Settings → Sandbox). */
+  setFlowRunOn(id: string, runOn: RunOn | undefined): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
   addNode(blockId: string, position: { x: number; y: number }, data?: Partial<FlowNode["data"]>): void;
@@ -301,6 +304,10 @@ export const useStore = create<State>((set, get) => {
     setFlowActive(id, active) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, active } : f)) }), "flows");
+    },
+    setFlowRunOn(id, runOn) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : runOn ? { ...f, runOn } : (({ runOn: _, ...rest }) => rest)(f))) }), "flows");
     },
     async watch(runId) {
       try {

@@ -1,6 +1,7 @@
 import { ENV_NAME_RE, flowRequirements, templateChain } from "./resolve";
 import { validateCondition } from "./conditions";
 import { GIT_EVENTS } from "./events";
+import { runOnProblem } from "./runOn";
 import { validateSchedule } from "./schedule";
 import { skillProblem } from "./skills";
 import { EXIT_NAME_RE, exitName, isExitHandle } from "./subflow";
@@ -35,6 +36,8 @@ export function validateBlocks(blocks: BlockDef[], only?: Set<string>): string[]
     if (endpointEnv && !ENV_NAME_RE.test(endpointEnv)) {
       errors.push(`"${b.name}" has invalid endpoint env var name "${endpointEnv}"`);
     }
+    const runOn = runOnProblem(b.config.runOn);
+    if (runOn) errors.push(`"${b.name}": ${runOn}`);
     const triggerProblem = validateTrigger(b.config.trigger);
     if (triggerProblem) errors.push(`"${b.name}": ${triggerProblem}`);
     if (b.config.condition) {
