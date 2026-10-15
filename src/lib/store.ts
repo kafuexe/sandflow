@@ -14,6 +14,7 @@ import type {
 } from "../../shared/types";
 import { cloneFlow, newFlow } from "../../shared/flows";
 import { api, ApiError, subscribeData, subscribeRun, type TriggersInfo } from "./api";
+import { pickFlowId, saveFlowId, savedFlowIds } from "./activeFlow";
 
 type Section = "blocks" | "flows" | "settings" | "env";
 export type SaveStatus = "saved" | "pending" | "saving" | "error";
@@ -198,7 +199,8 @@ export const useStore = create<State>((set, get) => {
       try {
         const { rev: r, ...data } = await api.getData();
         rev = r;
-        set({ data, currentFlowId: data.flows[0]?.id ?? null, loadError: undefined });
+        // Reopen the flow that was open before the refresh (first flow only if it's gone).
+        set({ data, currentFlowId: pickFlowId(data.flows, savedFlowIds()), loadError: undefined });
         watchData();
       } catch (e) {
         set({ loadError: (e as Error).message });
@@ -426,5 +428,11 @@ export const useStore = create<State>((set, get) => {
 });
 
 /** The flow currently shown on the canvas. */
+// Keep the open flow in the URL + localStorage so a refresh comes back to it. Only after data has
+// loaded, so the initial null doesn't wipe what load() is about to restore.
+useStore.subscribe((s, prev) => {
+  if (s.data && (s.currentFlowId !== prev.currentFlowId || !prev.data)) saveFlowId(s.currentFlowId);
+});
+
 export const useCurrentFlow = () =>
   useStore((s) => s.data?.flows.find((f) => f.id === s.currentFlowId) ?? null);
