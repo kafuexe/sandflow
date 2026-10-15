@@ -16,10 +16,12 @@ export interface PromptParts {
   routes?: RouteOption[];
   /** Where the files of the pack this block comes from are (read-only), when it comes from one. */
   packDir?: string;
+  /** No project: the agent works in an empty scratch directory that is thrown away after the run. */
+  scratch?: boolean;
 }
 
 /** Builds the inline prompt string for an AI / manager block (never a prompt file — see plan §0). */
-export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir }: PromptParts): string {
+export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, scratch }: PromptParts): string {
   const sections: string[] = [];
   const role = [cfg.instructions, cfg.extraInstructions].filter((s) => s.trim()).join("\n\n");
   sections.push(`# Role\n${role || "You are a helpful software engineering agent."}`);
@@ -30,6 +32,12 @@ export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir }
   }
   if (packDir) {
     sections.push(`# Pack files\nFiles that come with this block (templates, checklists, scripts, …) are in \`${packDir}\` (also \`$PACK_DIR\`), read-only.`);
+  }
+  if (scratch) {
+    sections.push(
+      "# Workspace\nThere is no project repository for this task: the current directory is an empty scratch workspace that is deleted after the run. " +
+        "Don't look for existing code — put everything the next step needs in your output.",
+    );
   }
   if (cfg.inputs.startingPrompt && startingPrompt.trim()) {
     sections.push(`# Task (starting prompt)\n${startingPrompt.trim()}`);

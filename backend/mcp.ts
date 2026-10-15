@@ -202,7 +202,7 @@ export function createMcp(deps: McpDeps) {
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, false);
         const req = flowRequirements(flow, data.blocks, data.flows);
-        const lines = req.env.map((e) => `- ${e.name} (${data.env[e.name]?.trim() ? "set" : "MISSING"}) — used by ${e.nodes.map((n) => n.label).join(", ")}`);
+        const lines = req.env.map((e) => `- ${e.name} (${data.env[e.name]?.trim() ? "set" : e.optional ? "optional, empty" : "MISSING"}) — used by ${e.nodes.map((n) => n.label).join(", ")}`);
         if (req.startingPromptNodes.length) {
           lines.unshift(`- Starting prompt (${data.settings.startingPrompt.trim() ? "set" : "MISSING"}) — used by ${req.startingPromptNodes.map((n) => n.label).join(", ")}`);
         }

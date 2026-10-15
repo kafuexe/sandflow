@@ -121,6 +121,6 @@ export function missingInputs(flow: Flow, blocks: BlockDef[], env: EnvValues, st
   const req = flowRequirements(flow, blocks, flows);
   const missing: string[] = [];
   if (req.startingPromptNodes.length && !startingPrompt.trim()) missing.push("Starting prompt");
-  for (const e of req.env) if (!env[e.name]?.trim()) missing.push(e.name);
+  for (const e of req.env) if (!e.optional && !env[e.name]?.trim()) missing.push(e.name);
   return missing;
 }

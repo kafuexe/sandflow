@@ -126,6 +126,19 @@ export function wouldCycle(blockId: string, candidateParent: string, blocks: Blo
 export interface RequiredEnvEntry {
   name: string;
   nodes: { id: string; label: string }[];
+  /** Every node that declares it can run without it (see `envOptionalFor`) — the run may start while it's empty. */
+  optional: boolean;
+}
+
+/** Env var holding the project (repository) path. */
+export const PROJECT_ENV = "REPO_PATH";
+
+/**
+ * Can a block with this config run without `name` set? Agents (ai / manager) don't need a project: without
+ * REPO_PATH they work in a fresh, empty scratch workspace. Auto, script and other blocks that declare it still need it.
+ */
+export function envOptionalFor(cfg: ResolvedConfig, name: string): boolean {
+  return name === PROJECT_ENV && (cfg.kind === "ai" || cfg.kind === "manager");
 }
 
 export interface FlowRequirements {
@@ -160,8 +173,9 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
         names.push(cfg.trigger.secretEnv.trim());
       }
       for (const name of new Set(names)) {
-        const e = env.get(name) ?? { name, nodes: [] };
+        const e = env.get(name) ?? { name, nodes: [], optional: true };
         e.nodes.push({ id, label });
+        e.optional &&= envOptionalFor(cfg, name);
         env.set(name, e);
       }
       if (cfg.kind === "subflow") {
