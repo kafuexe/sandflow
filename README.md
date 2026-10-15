@@ -149,7 +149,10 @@ parent's Inputs tab, its steps show in the Run tab as `Subflow › Step`, and a 
 
 ## Triggers & logic
 
-Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar).
+Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar) — no
+manual run is needed first: the trigger arms right away and its first event / scheduled time starts a run. Triggered
+runs need the flow's env vars (set them in the **Inputs** tab; for webhooks also the secret) but no starting prompt:
+the event stands in for it. While something is missing the switch says what and links to Inputs.
 
 - **Schedule**:
   - once at a date and time

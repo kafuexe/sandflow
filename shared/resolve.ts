@@ -178,9 +178,10 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
       const ownLogin =
         (cfg.kind === "ai" || cfg.kind === "manager") && !cfg.agent.endpoint?.trim() && resolveRunOn([cfg.runOn, ...flowRunOn]) === "host";
       const names = cfg.env.filter((n) => !(ownLogin && HOST_LOGIN_ENV.includes(n)));
-      // Webhook triggers need their secret (to verify the git host's signature).
-      if (cfg.kind === "trigger" && cfg.trigger.mode === "webhook" && cfg.trigger.secretEnv?.trim()) {
-        names.push(cfg.trigger.secretEnv.trim());
+      // Webhook triggers (the default mode of GitHub / GitLab triggers) need their secret to verify the git host's signature.
+      const t = cfg.kind === "trigger" ? cfg.trigger : undefined;
+      if ((t?.type === "github" || t?.type === "gitlab") && (t.mode ?? "webhook") === "webhook" && t.secretEnv?.trim()) {
+        names.push(t.secretEnv.trim());
       }
       for (const name of new Set(names)) {
         const e = env.get(name) ?? { name, nodes: [], optional: true };
@@ -200,6 +201,18 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
     env: [...env.values()].sort((a, b) => a.name.localeCompare(b.name)),
     startingPromptNodes,
   };
+}
+
+/** Does the flow have a schedule / GitHub / GitLab trigger (one that can start it while it's Active)? */
+export function startsItself(flow: Flow, blocks: BlockDef[]): boolean {
+  return flow.nodes.some((n) => {
+    try {
+      const cfg = resolveNode(n, blocks);
+      return cfg.kind === "trigger" && cfg.trigger.type !== "manual";
+    } catch {
+      return false;
+    }
+  });
 }
 
 export function nodeLabel(node: FlowNode, blocks: BlockDef[]): string {

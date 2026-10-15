@@ -9,14 +9,14 @@ import { BlockEditor } from "@/components/BlockEditor";
 import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
 import { FlowCanvas } from "@/components/FlowCanvas";
 import { FlowSwitcher } from "@/components/FlowSwitcher";
-import { useMissingInputs } from "@/components/InputsPanel";
+import { useMissingInputs, useTriggerMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { PacksDialog } from "@/components/PacksDialog";
 import { Palette } from "@/components/Palette";
 import { RunsIndicator } from "@/components/RunsIndicator";
 import { SidePanel } from "@/components/SidePanel";
 import { Switch } from "@/components/ui/switch";
-import { resolveNode } from "../shared/resolve";
+import { startsItself } from "../shared/resolve";
 import { AgentScreen } from "@/components/agent/AgentScreen";
 import { useWaitingCount } from "@/lib/agent";
 import { useCurrentFlow, useStore, type View } from "@/lib/store";
@@ -79,33 +79,46 @@ function EditWithAiButton() {
   );
 }
 
-/** Arms the flow's schedule / GitHub / GitLab triggers. Shown only when the flow has such a trigger. */
+/**
+ * Arms the flow's schedule / GitHub / GitLab triggers. Shown only when the flow has such a trigger. Needs no prior
+ * run: what triggered runs still need (env vars, webhook secret) is shown here and opens the Inputs tab.
+ */
 function ActiveSwitch({ flowId }: { flowId: string }) {
   const flow = useStore((s) => s.data?.flows.find((f) => f.id === flowId));
   const blocks = useStore((s) => s.data?.blocks);
   const triggers = useStore((s) => s.triggers?.triggers);
-  const setFlowActive = useStore((s) => s.setFlowActive);
-  const hasTriggers = !!flow?.nodes.some((n) => {
-    try {
-      const cfg = resolveNode(n, blocks ?? []);
-      return cfg.kind === "trigger" && cfg.trigger.type !== "manual";
-    } catch {
-      return false;
-    }
-  });
+  const { setFlowActive, setSideTab, setView } = useStore.getState();
+  const openInputs = () => (setSideTab("inputs"), setView("builder"));
+  const missing = useTriggerMissingInputs(flowId);
+  const hasTriggers = !!flow && startsItself(flow, blocks ?? []);
   if (!flow || !hasTriggers || flow.pack) return null;
   const armed = (triggers ?? []).filter((t) => t.flowId === flowId);
-  const errors = armed.filter((t) => t.lastError).length;
+  const errors = armed.filter((t) => t.lastError);
+  const needs = missing.length ? `Triggered runs need: ${missing.join(", ")} (set in Inputs)` : "";
+  const title = flow.active
+    ? [`${armed.length} trigger(s) listening`, needs, ...errors.map((t) => `${t.label}: ${t.lastError}`)].filter(Boolean).join("\n")
+    : ["Triggers are off — switch on to start this flow on its triggers (no run needed first)", needs].filter(Boolean).join("\n");
+  const warn = missing.length > 0 || errors.length > 0;
   return (
-    <label
-      className="flex items-center gap-2 text-xs"
-      title={flow.active ? `${armed.length} trigger(s) listening${errors ? `, ${errors} with errors` : ""}` : "Triggers are off"}
-    >
-      <Switch checked={!!flow.active} onCheckedChange={(v) => setFlowActive(flowId, v)} />
-      <span className={flow.active ? (errors ? "text-amber-400" : "text-emerald-400") : "text-muted-foreground"}>
-        {flow.active ? (errors ? "Active (errors)" : "Active") : "Inactive"}
-      </span>
-    </label>
+    <div className="flex items-center gap-2 text-xs" title={title}>
+      <label className="flex items-center gap-2">
+        <Switch
+          checked={!!flow.active}
+          onCheckedChange={(v) => {
+            setFlowActive(flowId, v);
+            if (v && missing.length) openInputs();
+          }}
+        />
+        <span className={flow.active ? (warn ? "text-amber-400" : "text-emerald-400") : "text-muted-foreground"}>
+          {flow.active ? (missing.length ? "Active (needs inputs)" : errors.length ? "Active (errors)" : "Active") : "Inactive"}
+        </span>
+      </label>
+      {missing.length > 0 && (
+        <button type="button" className="max-w-48 truncate text-amber-400 underline-offset-2 hover:underline" onClick={openInputs}>
+          Missing: {missing.join(", ")}
+        </button>
+      )}
+    </div>
   );
 }
 

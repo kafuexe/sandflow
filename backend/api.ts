@@ -3,6 +3,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { eventMarkdown } from "../shared/events";
 import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
 import { sanitizeFlowColor } from "../shared/flows";
@@ -188,9 +189,12 @@ export function createApi(
     const flow = data.flows.find((f) => f.id === flowId);
     if (!flow) return { status: "skipped", reason: "flow was deleted" };
     if (!flow.active) return { status: "skipped", reason: "flow is not active" };
-    const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt, data.flows);
+    // The event is what a triggered run works on, so no starting prompt is needed; without one, the event summary
+    // stands in for it (agents and Create task that read the starting prompt get the event).
+    const missing = missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt, data.flows, { triggered: true });
     if (missing.length) return { status: "skipped", reason: `missing inputs: ${missing.join(", ")}` };
-    return { status: "started", runId: launch(flow, data, { trigger: event, startNodeId: nodeId }).state.id };
+    const prompt = data.settings.startingPrompt.trim() ? undefined : eventMarkdown(event);
+    return { status: "started", runId: launch(flow, data, { trigger: event, startNodeId: nodeId, prompt }).state.id };
   }
 
   function fireTrigger(flow: Flow, nodeId: string, event: TriggerEvent): FireOutcome {
