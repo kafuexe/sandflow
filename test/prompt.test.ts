@@ -28,6 +28,11 @@ describe("buildPrompt", () => {
     expect(p).toContain("writing-plans");
   });
 
+  it("tells the agent when it works in a scratch workspace without a project", () => {
+    expect(buildPrompt({ cfg, inputs: {}, startingPrompt: "", qa: [] })).not.toContain("# Workspace");
+    expect(buildPrompt({ cfg, inputs: {}, startingPrompt: "", qa: [], scratch: true })).toMatch(/# Workspace\nThere is no project repository/);
+  });
+
   it("omits the starting prompt when the block doesn't accept it", () => {
     const c = { ...cfg, inputs: { ...cfg.inputs, startingPrompt: false } };
     expect(buildPrompt({ cfg: c, inputs: {}, startingPrompt: "TASK", qa: [] })).not.toContain("TASK");

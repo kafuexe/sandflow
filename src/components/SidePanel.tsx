@@ -17,8 +17,11 @@ import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../
 import type { BlockDef, Flow, FlowNode, ResolvedConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
+import { NodeRunOn } from "./RunOnSelect";
 import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
+import { ResizablePanel } from "@/components/ui/resizable";
+import { PANELS } from "@/lib/panelSize";
 
 function Row({ k, children }: { k: string; children: React.ReactNode }) {
   return (
@@ -388,6 +391,7 @@ function BlockPanel() {
             <ConditionEditor value={cfg.condition} onChange={(condition) => updateNodeOverrides(node.id, { condition })} />
           </div>
         )}
+        {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && <NodeRunOn flow={flow} node={node} cfg={cfg} />}
         {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && (
           <label className="flex items-center justify-between text-sm">
             Allow questions
@@ -443,7 +447,7 @@ export function SidePanel() {
   const setTab = useStore((s) => s.setSideTab);
   const waiting = useStore((s) => !!s.run?.pendingQuestion);
   return (
-    <aside className="flex h-full w-[360px] shrink-0 flex-col border-l bg-card/40">
+    <ResizablePanel panel={PANELS.side} edge="left" label="Resize side panel" className="flex h-full flex-col border-l bg-card/40">
       <Tabs value={tab} onValueChange={(v) => setTab(v as SideTab)} className="flex min-h-0 flex-1 flex-col gap-0">
         <div className="p-2">
           <TabsList className="w-full">
@@ -464,6 +468,6 @@ export function SidePanel() {
           <RunPanel />
         </TabsContent>
       </Tabs>
-    </aside>
+    </ResizablePanel>
   );
 }

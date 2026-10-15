@@ -16,6 +16,7 @@ import type {
   QuestionRecord,
   ResolvedConfig,
   RunState,
+  SandboxKind,
   Settings,
   SkillFileRef,
 } from "../shared/types";
@@ -59,6 +60,13 @@ export interface RunContext {
   branch?: string;
   /** Lazily created sandcastle sandbox, shared by every AI block of the run. */
   sandbox?: unknown;
+  /**
+   * Sandboxes of a kind other than Settings → Sandbox, for agent blocks that choose where they run (`runOn`): `none`
+   * = this computer. All of a run's sandboxes share the same branch and worktree.
+   */
+  sandboxes?: Partial<Record<SandboxKind, unknown>>;
+  /** While a subflow's node runs: the flows around it, innermost first (where they run agents is inherited). */
+  outerFlows?: Flow[];
   abort: AbortController;
   installedSkills: Set<string>;
   /** Only the env vars the block declares — never leak all globals. */
@@ -118,10 +126,11 @@ interface GraphResult {
  * The context runners see while a node of a subflow runs: same run, sandbox and settings, but `flow` is the
  * subflow and node ids are reported under the subflow node (`<subflowNode>/<node>`).
  */
-function scopedContext(ctx: RunContext, flow: Flow, prefix: string): RunContext {
+function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: Flow[]): RunContext {
   if (!prefix) return ctx;
   const own: Partial<RunContext> = {
     flow,
+    outerFlows,
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
@@ -213,8 +222,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
    * As a subflow: starts at its Flow input blocks with the parent's inputs, and returns as soon as a Flow output
    * is reached.
    */
-  async function runGraph(g: Flow, prefix: string, depth: number, entry?: NodeIO): Promise<GraphResult> {
-    const gctx = scopedContext(ctx, g, prefix);
+  async function runGraph(g: Flow, prefix: string, depth: number, entry?: NodeIO, outer: Flow[] = []): Promise<GraphResult> {
+    const gctx = scopedContext(ctx, g, prefix, outer);
     const byId = new Map(g.nodes.map((n) => [n.id, n]));
     const key = (id: string) => prefix + id;
     const label = (id: string) => {
@@ -299,7 +308,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
           if (!child) throw new Error(cfg.subflow.flowId ? `Subflow runs unknown flow "${cfg.subflow.flowId}"` : "Subflow has no flow selected");
           if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
           ctx.log("info", `↳ running flow "${child.name}"`, k);
-          const r = await runGraph(child, `${k}/`, depth + 1, inputs);
+          const r = await runGraph(child, `${k}/`, depth + 1, inputs, [g, ...outer]);
           if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
           if (r.exit === undefined) ctx.log("warn", `Flow "${child.name}" ended without reaching a Flow output — nothing continues after it`, k);
           result = { outputs: r.outputs ?? {}, exit: r.exit };

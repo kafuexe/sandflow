@@ -125,3 +125,99 @@ describe("autoLayout / describeFlow", () => {
     expect(text).toContain("- n-cr-fix.artifact -> n-cr.artifact");
   });
 });
+
+describe("easier block placement", () => {
+  it("defaults node ids from the block and wires every compatible handle with from/to", () => {
+    const r = applyOps(empty, blocks, [
+      { op: "add_node", block: "manual-trigger" },
+      { op: "add_node", block: "plan", from: "manual-trigger" },
+      { op: "add_node", block: "implement", from: "plan" },
+      { op: "add_node", block: "plan", from: "implement" },
+    ]);
+    expect(r.flow.nodes.map((n) => n.id)).toEqual(["manual-trigger", "plan", "implement", "plan-2"]);
+    expect(r.flow.edges.map((e) => `${e.source}.${e.sourceHandle} -> ${e.target}.${e.targetHandle}`)).toEqual([
+      "manual-trigger.artifact -> plan.artifact",
+      "plan.artifact -> implement.artifact",
+      "plan.steer -> implement.steer",
+      "implement.artifact -> plan-2.artifact",
+      "implement.steer -> plan-2.steer",
+    ]);
+    expect(validateFlow(r.flow, blocks).errors).toEqual([]);
+  });
+
+  it("wires nodes added later in the same batch, and builds the guide's whole-flow example", () => {
+    const r = applyOps(empty, blocks, [
+      { op: "add_node", id: "start", block: "create-task" },
+      { op: "add_node", id: "plan", block: "plan", from: "start" },
+      { op: "add_node", id: "impl", block: "implement", from: "plan" },
+      { op: "add_node", id: "review", block: "cr", from: "impl" },
+      { op: "add_node", id: "manager", block: "manager", from: "review", to: ["mr", "fix"] },
+      { op: "add_node", id: "mr", block: "create-mr" },
+      { op: "add_node", id: "fix", block: "cr-fix", to: "review" },
+    ]);
+    expect(r.changes).toContain("+ edge manager.artifact -> mr.artifact");
+    expect(r.changes).toContain("+ edge fix.steer -> review.steer");
+    expect(validateFlow(r.flow, blocks)).toEqual({ errors: [], warnings: [] });
+  });
+
+  it("connects by node, by handle, and a bare If node through its true branch", () => {
+    const r = applyOps(empty, blocks, [
+      { op: "add_node", id: "t", block: "manual-trigger" },
+      { op: "add_node", id: "check", block: "if", from: "t" },
+      { op: "add_node", id: "yes", block: "answer-comment" },
+      { op: "add_node", id: "no", block: "shell", overrides: { shellCommand: "echo skipped" } },
+      { op: "connect", from: "check", to: "yes" },
+      { op: "connect", from: "check.false", to: "no" },
+    ]);
+    expect(r.changes).toEqual(expect.arrayContaining(["+ edge check.true -> yes.artifact", "+ edge check.false -> no.artifact"]));
+    const d = applyOps(r.flow, blocks, [{ op: "disconnect", from: "check", to: "yes" }]);
+    expect(d.changes).toEqual(["- edge check.true -> yes.artifact"]);
+    expect(() => applyOps(r.flow, blocks, [{ op: "connect", from: "yes", to: "t" }])).toThrow(/triggers start a flow/);
+    expect(() => applyOps(r.flow, blocks, [{ op: "connect", from: "nope", to: "t" }])).toThrow(/No node "nope" in this flow. Nodes: t, check/);
+    expect(() => applyOps(r.flow, blocks, [{ op: "connect" }])).toThrow(/needs "edge"/);
+  });
+
+  it("finds blocks by id without the pack, by name, and suggests close ids", () => {
+    const packed = blocks.map((b) => ({ ...b, id: `base/${b.id}`, extends: b.extends ? `base/${b.extends}` : b.extends, pack: "base" }));
+    const r = applyOps(empty, packed, [
+      { op: "add_node", block: "plan" },
+      { op: "add_node", block: "Shell command", from: "plan" },
+    ]);
+    expect(r.flow.nodes.map((n) => [n.id, n.data.blockId])).toEqual([["plan", "base/plan"], ["shell", "base/shell"]]);
+    expect(() => applyOps(empty, packed, [{ op: "add_node", block: "implemnt" }])).toThrow(/Unknown block "implemnt". Did you mean "base\/implement"/);
+  });
+
+  it("rejects overrides with field-specific messages", () => {
+    const add = (block: string, overrides: Record<string, unknown>) => () =>
+      applyOps(empty, blocks, [{ op: "add_node", id: "n", block, overrides: overrides as never }]);
+    expect(add("plan", { prompt: "x" })).toThrow(/overrides.prompt isn't a block setting.*Settable on ai blocks: .*extraInstructions/);
+    expect(add("plan", { extraInstruction: "x" })).toThrow(/Did you mean extraInstructions/);
+    expect(add("plan", { shellCommand: "ls" })).toThrow(/overrides.shellCommand only applies to auto blocks, and this block is ai/);
+    expect(add("plan", { maxIterations: 0 })).toThrow(/overrides.maxIterations: must be a positive whole number/);
+    expect(add("plan", { agent: { provider: "gpt" } })).toThrow(/unknown provider "gpt"/);
+    expect(add("plan", { env: ["bad name"] })).toThrow(/"bad name" isn't a valid env var name/);
+    expect(add("plan", { kind: "auto" })).toThrow(/can't change its block's kind/);
+    expect(add("if", { condition: { rules: [{ field: "text", op: "like" }] } })).toThrow(/Rule 1: unknown operator "like"/);
+    expect(add("schedule-trigger", { trigger: { schedule: { kind: "cron", expr: "nope" } } })).toThrow(/overrides.trigger/);
+    expect(add("github-trigger", { trigger: { repo: "not a repo" } })).toThrow(/Invalid repository/);
+    expect(add("shell", { shellCommand: 5 })).toThrow(/overrides.shellCommand must be a string, e.g. "npm test"/);
+  });
+
+  it("merges settings objects one level deep on update_node", () => {
+    let f = applyOps(empty, blocks, [{ op: "add_node", id: "gh", block: "github-trigger", overrides: { trigger: { repo: "a/b", events: ["push"] } as never } }]).flow;
+    f = applyOps(f, blocks, [{ op: "update_node", id: "gh", overrides: { trigger: { mode: "poll", events: null } } }]).flow;
+    expect(f.nodes[0].data.overrides).toEqual({ trigger: { repo: "a/b", mode: "poll" } });
+    expect(() => applyOps(f, blocks, [{ op: "update_node", id: "gh", overrides: { trigger: { mode: "push" } } }])).toThrow(/Unknown trigger mode/);
+  });
+
+  it("warns about blocks that still need settings", () => {
+    const f = applyOps(empty, blocks, [
+      { op: "add_node", id: "t", block: "manual-trigger" },
+      { op: "add_node", id: "sh", block: "shell", from: "t", overrides: { shellCommand: "" } },
+      { op: "add_node", id: "check", block: "if", from: "sh", overrides: { condition: { match: "all", rules: [] } } },
+    ]).flow;
+    const w = validateFlow(f, blocks).warnings.join("\n");
+    expect(w).toMatch(/Node "sh" has no command — set overrides.shellCommand/);
+    expect(w).toMatch(/Node "check" has no rules/);
+  });
+});

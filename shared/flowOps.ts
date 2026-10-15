@@ -1,7 +1,9 @@
 // Structured flow editing shared by the MCP tools (agents) and the UI: edge references, validation,
 // batched edit operations and auto-layout. Agents never send coordinates or edge ids.
 
-import { nodeLabel, resolveNode } from "./resolve";
+import { configGaps, configProblems, findBlock } from "./blockHelp";
+import { nodeLabel, resolveBlock, resolveNode } from "./resolve";
+import { runOnProblem } from "./runOn";
 import { exitName, isExitHandle, resolveNodeIn, subflowCycle } from "./subflow";
 import type { BlockConfig, BlockDef, EdgeInputKind, Flow, FlowEdge, FlowNode, ResolvedConfig, SourceHandle } from "./types";
 
@@ -100,7 +102,11 @@ export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = [])
     if (ids.has(n.id)) errors.push(`Duplicate node id "${n.id}"`);
     ids.add(n.id);
     if (!blocks.some((b) => b.id === n.data.blockId)) errors.push(`Node "${n.id}" uses unknown block "${n.data.blockId}"`);
+    const runOn = runOnProblem(n.data.overrides?.runOn);
+    if (runOn) errors.push(`Node "${n.id}": ${runOn}`);
   }
+  const flowRunOn = runOnProblem(flow.runOn, false);
+  if (flowRunOn) errors.push(`Flow: ${flowRunOn}`);
   const seen = new Set<string>();
   for (const e of flow.edges) {
     const problem = edgeProblem(flow, blocks, e, flows);
@@ -131,6 +137,8 @@ export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = [])
       warnings.push(`Manager "${n.id}" routes to ${targets.size} node(s); a manager should have 2+ outgoing targets to choose between`);
     }
     if (cfg.kind === "condition" && !out.length) warnings.push(`If "${n.id}" has no outgoing branch`);
+    for (const g of configGaps(cfg)) warnings.push(`Node "${n.id}" has ${g}`);
+    for (const p of configProblems(n.data.overrides, cfg.kind)) warnings.push(`Node "${n.id}": ${p}`);
     if (flow.nodes.length > 1 && !out.length && !incoming.has(n.id)) warnings.push(`Node "${n.id}" isn't connected to anything`);
   }
   return { errors, warnings };
@@ -138,12 +146,21 @@ export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = [])
 
 // ---------- operations ----------
 
+/** One node (`plan`) or a node's handle (`plan.steer`, `check.true`, `review.exit:approved`), or a list of them. */
+export type NodeRefs = string | string[];
+
 export type FlowOp =
-  | { op: "add_node"; id: string; block: string; label?: string; overrides?: BlockConfig }
+  /**
+   * Place a block. `id` defaults to the block id without its pack (`base/plan` → `plan`, `plan-2`, …). `block` may be
+   * the full id, the id without the pack prefix, or the block's name. `from` / `to` wire it up in the same op: each
+   * entry is a node (every compatible handle is wired, e.g. artifact and steer) or `node.handle` for just one.
+   */
+  | { op: "add_node"; id?: string; block: string; label?: string; overrides?: BlockConfig; from?: NodeRefs; to?: NodeRefs }
   | { op: "update_node"; id: string; block?: string; label?: string | null; overrides?: Record<string, unknown> | null }
   | { op: "remove_node"; id: string }
-  | { op: "connect"; edge: string }
-  | { op: "disconnect"; edge: string }
+  /** `edge: "a.steer -> b.steer"` (handles default to artifact), or `from: "a", to: "b"` to wire every compatible handle. */
+  | { op: "connect"; edge?: string; from?: string; to?: string }
+  | { op: "disconnect"; edge?: string; from?: string; to?: string }
   | { op: "rename_flow"; name: string }
   | { op: "auto_layout" };
 
@@ -162,29 +179,48 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: F
   const touched = new Set<string>();
   const added = new Set<string>();
   let relayout = false;
-  const blockName = (id: string) => blocks.find((b) => b.id === id)?.name ?? id;
-  const requireBlock = (id: string) => {
-    const b = blocks.find((x) => x.id === id);
-    if (!b) throw new Error(`Unknown block "${id}". Call list_blocks to see the available block ids`);
-    return b;
+  const checkOverrides = (blockId: string, overrides: unknown) => {
+    const problems = configProblems(overrides, resolveBlock(blockId, blocks).kind);
+    if (problems.length) throw new Error(problems.join("; "));
   };
+  const addEdge = (e: EdgeRef) => {
+    const problem = edgeProblem(f, blocks, e, flows);
+    if (problem) throw new Error(`${formatEdge(e)}: ${problem}`);
+    const id = edgeId(e);
+    if (!f.edges.some((x) => x.id === id)) {
+      f.edges.push({ id, ...e } as FlowEdge);
+      changes.push(`+ edge ${formatEdge(e)}`);
+    }
+  };
+  const nodeOf = (ref: string) => ref.split(".")[0].trim();
+  /** add_node wiring that names a node added later in the same batch — applied after the other ops. */
+  const pending: { i: number; op: string; from: string; to: string }[] = [];
 
   ops.forEach((op, i) => {
     try {
       switch (op.op) {
         case "add_node": {
-          if (!NODE_ID_RE.test(op.id ?? "")) {
-            throw new Error(`Node id "${op.id}" is invalid: start with a letter, then letters, digits, _ or - (max 64)`);
+          const block = findBlock(op.block, blocks);
+          const id = op.id === undefined || op.id === null || op.id === "" ? freeId(f, block.id) : op.id;
+          if (!NODE_ID_RE.test(id)) {
+            throw new Error(`Node id "${id}" is invalid: start with a letter, then letters, digits, _ or - (max 64), e.g. "plan" or "check-author". Or leave id out to get one`);
           }
-          if (f.nodes.some((n) => n.id === op.id)) throw new Error(`Node "${op.id}" already exists`);
-          requireBlock(op.block);
-          const data: FlowNode["data"] = { blockId: op.block };
+          if (f.nodes.some((n) => n.id === id)) throw new Error(`Node "${id}" already exists — pick another id, or use update_node to change it`);
+          checkOverrides(block.id, op.overrides);
+          const data: FlowNode["data"] = { blockId: block.id };
           if (op.label?.trim()) data.label = op.label.trim();
           if (op.overrides && Object.keys(op.overrides).length) data.overrides = op.overrides;
-          f.nodes.push({ id: op.id, type: "block", position: { x: 0, y: 0 }, data });
-          added.add(op.id);
-          touched.add(op.id);
-          changes.push(`+ node ${op.id} (${blockName(op.block)})`);
+          f.nodes.push({ id, type: "block", position: { x: 0, y: 0 }, data });
+          added.add(id);
+          touched.add(id);
+          changes.push(`+ node ${id} (${block.name}${block.id !== op.block ? `, block ${block.id}` : ""})`);
+          const refs = (r: NodeRefs | undefined) => (r === undefined ? [] : Array.isArray(r) ? r : [r]).map(String);
+          const wires = [...refs(op.from).map((from) => ({ from, to: id })), ...refs(op.to).map((to) => ({ from: id, to }))];
+          for (const w of wires) {
+            const other = w.from === id ? w.to : w.from;
+            if (f.nodes.some((n) => n.id === nodeOf(other))) autoEdges(f, blocks, w.from, w.to, flows).forEach(addEdge);
+            else pending.push({ i, op: op.op, ...w });
+          }
           break;
         }
         case "update_node": {
@@ -192,9 +228,9 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: F
           if (!n) throw new Error(`No node "${op.id}" in this flow`);
           const what: string[] = [];
           if (op.block !== undefined && op.block !== n.data.blockId) {
-            requireBlock(op.block);
-            n.data.blockId = op.block;
-            what.push(`block → ${blockName(op.block)}`);
+            const block = findBlock(op.block, blocks);
+            n.data.blockId = block.id;
+            what.push(`block → ${block.name}`);
           }
           if (op.label !== undefined) {
             if (op.label === null || !op.label.trim()) delete n.data.label;
@@ -205,11 +241,9 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: F
             delete n.data.overrides;
             what.push("overrides cleared");
           } else if (op.overrides) {
-            const o: Record<string, unknown> = { ...n.data.overrides };
-            for (const [k, v] of Object.entries(op.overrides)) {
-              if (v === null) delete o[k];
-              else o[k] = v;
-            }
+            if (typeof op.overrides !== "object" || Array.isArray(op.overrides)) throw new Error('overrides must be an object, e.g. {"extraInstructions": "…"}');
+            const o = mergeOverrides(n.data.overrides ?? {}, op.overrides);
+            checkOverrides(n.data.blockId, Object.fromEntries(Object.keys(op.overrides).filter((k) => k in o).map((k) => [k, o[k]])));
             if (Object.keys(o).length) n.data.overrides = o as BlockConfig;
             else delete n.data.overrides;
             what.push(`overrides: ${Object.keys(op.overrides).join(", ")}`);
@@ -227,6 +261,11 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: F
           break;
         }
         case "connect": {
+          if (op.edge === undefined) {
+            if (!op.from || !op.to) throw new Error('connect needs "edge" ("a.artifact -> b.artifact") or "from" and "to" node ids');
+            autoEdges(f, blocks, op.from, op.to, flows).forEach(addEdge);
+            break;
+          }
           const e = parseEdge(op.edge);
           const problem = edgeProblem(f, blocks, e, flows);
           if (problem) throw new Error(problem);
@@ -238,6 +277,16 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: F
           break;
         }
         case "disconnect": {
+          if (op.edge === undefined) {
+            if (!op.from || !op.to) throw new Error('disconnect needs "edge" or "from" and "to"');
+            const [s, sh] = splitRef(op.from);
+            const [t, th] = splitRef(op.to);
+            const gone = f.edges.filter((x) => x.source === s && x.target === t && (!sh || x.sourceHandle === sh) && (!th || x.targetHandle === th));
+            if (!gone.length) throw new Error(`There is no edge from ${op.from} to ${op.to}`);
+            f.edges = f.edges.filter((x) => !gone.includes(x));
+            gone.forEach((x) => changes.push(`- edge ${formatEdge(x)}`));
+            break;
+          }
           const e = parseEdge(op.edge);
           const before = f.edges.length;
           f.edges = f.edges.filter(
@@ -264,9 +313,89 @@ export function applyOps(flow: Flow, blocks: BlockDef[], ops: FlowOp[], flows: F
       throw new Error(`Op ${i + 1} (${(op as { op?: string }).op ?? "?"}): ${(e as Error).message}`);
     }
   });
+  for (const w of pending) {
+    try {
+      autoEdges(f, blocks, w.from, w.to, flows).forEach(addEdge);
+    } catch (e) {
+      throw new Error(`Op ${w.i + 1} (${w.op}): ${(e as Error).message}`);
+    }
+  }
 
   f = relayout ? autoLayout(f) : placeNew(f, added);
   return { flow: f, changes, touched: [...touched].filter((id) => f.nodes.some((n) => n.id === id)) };
+}
+
+/** First free node id for a block: `base/plan` → `plan`, then `plan-2`, `plan-3`, … */
+export function freeId(flow: Flow, blockId: string): string {
+  const base =
+    blockId
+      .slice(blockId.lastIndexOf("/") + 1)
+      .replace(/^tpl-/, "")
+      .replace(/[^\w-]+/g, "-")
+      .replace(/^[^A-Za-z]+/, "") || "node";
+  const stem = base.slice(0, 60);
+  if (!flow.nodes.some((n) => n.id === stem)) return stem;
+  for (let k = 2; ; k++) if (!flow.nodes.some((n) => n.id === `${stem}-${k}`)) return `${stem}-${k}`;
+}
+
+/** Merge an update into node overrides: null deletes a key; settings objects (trigger, agent, …) merge one level deep. */
+export function mergeOverrides(base: BlockConfig, patch: Record<string, unknown>): Record<string, unknown> {
+  const o: Record<string, unknown> = { ...base };
+  const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null) delete o[k];
+    else if (k !== "condition" && isObj(v) && isObj(o[k])) {
+      const inner: Record<string, unknown> = { ...(o[k] as Record<string, unknown>) };
+      for (const [ik, iv] of Object.entries(v)) {
+        if (iv === null) delete inner[ik];
+        else inner[ik] = iv;
+      }
+      o[k] = inner;
+    } else o[k] = v;
+  }
+  return o;
+}
+
+function splitRef(ref: string): [string, string | undefined] {
+  const m = /^\s*([\w-]+)(?:\.(exit:[\w-]+|\w+))?\s*$/.exec(ref ?? "");
+  if (!m) throw new Error(`Can't read "${ref}". Use a node id ("plan") or node.handle ("plan.steer", "check.true")`);
+  return [m[1], m[2]];
+}
+
+/**
+ * The edges `from -> to` means. With explicit handles on both ends it's one edge; otherwise every compatible pair
+ * (artifact → artifact, steer → steer). A bare If node means its `true` branch; named exits need `node.exit:<name>`.
+ */
+export function autoEdges(flow: Flow, blocks: BlockDef[], from: string, to: string, flows: Flow[] = []): EdgeRef[] {
+  const [s, shRaw] = splitRef(from);
+  const [t, thRaw] = splitRef(to);
+  const sh = shRaw as SourceHandle | undefined;
+  const th = thRaw as EdgeInputKind | undefined;
+  if (sh && !SOURCE_HANDLES.includes(sh) && !isExitHandle(sh)) throw new Error(`"${sh}" isn't an output handle. Use artifact, steer, true/false out of an If block, or exit:<name>`);
+  if (th && !TARGET_HANDLES.includes(th)) throw new Error(`"${th}" isn't an input handle. Use artifact or steer`);
+  const src = flow.nodes.find((n) => n.id === s);
+  const dst = flow.nodes.find((n) => n.id === t);
+  const ids = flow.nodes.map((n) => n.id).join(", ") || "none";
+  if (!src) throw new Error(`No node "${s}" in this flow. Nodes: ${ids}`);
+  if (!dst) throw new Error(`No node "${t}" in this flow. Nodes: ${ids}`);
+  const sc = tryResolve(src, blocks, flows);
+  const tc = tryResolve(dst, blocks, flows);
+  if (!sc || !tc) return [{ source: s, sourceHandle: sh ?? "artifact", target: t, targetHandle: th ?? "artifact" }]; // edgeProblem explains
+  const accepts = (["artifact", "steer"] as const).filter((k) => tc.inputs[k]);
+  const emits = (["artifact", "steer"] as const).filter((k) => sc.outputs[k]);
+  if (!sh) {
+    // An If node continues out of `true` unless told otherwise (the change list shows `check.true -> …`).
+    if (sc.kind === "condition") return [{ source: s, sourceHandle: "true", target: t, targetHandle: th ?? (tc.inputs.artifact ? "artifact" : "steer") }];
+    if (sc.exits.length) throw new Error(`"${s}" leaves through named exits — use one of: ${sc.exits.map((x) => `${s}.exit:${x}`).join(", ")}`);
+  }
+  const one = (a: SourceHandle, b: EdgeInputKind): EdgeRef[] => [{ source: s, sourceHandle: a, target: t, targetHandle: b }];
+  if (sh && th) return one(sh, th);
+  if (sh) return one(sh, (accepts as string[]).includes(sh) ? (sh as EdgeInputKind) : (accepts[0] ?? "artifact"));
+  if (th) return one((emits as string[]).includes(th) ? th : (emits[0] ?? "artifact"), th);
+  const pairs = emits.filter((k) => accepts.includes(k));
+  if (pairs.length) return pairs.map((k) => one(k, k)[0]);
+  if (emits.length && accepts.length) return one(emits[0], accepts[0]);
+  return one(emits[0] ?? "artifact", accepts[0] ?? "artifact"); // edgeProblem explains why it can't connect
 }
 
 // ---------- layout ----------
@@ -348,7 +477,7 @@ function placeNew(flow: Flow, added: Set<string>): Flow {
 
 /** Compact text view of a flow: nodes with their block and wired handles, then edges. */
 export function describeFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = []): string {
-  const lines = [`Flow "${flow.name}" (id: ${flow.id})${flow.active ? " — triggers active" : ""}${flow.pack ? ` — from pack ${flow.pack}, read-only` : ""}`];
+  const lines = [`Flow "${flow.name}" (id: ${flow.id})${flow.active ? " — triggers active" : ""}${flow.runOn ? ` — agents run on: ${flow.runOn}` : ""}${flow.pack ? ` — from pack ${flow.pack}, read-only` : ""}`];
   if (!flow.nodes.length) return `${lines[0]}\n(empty — no nodes yet)`;
   lines.push("", "Nodes:");
   for (const n of flow.nodes) {
@@ -371,9 +500,9 @@ function ioList(io: object): string {
     .join(", ");
 }
 
-/** One entry per usable block (templates included — they can be placed too). */
-export function describeBlocks(blocks: BlockDef[]): string {
-  return blocks
+/** One entry per usable block (templates included — they can be placed too). `only` limits the list (resolved against all `blocks`). */
+export function describeBlocks(blocks: BlockDef[], only?: BlockDef[]): string {
+  return (only ?? blocks)
     .map((b) => {
       let cfg: ResolvedConfig | undefined;
       try {

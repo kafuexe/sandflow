@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CORE_BLOCKS } from "../shared/core";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
+import { sanitizeFlowColor } from "../shared/flows";
 import { BASE_PACK } from "../shared/packs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
 import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
@@ -145,7 +146,7 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
         }
       }
       let blocks = readJson<BlockDef[]>(file("library.json"));
-      let flows = readJson<Flow[]>(file("flows.json"));
+      let flows = readJson<Flow[]>(file("flows.json"))?.map(sanitizeFlowColor);
       if (!blocks) {
         blocks = [];
         write("library.json", blocks);

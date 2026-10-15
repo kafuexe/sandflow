@@ -8,6 +8,8 @@ import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { runNodeLabel } from "../../shared/subflow";
 import type { NodeRunStatus, RunStatus, TriggerEvent } from "../../shared/types";
+import { ResizablePanel } from "@/components/ui/resizable";
+import { PANELS } from "@/lib/panelSize";
 
 const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
   idle: <CircleDashed className="size-3.5 text-muted-foreground" />,
@@ -167,15 +169,17 @@ export function RunPanel() {
 
         <div className="space-y-1">
           <div className="text-xs font-medium text-muted-foreground">Logs</div>
-          <div ref={logBox} className="max-h-[420px] overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed">
-            {run.logs.map((l, i) => (
-              <div key={i} className={cn("whitespace-pre-wrap", LOG_COLOR[l.level])}>
-                <span className="text-muted-foreground/60">{new Date(l.ts).toLocaleTimeString()} </span>
-                {l.nodeId && <span className="text-sky-400/80">[{label(l.nodeId)}] </span>}
-                {l.msg}
-              </div>
-            ))}
-          </div>
+          <ResizablePanel as="div" panel={PANELS.runLogs} edge="bottom" label="Resize logs">
+            <div ref={logBox} className="h-full overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed">
+              {run.logs.map((l, i) => (
+                <div key={i} className={cn("whitespace-pre-wrap", LOG_COLOR[l.level])}>
+                  <span className="text-muted-foreground/60">{new Date(l.ts).toLocaleTimeString()} </span>
+                  {l.nodeId && <span className="text-sky-400/80">[{label(l.nodeId)}] </span>}
+                  {l.msg}
+                </div>
+              ))}
+            </div>
+          </ResizablePanel>
         </div>
         <RecentRuns />
       </div>

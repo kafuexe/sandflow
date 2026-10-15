@@ -12,6 +12,8 @@ import { nodeLabel, resolveBlock } from "../../shared/resolve";
 import { flowInterface } from "../../shared/subflow";
 import type { BlockDef, Flow, PackInfo, ResolvedConfig } from "../../shared/types";
 import { DRAG_FLOW_MIME, DRAG_MIME } from "./FlowCanvas";
+import { ResizablePanel } from "@/components/ui/resizable";
+import { PANELS } from "@/lib/panelSize";
 
 type PaletteTab = "blocks" | "templates" | "flows";
 
@@ -304,7 +306,7 @@ export function Palette() {
   );
 
   return (
-    <aside className="flex h-full w-[260px] shrink-0 flex-col border-r bg-card/40">
+    <ResizablePanel panel={PANELS.palette} edge="right" label="Resize blocks panel" className="flex h-full flex-col border-r bg-card/40">
       <Tabs value={tab} onValueChange={(v) => setTab(v as PaletteTab)} className="flex min-h-0 flex-1 flex-col gap-0">
         <div className="space-y-2 p-2">
           <TabsList className="w-full">
@@ -369,6 +371,6 @@ export function Palette() {
           <Package /> Packs
         </Button>
       </div>
-    </aside>
+    </ResizablePanel>
   );
 }

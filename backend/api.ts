@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
+import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunState, Settings, TriggerEvent } from "../shared/types";
@@ -342,7 +343,7 @@ export function createApi(
         const flows = await readJson<Flow[]>(req);
         if (!Array.isArray(flows)) throw new HttpError(400, "Expected an array of flows");
         checkRev(url);
-        const own = flows.filter((f) => !f.pack);
+        const own = flows.filter((f) => !f.pack).map(sanitizeFlowColor);
         const bad = own.find((f) => f.id.includes("/"));
         if (bad) throw new HttpError(400, `Flow id "${bad.id}" can't contain "/" (that's reserved for pack flows)`);
         const current = storage.load();
