@@ -95,13 +95,19 @@ const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2,
 
 let dirty = new Set<Section>();
 let timer: ReturnType<typeof setTimeout> | undefined;
+/** A save is scheduled (debounce running) — it will write `dirty`, or get a 409 and reload. */
+let saveScheduled = false;
 let unsubscribeRun: (() => void) | undefined;
 let unsubscribeData: (() => void) | undefined;
 /** Server revision of flows + blocks this client last saw. */
 let rev = 0;
+/** The reload in flight (reloads run one at a time), and whether another change arrived meanwhile. */
+let reloading: Promise<void> | undefined;
+let reloadAgain = false;
 
 export const useStore = create<State>((set, get) => {
   async function flush() {
+    saveScheduled = false;
     const data = get().data;
     if (!data || !dirty.size) return;
     const sections = dirty;
@@ -109,8 +115,9 @@ export const useStore = create<State>((set, get) => {
     set({ saveStatus: "saving", saveError: undefined });
     try {
       for (const s of sections) {
-        if (s === "blocks") rev = (await api.saveBlocks(data.blocks, rev)).rev;
-        if (s === "flows") rev = (await api.saveFlows(data.flows, rev)).rev;
+        // Never step back: a reload may already have seen a newer (assistant) revision.
+        if (s === "blocks") rev = Math.max(rev, (await api.saveBlocks(data.blocks, rev)).rev);
+        if (s === "flows") rev = Math.max(rev, (await api.saveFlows(data.flows, rev)).rev);
         if (s === "settings") await api.saveSettings(data.settings);
         if (s === "env") await api.saveEnv(data.env);
       }
@@ -140,11 +147,43 @@ export const useStore = create<State>((set, get) => {
     }, 2600);
   }
 
+  /** Read flows/blocks from the server, keeping unsaved settings/env. */
+  async function fetchData() {
+    try {
+      const { rev: r, ...server } = await api.getData();
+      rev = r;
+      const local = get().data;
+      const data: AppData = {
+        ...server,
+        settings: local && dirty.has("settings") ? local.settings : server.settings,
+        env: local && dirty.has("env") ? local.env : server.env,
+      };
+      const cur = get().currentFlowId;
+      const sel = get().selectedNodeId;
+      const flow = data.flows.find((f) => f.id === cur) ?? data.flows[0];
+      set({
+        data,
+        currentFlowId: flow?.id ?? null,
+        selectedNodeId: flow?.nodes.some((n) => n.id === sel) ? sel : null,
+      });
+      if (!saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) {
+        // Flow/block edits whose save failed were just replaced by the server's version: nothing left to retry.
+        dirty.delete("flows");
+        dirty.delete("blocks");
+        if (!dirty.size && get().saveStatus === "error") set({ saveStatus: "saved", saveError: undefined });
+      }
+    } catch {
+      /* keep what we have; the next change event retries */
+    }
+  }
+
   function watchData() {
     unsubscribeData?.();
     unsubscribeData = subscribeData((c) => {
       if (c.rev <= rev) return; // our own save, or already loaded
-      if (dirty.has("flows") || dirty.has("blocks")) return; // the pending save will get a 409 and reload
+      // A scheduled save of local flow/block edits will get a 409 and reload. Without one (e.g. the last
+      // save failed) nothing else would pick the change up, so reload now — the server's version wins.
+      if (saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) return;
       void get().reload().then(() => {
         if (c.source === "assistant" && c.flowId === get().currentFlowId) flash(c.touched ?? []);
       });
@@ -155,6 +194,7 @@ export const useStore = create<State>((set, get) => {
     sections.forEach((s) => dirty.add(s));
     set({ saveStatus: "pending" });
     clearTimeout(timer);
+    saveScheduled = true;
     timer = setTimeout(flush, 500);
   }
 
@@ -204,27 +244,20 @@ export const useStore = create<State>((set, get) => {
         set({ loadError: (e as Error).message });
       }
     },
-    async reload() {
-      try {
-        const { rev: r, ...server } = await api.getData();
-        rev = r;
-        const local = get().data;
-        const data: AppData = {
-          ...server,
-          settings: local && dirty.has("settings") ? local.settings : server.settings,
-          env: local && dirty.has("env") ? local.env : server.env,
-        };
-        const cur = get().currentFlowId;
-        const sel = get().selectedNodeId;
-        const flow = data.flows.find((f) => f.id === cur) ?? data.flows[0];
-        set({
-          data,
-          currentFlowId: flow?.id ?? null,
-          selectedNodeId: flow?.nodes.some((n) => n.id === sel) ? sel : null,
-        });
-      } catch {
-        /* keep what we have; the next change event retries */
+    reload() {
+      // One at a time: overlapping reloads could land out of order and put an older version back.
+      // A change that arrives meanwhile gets one more pass once the current one is done.
+      if (reloading) {
+        reloadAgain = true;
+        return reloading;
       }
+      reloading = (async () => {
+        do {
+          reloadAgain = false;
+          await fetchData();
+        } while (reloadAgain);
+      })().finally(() => (reloading = undefined));
+      return reloading;
     },
 
     async flushSaves() {
