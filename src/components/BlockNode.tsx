@@ -145,7 +145,8 @@ function HandleRow({ cfg, side }: { cfg: ResolvedConfig; side: "in" | "out" }) {
 function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const blocks = useStore((s) => s.data?.blocks ?? []);
   const flows = useStore((s) => s.data?.flows ?? []);
-  const runNode = useStore((s) => s.run?.nodes[id]);
+  // Only the shown run's states, and only when it is a run of the flow on the canvas.
+  const runNode = useStore((s) => (s.run?.flowId === s.currentFlowId ? s.run?.nodes[id] : undefined));
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
   const touchedAt = useStore((s) => s.highlight[id]);
   const flowActive = useStore((s) => !!s.data?.flows.find((f) => f.id === s.currentFlowId)?.active);

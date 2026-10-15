@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, CircleDashed, HelpCircle, Loader2, Send, X, Zap } from "lucide-react";
+import { Check, CircleDashed, HelpCircle, Loader2, Send, Square, TriangleAlert, X, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,7 +20,7 @@ const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
   failed: <X className="size-3.5 text-red-400" />,
 };
 
-const RUN_BADGE: Record<RunStatus, string> = {
+export const RUN_BADGE: Record<RunStatus, string> = {
   running: "bg-sky-500/20 text-sky-300",
   waiting: "bg-amber-500/20 text-amber-300",
   done: "bg-emerald-500/20 text-emerald-300",
@@ -62,6 +62,8 @@ export function RunPanel() {
   const blocks = useStore((s) => s.data?.blocks ?? []);
   const flows = useStore((s) => s.data?.flows ?? []);
   const runError = useStore((s) => s.runError);
+  const runWarning = useStore((s) => s.runWarning);
+  const cancelRun = useStore((s) => s.cancelRun);
   const flow = useCurrentFlow();
   const [picked, setPicked] = useState<string | null>(null);
   const logBox = useRef<HTMLDivElement>(null);
@@ -96,7 +98,12 @@ export function RunPanel() {
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <span className={cn("rounded px-2 py-0.5 text-xs font-medium capitalize", RUN_BADGE[run.status])}>{run.status}</span>
-            <span className="truncate text-sm font-medium">{run.flowName}</span>
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">{run.flowName}</span>
+            {!run.finishedAt && (
+              <Button size="sm" variant="ghost" className="h-6 shrink-0 px-2 text-xs text-red-400 hover:text-red-300" onClick={() => void cancelRun(run.id)} title="Stop this run">
+                <Square /> Stop
+              </Button>
+            )}
           </div>
           {run.trigger && run.trigger.source !== "manual" && (
             <div className="text-xs text-muted-foreground">
@@ -110,6 +117,11 @@ export function RunPanel() {
             </div>
           )}
           {run.branch && <div className="font-mono text-xs text-muted-foreground">branch: {run.branch}</div>}
+          {runWarning?.runId === run.id && (
+            <div role="status" className="flex gap-1.5 rounded border border-amber-400/40 bg-amber-500/10 p-2 text-xs text-amber-300">
+              <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden /> {runWarning.message}
+            </div>
+          )}
           {run.error && <div className="text-xs text-red-400">{run.error}</div>}
           {runError && <div className="text-xs text-red-400">{runError}</div>}
         </div>
