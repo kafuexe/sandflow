@@ -412,7 +412,7 @@ export function ChatPanel() {
   const title = useMemo(() => chats.find((c) => c.id === chatId)?.title, [chats, chatId]);
 
   return (
-    <aside className="flex h-full w-[380px] shrink-0 flex-col border-l bg-background" aria-label="Edit with AI">
+    <aside className="flex h-full w-[320px] shrink-0 xl:w-[380px] flex-col border-l bg-background" aria-label="Edit with AI">
       <div className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
         <BotMessageSquare className="mx-1 size-4 shrink-0" style={{ color: AI }} aria-hidden />
         <Select value={selectValue} onValueChange={(v) => (v === "new" ? newChat() : select(v))}>
