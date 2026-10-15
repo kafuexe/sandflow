@@ -20,6 +20,8 @@ import { cn } from "@/lib/utils";
 import { AGENT_LABELS, AGENT_PROVIDERS } from "../../shared/agents";
 import { resolveNode } from "../../shared/resolve";
 import type { AgentProvider, ChatMessage, ChatToolCall, Flow } from "../../shared/types";
+import { ResizablePanel } from "@/components/ui/resizable";
+import { PANELS } from "@/lib/panelSize";
 
 /** The assistant's colour is the AI-block colour used on the canvas. */
 const AI = "#8b5cf6";
@@ -412,7 +414,7 @@ export function ChatPanel() {
   const title = useMemo(() => chats.find((c) => c.id === chatId)?.title, [chats, chatId]);
 
   return (
-    <aside className="flex h-full w-[380px] shrink-0 flex-col border-l bg-background" aria-label="Edit with AI">
+    <ResizablePanel panel={PANELS.chat} edge="left" label="Resize AI chat panel" className="flex h-full flex-col border-l bg-background" aria-label="Edit with AI">
       <div className="flex h-12 shrink-0 items-center gap-1 border-b px-2">
         <BotMessageSquare className="mx-1 size-4 shrink-0" style={{ color: AI }} aria-hidden />
         <Select value={selectValue} onValueChange={(v) => (v === "new" ? newChat() : select(v))}>
@@ -533,6 +535,6 @@ export function ChatPanel() {
           </div>
         </form>
       </div>
-    </aside>
+    </ResizablePanel>
   );
 }
