@@ -1,7 +1,8 @@
 // MCP server (streamable HTTP, stateless, JSON responses) that lets agents read and edit flows.
 // Mounted at /api/mcp. `?flow=<id>` scopes a session to one flow — the in-app "Edit with AI" chat uses that.
 
-import { flowRequirements } from "../shared/resolve";
+import { configProblems, describeBlock, findBlock } from "../shared/blockHelp";
+import { flowRequirements, resolveBlock } from "../shared/resolve";
 import { applyOps, autoLayout, describeBlocks, describeFlow, validateFlow, type FlowOp } from "../shared/flowOps";
 import { validateBlocks } from "../shared/validate";
 import type { AppData, BlockConfig, BlockDef, Flow } from "../shared/types";
@@ -37,29 +38,46 @@ const flowIdProp = {
   flowId: { type: "string", description: "Flow id. Optional in a chat scoped to one flow (defaults to that flow)." },
 };
 
-const nodeSchema = {
-  type: "object",
-  required: ["id", "block"],
-  properties: {
-    id: { type: "string", description: "Short readable node id you choose, e.g. \"plan\", \"review\", \"check-author\"" },
-    block: { type: "string", description: "Block id from list_blocks" },
-    label: { type: "string", description: "Display name (defaults to the block name)" },
-    overrides: { type: "object", description: "Per-node BlockConfig overrides, e.g. {\"extraInstructions\": \"…\"} or {\"condition\": {…}}" },
+const refsSchema = (dir: string) => ({
+  type: ["string", "array"],
+  items: { type: "string" },
+  description:
+    `Node(s) to wire ${dir} this one. A bare node id wires every compatible handle (artifact→artifact and steer→steer); ` +
+    "\"node.handle\" wires just one (\"plan.steer\", \"check.true\", \"review.exit:approved\"). May name nodes added later in the same batch.",
+});
+
+const nodeProps = {
+  id: { type: "string", description: "Short readable node id, e.g. \"plan\", \"check-author\". Optional: defaults to the block id without its pack (\"base/plan\" → \"plan\", then \"plan-2\")" },
+  block: { type: "string", description: "Block from list_blocks: full id (\"base/plan\"), id without the pack (\"plan\") or its name (\"Shell command\")" },
+  label: { type: "string", description: "Display name (defaults to the block name)" },
+  overrides: {
+    type: "object",
+    description:
+      "Only the settings that differ from the block (get_block lists them), e.g. {\"extraInstructions\": \"…\"}, {\"shellCommand\": \"npm test\"}, " +
+      "{\"trigger\": {\"repo\": \"acme/web\"}}, {\"condition\": {\"match\": \"all\", \"rules\": [{\"field\": \"trigger.author\", \"op\": \"equals\", \"value\": \"alice\"}]}}",
   },
+  from: refsSchema("into"),
+  to: refsSchema("out of"),
 };
+
+const nodeSchema = { type: "object", required: ["block"], properties: nodeProps };
 
 const opSchema = {
   type: "object",
   required: ["op"],
   description:
-    "One of: {op:'add_node', id, block, label?, overrides?} · {op:'update_node', id, block?, label?, overrides?} (override keys set to null are removed; overrides:null clears all) · " +
-    "{op:'remove_node', id} · {op:'connect', edge:'a.artifact -> b.steer'} · {op:'disconnect', edge} · {op:'rename_flow', name} · {op:'auto_layout'}",
+    "One of: {op:'add_node', block, id?, label?, overrides?, from?, to?} · " +
+    "{op:'update_node', id, block?, label?, overrides?} (overrides merge into the node's; a key set to null is removed; overrides:null clears all) · " +
+    "{op:'remove_node', id} (its edges go too) · {op:'connect', from:'plan', to:'impl'} (every compatible handle) or {op:'connect', edge:'a.artifact -> b.steer'} · " +
+    "{op:'disconnect', edge} or {op:'disconnect', from, to} · {op:'rename_flow', name} · {op:'auto_layout'}",
   properties: {
     op: { type: "string", enum: ["add_node", "update_node", "remove_node", "connect", "disconnect", "rename_flow", "auto_layout"] },
     id: { type: "string" },
     block: { type: "string" },
     label: { type: ["string", "null"] },
     overrides: { type: ["object", "null"] },
+    from: { type: ["string", "array"], items: { type: "string" }, description: "Source node (connect/disconnect), or node(s) feeding a new node (add_node)" },
+    to: { type: ["string", "array"], items: { type: "string" }, description: "Target node (connect/disconnect), or node(s) a new node feeds (add_node)" },
     edge: { type: "string", description: "source.handle -> target.handle (handles default to artifact)" },
     name: { type: "string" },
   },
@@ -82,11 +100,32 @@ export function createMcp(deps: McpDeps) {
   }
 
   function report(flow: Flow, data: AppData): string {
-    const r = validateFlow(flow, data.blocks, data.flows);
+    const flows = data.flows.some((f) => f.id === flow.id) ? data.flows.map((f) => (f.id === flow.id ? flow : f)) : [...data.flows, flow];
+    const r = validateFlow(flow, data.blocks, flows);
     const parts = [];
-    parts.push(r.errors.length ? `Errors:\n${r.errors.map((e) => `- ${e}`).join("\n")}` : "Valid: no errors.");
+    parts.push(r.errors.length ? `Errors (fix these):\n${r.errors.map((e) => `- ${e}`).join("\n")}` : "Valid: no errors.");
     if (r.warnings.length) parts.push(`Warnings:\n${r.warnings.map((w) => `- ${w}`).join("\n")}`);
+    const req = flowRequirements(flow, data.blocks, flows);
+    const needs = [
+      ...(req.startingPromptNodes.length && !data.settings.startingPrompt.trim() ? ["Starting prompt"] : []),
+      ...req.env.filter((e) => !data.env[e.name]?.trim()).map((e) => e.name),
+    ];
+    if (needs.length) parts.push(`Still empty in the Inputs tab (the user fills these in): ${needs.join(", ")}`);
     return parts.join("\n");
+  }
+
+  /** Apply ops to a flow and save (unless dryRun), reporting the result; a failed batch saves nothing. */
+  function edit(data: AppData, flow: Flow, ops: FlowOp[], dryRun = false): string {
+    let r;
+    try {
+      r = applyOps(flow, data.blocks, ops, data.flows);
+    } catch (e) {
+      const ids = flow.nodes.map((n) => n.id).join(", ") || "none";
+      throw new ToolError(`${(e as Error).message}\nNothing was saved. Nodes in "${flow.id}": ${ids}`);
+    }
+    if (!dryRun) save(data, r.flow, r.touched);
+    const head = dryRun ? "Dry run — nothing saved. These changes would be made:" : "Changes:";
+    return `${head}\n${r.changes.join("\n") || "(nothing changed)"}\n\n${describeFlow(r.flow, data.blocks, data.flows)}\n\n${report(r.flow, data)}`;
   }
 
   function save(data: AppData, flow: Flow, touched: string[]) {
@@ -101,10 +140,23 @@ export function createMcp(deps: McpDeps) {
     const edges = (args.edges as string[] | undefined) ?? [];
     if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new ToolError("nodes and edges must be arrays");
     const ops: FlowOp[] = [
-      ...nodes.map((n) => ({ op: "add_node" as const, id: String(n.id ?? ""), block: String(n.block ?? ""), label: n.label as string | undefined, overrides: n.overrides as BlockConfig | undefined })),
+      ...nodes.map((n) => ({
+        op: "add_node" as const,
+        id: n.id === undefined || n.id === null ? undefined : String(n.id),
+        block: String(n.block ?? ""),
+        label: n.label as string | undefined,
+        overrides: n.overrides as BlockConfig | undefined,
+        from: n.from as string | string[] | undefined,
+        to: n.to as string | string[] | undefined,
+      })),
       ...edges.map((edge) => ({ op: "connect" as const, edge: String(edge) })),
     ];
-    const r = applyOps({ ...base, nodes: [], edges: [] }, data.blocks, ops, data.flows);
+    let r;
+    try {
+      r = applyOps({ ...base, nodes: [], edges: [] }, data.blocks, ops, data.flows);
+    } catch (e) {
+      throw new ToolError(`${(e as Error).message}\nNothing was saved. (Ops are numbered nodes first, then edges.)`);
+    }
     return { ...r, flow: autoLayout(r.flow) };
   }
 
@@ -112,9 +164,53 @@ export function createMcp(deps: McpDeps) {
     {
       name: "list_blocks",
       description:
-        "List every block a flow can use: id, name, kind, which edge inputs/outputs it has, env vars it needs, and what it does. Call this before adding nodes.",
-      inputSchema: { type: "object", properties: {} },
-      run: () => describeBlocks(deps.load().blocks),
+        "List the blocks a flow can use: id, name, kind, edge inputs/outputs, env vars it needs, and what it does. Call this before adding nodes. " +
+        "Filter with kind (trigger, ai, auto, manager, condition, script, subflow, flow-input, flow-output) or query (matches id, name, description). " +
+        "Then get_block shows one block's settings and an example op.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          kind: { type: "string", description: "Only blocks of this kind" },
+          query: { type: "string", description: "Only blocks whose id, name or description contains this (case-insensitive)" },
+        },
+      },
+      run: (a) => {
+        const blocks = deps.load().blocks;
+        const q = typeof a.query === "string" ? a.query.trim().toLowerCase() : "";
+        const shown = blocks.filter((b) => {
+          let kind: string;
+          try {
+            kind = resolveBlock(b.id, blocks).kind;
+          } catch {
+            kind = "?";
+          }
+          if (typeof a.kind === "string" && a.kind && kind !== a.kind) return false;
+          return !q || `${b.id} ${b.name} ${b.config.description ?? ""}`.toLowerCase().includes(q);
+        });
+        const text = shown.length ? describeBlocks(blocks, shown) : "";
+        return text ? `${text}\n\nNext: get_block {block} for a block's settings, defaults and an example add_node op.` : "No blocks match. Call list_blocks with no filter to see them all.";
+      },
+    },
+    {
+      name: "get_block",
+      description:
+        "Everything needed to place one block: kind, inputs/outputs, env vars, current defaults (instructions, command, trigger, rules…), " +
+        "the overrides a node can set (with types and examples), what still needs setting, and a ready-to-edit add_node op.",
+      inputSchema: {
+        type: "object",
+        required: ["block"],
+        properties: { block: { type: "string", description: "Block id (\"base/plan\"), id without the pack (\"plan\") or name (\"Shell command\")" } },
+      },
+      run: (a) => {
+        const blocks = deps.load().blocks;
+        let b;
+        try {
+          b = findBlock(a.block, blocks);
+        } catch (e) {
+          throw new ToolError((e as Error).message);
+        }
+        return describeBlock(b, blocks);
+      },
     },
     {
       name: "list_flows",
@@ -138,11 +234,12 @@ export function createMcp(deps: McpDeps) {
     {
       name: "create_flow",
       description:
-        "Create a new flow in one call. Nodes get laid out automatically. Edges are strings like \"plan.artifact -> implement.artifact\".",
+        "Create a new flow in one call. Each node is {block, id?, label?, overrides?, from?, to?} — from/to wire it to other nodes by id " +
+        "(every compatible handle), or list edges as strings like \"plan.artifact -> implement.artifact\". Nodes get laid out automatically.",
       unscopedOnly: true,
       inputSchema: {
         type: "object",
-        required: ["name", "nodes", "edges"],
+        required: ["name", "nodes"],
         properties: { name: { type: "string" }, nodes: { type: "array", items: nodeSchema }, edges: { type: "array", items: { type: "string" } } },
       },
       run: (a) => {
@@ -159,10 +256,10 @@ export function createMcp(deps: McpDeps) {
     {
       name: "replace_flow",
       description:
-        "Replace ALL nodes and edges of an existing flow (use for a from-scratch design; prefer edit_flow for changes). Nodes get laid out automatically.",
+        "Replace ALL nodes and edges of an existing flow (use for a from-scratch design; prefer edit_flow for changes). Same node format as create_flow. Nodes get laid out automatically.",
       inputSchema: {
         type: "object",
-        required: ["nodes", "edges"],
+        required: ["nodes"],
         properties: { ...flowIdProp, name: { type: "string", description: "Optional new flow name" }, nodes: { type: "array", items: nodeSchema }, edges: { type: "array", items: { type: "string" } } },
       },
       run: (a, { scope }) => {
@@ -176,14 +273,81 @@ export function createMcp(deps: McpDeps) {
     {
       name: "edit_flow",
       description:
-        "Apply a batch of edits to a flow. All-or-nothing: if one op fails nothing is saved and the error says which op. New nodes are placed next to their neighbours.",
-      inputSchema: { type: "object", required: ["ops"], properties: { ...flowIdProp, ops: { type: "array", items: opSchema } } },
+        "Apply a batch of edits to a flow. All-or-nothing: if one op fails nothing is saved and the error names the op and the field. " +
+        "Place and wire a block in one op: {op:'add_node', block:'plan', from:'start'} (id defaults from the block; from/to wire every compatible handle). " +
+        "New nodes are placed next to their neighbours — never send coordinates. Set dryRun to check a batch without saving. " +
+        "The result lists the changes, the whole flow, validation problems and inputs the user still has to fill in.",
+      inputSchema: {
+        type: "object",
+        required: ["ops"],
+        properties: {
+          ...flowIdProp,
+          ops: { type: "array", items: opSchema },
+          dryRun: { type: "boolean", description: "Validate and show the result without saving" },
+        },
+      },
       run: (a, { scope }) => {
         const { data, flow } = pickFlow(a, scope, true);
         if (!Array.isArray(a.ops) || !a.ops.length) throw new ToolError("ops must be a non-empty array");
-        const r = applyOps(flow, data.blocks, a.ops as FlowOp[], data.flows);
-        save(data, r.flow, r.touched);
-        return `Changes:\n${r.changes.join("\n") || "(nothing changed)"}\n\n${describeFlow(r.flow, data.blocks, data.flows)}\n\n${report(r.flow, data)}`;
+        return edit(data, flow, a.ops as FlowOp[], a.dryRun === true);
+      },
+    },
+    {
+      name: "add_node",
+      description:
+        "Place one block in a flow and wire it up — shorthand for edit_flow with one add_node op. Only block is required: " +
+        "the id defaults from the block, defaults come from the block, overrides set only what differs, and from/to connect it " +
+        "(e.g. from:\"plan\" wires plan's artifact and steer into it; from:\"check.true\" wires an If branch).",
+      inputSchema: { type: "object", required: ["block"], properties: { ...flowIdProp, ...nodeProps } },
+      run: (a, { scope }) => {
+        const { data, flow } = pickFlow(a, scope, true);
+        const { flowId: _f, ...op } = a;
+        return edit(data, flow, [{ ...op, op: "add_node" } as FlowOp]);
+      },
+    },
+    {
+      name: "update_node",
+      description:
+        "Change one node — shorthand for edit_flow with one update_node op. overrides MERGE into the node's existing ones " +
+        "(settings objects like trigger/agent merge one level deep; a key set to null is removed; overrides:null clears all). block swaps the block, label renames it.",
+      inputSchema: {
+        type: "object",
+        required: ["id"],
+        properties: {
+          ...flowIdProp,
+          id: { type: "string", description: "Node id (get_flow lists them)" },
+          block: nodeProps.block,
+          label: { type: ["string", "null"], description: "New display name (null resets to the block name)" },
+          overrides: { type: ["object", "null"], description: nodeProps.overrides.description },
+        },
+      },
+      run: (a, { scope }) => {
+        const { data, flow } = pickFlow(a, scope, true);
+        const { flowId: _f, ...op } = a;
+        return edit(data, flow, [{ ...op, op: "update_node" } as FlowOp]);
+      },
+    },
+    {
+      name: "connect",
+      description:
+        "Wire nodes — shorthand for edit_flow connect ops. Give from and to node ids to wire every compatible handle " +
+        "(artifact→artifact, steer→steer), \"node.handle\" for just one (\"check.true\", \"plan.steer\"), or edges: [\"a.artifact -> b.steer\", …].",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ...flowIdProp,
+          from: { type: "string", description: "Source node id or node.handle" },
+          to: { type: "string", description: "Target node id or node.handle" },
+          edges: { type: "array", items: { type: "string" }, description: "Edges as \"source.handle -> target.handle\"" },
+        },
+      },
+      run: (a, { scope }) => {
+        const { data, flow } = pickFlow(a, scope, true);
+        const ops: FlowOp[] = [];
+        if (a.from !== undefined || a.to !== undefined) ops.push({ op: "connect", from: a.from as string, to: a.to as string });
+        if (Array.isArray(a.edges)) ops.push(...a.edges.map((edge) => ({ op: "connect" as const, edge: String(edge) })));
+        if (!ops.length) throw new ToolError('Give from and to (node ids), or edges: ["a.artifact -> b.artifact"]');
+        return edit(data, flow, ops);
       },
     },
     {
@@ -212,7 +376,9 @@ export function createMcp(deps: McpDeps) {
     {
       name: "save_block",
       description:
-        "Create or update a custom (non-built-in) block or template in the library. Prefer extending a template (e.g. base/tpl-ai-agent) and setting only what differs: description, instructions, inputs/outputs, env, skills.",
+        "Create or update a custom (non-pack) block or template in the library — only when no block fits even with node overrides. " +
+        "Extend a template (base/tpl-ai-agent for agents, base/tpl-auto-git for host steps, base/tpl-reviewer, base/tpl-trigger) and set only what differs: " +
+        "description, instructions, inputs/outputs, env, skills. get_block on the template shows its fields.",
       inputSchema: {
         type: "object",
         required: ["id", "name", "config"],
@@ -232,15 +398,32 @@ export function createMcp(deps: McpDeps) {
           throw new ToolError(`"${id}" comes from a pack and can't be changed. Save a new block that extends a template instead`);
         }
         if (!/^[A-Za-z][\w-]{0,63}$/.test(id)) throw new ToolError(`Block id "${id}" is invalid: letters, digits, _ or -, starting with a letter`);
+        let parent: string | null = null;
+        if (typeof a.extends === "string" && a.extends.trim()) {
+          try {
+            parent = findBlock(a.extends, data.blocks).id;
+          } catch (e) {
+            throw new ToolError(`extends: ${(e as Error).message}`);
+          }
+        }
         const block: BlockDef = {
           id,
           name: String(a.name ?? "").trim() || id,
           isTemplate: !!a.isTemplate,
-          extends: (a.extends as string | null | undefined) ?? null,
+          extends: parent,
           config: (a.config as BlockConfig) ?? {},
         };
         const blocks = existing ? data.blocks.map((b) => (b.id === id ? block : b)) : [...data.blocks, block];
         const errors = validateBlocks(blocks, new Set([id]));
+        if (!errors.length) {
+          let kind;
+          try {
+            kind = resolveBlock(id, blocks).kind;
+          } catch {
+            kind = undefined;
+          }
+          if (kind) errors.push(...configProblems(a.config, kind, false));
+        }
         if (errors.length) throw new ToolError(errors.join("\n"));
         deps.saveBlocks(blocks);
         return `${existing ? "Updated" : "Created"} block "${block.name}" (id: ${id}).\n${describeBlocks([block, ...blocks.filter((b) => b.id !== id)]).split("\n")[0]}`;
@@ -275,8 +458,9 @@ export function createMcp(deps: McpDeps) {
           capabilities: { tools: {} },
           serverInfo: { name: "sandflow", version: "1.0.0" },
           instructions:
-            "Sandflow flows are graphs of blocks wired by artifact/steer edges. Call list_blocks first, then get_flow. " +
-            "Edit with edit_flow (batched ops) or build from scratch with replace_flow/create_flow. You can't run flows or set env values.",
+            "Sandflow flows are graphs of blocks wired by artifact/steer edges. Call list_blocks first (get_block for one block's settings), then get_flow. " +
+            "Place and wire blocks with add_node {block, from, overrides} or batch with edit_flow; build from scratch with replace_flow/create_flow. " +
+            "Every edit returns the flow, validation problems and inputs still empty. You can't run flows or set env values.",
         };
       }
       case "ping":
