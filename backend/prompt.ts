@@ -43,7 +43,10 @@ export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, 
     sections.push(`# Task (starting prompt)\n${startingPrompt.trim()}`);
   }
   if (inputs.steer?.trim()) sections.push(`# Steering from previous step\n${inputs.steer.trim()}`);
-  if (inputs.artifact?.trim()) sections.push(`# Input artifact\n${inputs.artifact.trim()}`);
+  // A triggered run without a starting prompt uses the event as one, and the trigger also passes the event on as the
+  // artifact: say it once.
+  const sameAsTask = cfg.inputs.startingPrompt && inputs.artifact?.trim() === startingPrompt.trim();
+  if (inputs.artifact?.trim() && !sameAsTask) sections.push(`# Input artifact\n${inputs.artifact.trim()}`);
   if (qa.length) {
     sections.push(
       `# Previous Q&A\n${qa.map((p) => `Q: ${p.question}\nA: ${p.answer}`).join("\n\n")}`,

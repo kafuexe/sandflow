@@ -181,6 +181,29 @@ describe("MCP block helpers", () => {
   });
 });
 
+describe("MCP flow requirements", () => {
+  it("a flow that starts itself needs a starting prompt only for manual runs", async () => {
+    await start();
+    const created = await callTool("create_flow", {
+      name: "Nightly plan",
+      nodes: [
+        { id: "nightly", block: "schedule-trigger", overrides: { trigger: { schedule: { kind: "cron", expr: "0 0 2 * * *" } } } },
+        { id: "plan", block: "plan", from: "nightly" },
+      ],
+    });
+    const text = created.content[0].text as string;
+    expect(text).toContain("Starting prompt (only for manual runs");
+    const data = (await (await fetch(`${base}/data`)).json()) as AppData;
+    const id = data.flows.find((f) => f.name === "Nightly plan")!.id;
+    const req = (await callTool("flow_requirements", { flowId: id })).content[0].text as string;
+    expect(req).toMatch(/Starting prompt \(empty — only needed for manual runs/);
+    expect(req).not.toMatch(/Starting prompt \(MISSING\)/);
+
+    const manual = (await callTool("flow_requirements", { flowId: "feature-pipeline" })).content[0].text as string;
+    expect(manual).toMatch(/Starting prompt \(MISSING\)/);
+  });
+});
+
 describe("data revisions", () => {
   it("rejects a UI save based on a stale revision with 409", async () => {
     await start();

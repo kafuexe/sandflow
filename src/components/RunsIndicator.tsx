@@ -58,7 +58,6 @@ export function RunsIndicator({ flowId }: { flowId: string }) {
       <button
         ref={trigger}
         type="button"
-        aria-haspopup="true"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
         title="Runs of this flow in progress — pick one to show, or stop it"
@@ -72,6 +71,7 @@ export function RunsIndicator({ flowId }: { flowId: string }) {
       >
         {waiting ? <HelpCircle className="size-3.5" aria-hidden /> : <Loader2 className="size-3.5 animate-spin" aria-hidden />}
         {activeRunsLabel(active)}
+        <span className="sr-only"> — runs of this flow</span>
         <ChevronDown className={cn("size-3.5 opacity-70 transition-transform", open && "rotate-180")} aria-hidden />
       </button>
       {open && (
@@ -87,6 +87,8 @@ export function RunsIndicator({ flowId }: { flowId: string }) {
           <ul className="max-h-[min(60vh,20rem)] overflow-y-auto p-1">
             {active.map((r) => {
               const shown = r.id === watched?.id;
+              // Stopped, still closing its sandbox: nothing more to stop.
+              const stoppingNow = stopping.has(r.id) || r.status === "cancelled";
               const when = new Date(r.startedAt).toLocaleTimeString();
               const what = r.trigger && r.trigger.source !== "manual" ? `${r.trigger.source}: ${r.trigger.type}` : r.prompt?.trim();
               return (
@@ -114,7 +116,7 @@ export function RunsIndicator({ flowId }: { flowId: string }) {
                     size="sm"
                     variant="ghost"
                     className="h-7 shrink-0 px-2 text-red-400 hover:text-red-300"
-                    disabled={stopping.has(r.id)}
+                    disabled={stoppingNow}
                     aria-label={`Stop run ${shortId(r.id)} started ${when}`}
                     title="Stop this run"
                     onClick={async () => {
@@ -127,7 +129,7 @@ export function RunsIndicator({ flowId }: { flowId: string }) {
                       });
                     }}
                   >
-                    {stopping.has(r.id) ? <Loader2 className="animate-spin" /> : <Square />} Stop
+                    {stoppingNow ? <Loader2 className="animate-spin" aria-hidden /> : <Square aria-hidden />} {r.status === "cancelled" ? "Stopping" : "Stop"}
                   </Button>
                 </li>
               );

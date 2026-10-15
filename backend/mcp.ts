@@ -2,7 +2,7 @@
 // Mounted at /api/mcp. `?flow=<id>` scopes a session to one flow — the in-app "Edit with AI" chat uses that.
 
 import { configProblems, describeBlock, findBlock } from "../shared/blockHelp";
-import { flowRequirements, resolveBlock } from "../shared/resolve";
+import { flowRequirements, resolveBlock, startsItself } from "../shared/resolve";
 import { applyOps, autoLayout, describeBlocks, describeFlow, validateFlow, type FlowOp } from "../shared/flowOps";
 import { validateBlocks } from "../shared/validate";
 import type { AppData, BlockConfig, BlockDef, Flow } from "../shared/types";
@@ -107,7 +107,9 @@ export function createMcp(deps: McpDeps) {
     if (r.warnings.length) parts.push(`Warnings:\n${r.warnings.map((w) => `- ${w}`).join("\n")}`);
     const req = flowRequirements(flow, data.blocks, flows);
     const needs = [
-      ...(req.startingPromptNodes.length && !data.settings.startingPrompt.trim() ? ["Starting prompt"] : []),
+      ...(req.startingPromptNodes.length && !data.settings.startingPrompt.trim()
+        ? [startsItself(flow, data.blocks) ? "Starting prompt (only for manual runs — triggered runs use the event)" : "Starting prompt"]
+        : []),
       ...req.env.filter((e) => !data.env[e.name]?.trim()).map((e) => (e.optional ? `${e.name} (optional)` : e.name)),
     ];
     if (needs.length) parts.push(`Still empty in the Inputs tab (the user fills these in): ${needs.join(", ")}`);
@@ -368,7 +370,12 @@ export function createMcp(deps: McpDeps) {
         const req = flowRequirements(flow, data.blocks, data.flows);
         const lines = req.env.map((e) => `- ${e.name} (${data.env[e.name]?.trim() ? "set" : e.optional ? "optional, empty" : "MISSING"}) — used by ${e.nodes.map((n) => n.label).join(", ")}`);
         if (req.startingPromptNodes.length) {
-          lines.unshift(`- Starting prompt (${data.settings.startingPrompt.trim() ? "set" : "MISSING"}) — used by ${req.startingPromptNodes.map((n) => n.label).join(", ")}`);
+          const state = data.settings.startingPrompt.trim()
+            ? "set"
+            : startsItself(flow, data.blocks)
+              ? "empty — only needed for manual runs; triggered runs use the event instead"
+              : "MISSING";
+          lines.unshift(`- Starting prompt (${state}) — used by ${req.startingPromptNodes.map((n) => n.label).join(", ")}`);
         }
         return lines.length ? `The user fills these in the Inputs tab:\n${lines.join("\n")}` : "This flow needs no inputs.";
       },

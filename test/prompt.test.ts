@@ -33,6 +33,13 @@ describe("buildPrompt", () => {
     expect(buildPrompt({ cfg, inputs: {}, startingPrompt: "", qa: [], scratch: true })).toMatch(/# Workspace\nThere is no project repository/);
   });
 
+  it("says the task once when the artifact is the starting prompt (a triggered run's event)", () => {
+    const p = buildPrompt({ cfg, inputs: { artifact: "# GitHub: issues.opened\n\n#1 Bug" }, startingPrompt: "# GitHub: issues.opened\n\n#1 Bug", qa: [] });
+    expect(p.match(/#1 Bug/g)).toHaveLength(1);
+    expect(p).toContain("# Task (starting prompt)");
+    expect(p).not.toContain("# Input artifact");
+  });
+
   it("omits the starting prompt when the block doesn't accept it", () => {
     const c = { ...cfg, inputs: { ...cfg.inputs, startingPrompt: false } };
     expect(buildPrompt({ cfg: c, inputs: {}, startingPrompt: "TASK", qa: [] })).not.toContain("TASK");
