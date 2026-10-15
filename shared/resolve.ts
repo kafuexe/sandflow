@@ -4,8 +4,10 @@ import type {
   Flow,
   FlowNode,
   ResolvedConfig,
+  RunOnChoice,
   SkillRef,
 } from "./types";
+import { HOST_LOGIN_ENV, resolveRunOn } from "./runOn";
 import { skillKey } from "./skills";
 
 export const DEFAULT_CONFIG: ResolvedConfig = {
@@ -23,6 +25,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   autoAction: "shell",
   shellCommand: "",
   agent: { provider: "claudeCode", model: "claude-opus-4-8", effort: "high" },
+  runOn: "inherit",
   maxIterations: 1,
   trigger: { type: "manual", overlap: "queue" },
   condition: { match: "all", rules: [] },
@@ -64,6 +67,7 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
     autoAction: def(patch.autoAction, base.autoAction),
     shellCommand: def(patch.shellCommand, base.shellCommand),
     agent: { ...base.agent, ...stripUndef(patch.agent) },
+    runOn: def(patch.runOn, base.runOn),
     maxIterations: def(patch.maxIterations, base.maxIterations),
     // Trigger settings merge field by field; a condition's rule list is replaced as a whole.
     trigger: { ...base.trigger, ...stripUndef(patch.trigger) },
@@ -141,7 +145,9 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
   const env = new Map<string, RequiredEnvEntry>();
   const startingPromptNodes: { id: string; label: string }[] = [];
 
-  const visit = (f: Flow, prefix: string, labelPrefix: string, seen: Set<string>, asSubflow: boolean) => {
+  // `outer` = where the enclosing flows run their agents (innermost first).
+  const visit = (f: Flow, prefix: string, labelPrefix: string, seen: Set<string>, asSubflow: boolean, outer: RunOnChoice[] = []) => {
+    const flowRunOn = [f.runOn, ...outer].filter((x): x is RunOnChoice => !!x);
     for (const node of f.nodes) {
       let cfg: ResolvedConfig;
       try {
@@ -154,7 +160,11 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
       const id = prefix + node.id;
       const label = labelPrefix + nodeLabel(node, blocks);
       if (cfg.inputs.startingPrompt) startingPromptNodes.push({ id, label });
-      const names = [...cfg.env];
+      // An agent on this computer uses the local CLI's own login, so API keys aren't required (or passed — see
+      // hostAgentEnv) unless it talks to a custom endpoint.
+      const ownLogin =
+        (cfg.kind === "ai" || cfg.kind === "manager") && !cfg.agent.endpoint?.trim() && resolveRunOn([cfg.runOn, ...flowRunOn]) === "host";
+      const names = cfg.env.filter((n) => !(ownLogin && HOST_LOGIN_ENV.includes(n)));
       // Webhook triggers need their secret (to verify the git host's signature).
       if (cfg.kind === "trigger" && cfg.trigger.mode === "webhook" && cfg.trigger.secretEnv?.trim()) {
         names.push(cfg.trigger.secretEnv.trim());
@@ -166,7 +176,7 @@ export function flowRequirements(flow: Flow, blocks: BlockDef[], flows: Flow[] =
       }
       if (cfg.kind === "subflow") {
         const child = flows.find((x) => x.id === cfg.subflow.flowId);
-        if (child && !seen.has(child.id)) visit(child, `${id}/`, `${label} › `, new Set([...seen, child.id]), true);
+        if (child && !seen.has(child.id)) visit(child, `${id}/`, `${label} › `, new Set([...seen, child.id]), true, flowRunOn);
       }
     }
   };

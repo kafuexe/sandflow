@@ -2,6 +2,7 @@
 // batched edit operations and auto-layout. Agents never send coordinates or edge ids.
 
 import { nodeLabel, resolveNode } from "./resolve";
+import { runOnProblem } from "./runOn";
 import { exitName, isExitHandle, resolveNodeIn, subflowCycle } from "./subflow";
 import type { BlockConfig, BlockDef, EdgeInputKind, Flow, FlowEdge, FlowNode, ResolvedConfig, SourceHandle } from "./types";
 
@@ -100,7 +101,11 @@ export function validateFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = [])
     if (ids.has(n.id)) errors.push(`Duplicate node id "${n.id}"`);
     ids.add(n.id);
     if (!blocks.some((b) => b.id === n.data.blockId)) errors.push(`Node "${n.id}" uses unknown block "${n.data.blockId}"`);
+    const runOn = runOnProblem(n.data.overrides?.runOn);
+    if (runOn) errors.push(`Node "${n.id}": ${runOn}`);
   }
+  const flowRunOn = runOnProblem(flow.runOn, false);
+  if (flowRunOn) errors.push(`Flow: ${flowRunOn}`);
   const seen = new Set<string>();
   for (const e of flow.edges) {
     const problem = edgeProblem(flow, blocks, e, flows);
@@ -348,7 +353,7 @@ function placeNew(flow: Flow, added: Set<string>): Flow {
 
 /** Compact text view of a flow: nodes with their block and wired handles, then edges. */
 export function describeFlow(flow: Flow, blocks: BlockDef[], flows: Flow[] = []): string {
-  const lines = [`Flow "${flow.name}" (id: ${flow.id})${flow.active ? " — triggers active" : ""}${flow.pack ? ` — from pack ${flow.pack}, read-only` : ""}`];
+  const lines = [`Flow "${flow.name}" (id: ${flow.id})${flow.active ? " — triggers active" : ""}${flow.runOn ? ` — agents run on: ${flow.runOn}` : ""}${flow.pack ? ` — from pack ${flow.pack}, read-only` : ""}`];
   if (!flow.nodes.length) return `${lines[0]}\n(empty — no nodes yet)`;
   lines.push("", "Nodes:");
   for (const n of flow.nodes) {

@@ -10,6 +10,7 @@ import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { ENV_NAME_RE, flowRequirements, isSecretName } from "../../shared/resolve";
 import { missingInputs } from "../../shared/validate";
+import { FlowRunOn } from "./RunOnSelect";
 
 /** Inputs still missing for the current flow (drives the Run button). */
 export function useMissingInputs(): string[] {
@@ -74,6 +75,8 @@ export function InputsPanel() {
               <NodeChips nodes={req.startingPromptNodes} />
             </section>
           )}
+
+          {!flow.pack && <FlowRunOn flow={flow} />}
 
           <section className="space-y-3">
             <div className="text-sm font-medium">Environment variables</div>

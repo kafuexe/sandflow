@@ -174,6 +174,13 @@ export interface BlockOutputs {
   steer?: boolean;
 }
 
+/**
+ * Where an agent (ai / manager block) runs: `sandbox` = a Docker/Podman container, `host` = this computer, with the
+ * agent CLI installed here and your own login/config. `inherit` (the default) = the flow's choice, else Settings → Sandbox.
+ */
+export type RunOn = "sandbox" | "host";
+export type RunOnChoice = RunOn | "inherit";
+
 /** Script blocks: what to run and where. */
 export interface ScriptConfig {
   /** Shell command, run in the pack's runtime copy (`$PACK_DIR`), e.g. `python scripts/report.py`. */
@@ -211,6 +218,8 @@ export interface BlockConfig {
   /** auto + shell: command run on the host inside REPO_PATH. */
   shellCommand?: string;
   agent?: Partial<AgentConfig>;
+  /** ai / manager: run the agent in a container or on this computer (default: inherit). */
+  runOn?: RunOnChoice;
   maxIterations?: number;
   /** trigger blocks. */
   trigger?: TriggerConfig;
@@ -253,6 +262,7 @@ export interface ResolvedConfig {
   autoAction: AutoAction;
   shellCommand: string;
   agent: AgentConfig;
+  runOn: RunOnChoice;
   maxIterations: number;
   trigger: TriggerConfig;
   condition: ConditionSpec;
@@ -294,6 +304,8 @@ export interface Flow {
   /** When true, the flow's trigger blocks (schedule / git) fire runs automatically. */
   active?: boolean;
   description?: string;
+  /** Where this flow's agents run unless a block says otherwise. Absent = Settings → Sandbox. */
+  runOn?: RunOn;
   /** Pack this flow comes from (read-only; set when packs load). Absent = one of your own flows. */
   pack?: string;
 }

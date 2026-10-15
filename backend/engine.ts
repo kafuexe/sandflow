@@ -16,6 +16,7 @@ import type {
   QuestionRecord,
   ResolvedConfig,
   RunState,
+  SandboxKind,
   Settings,
   SkillFileRef,
 } from "../shared/types";
@@ -59,6 +60,11 @@ export interface RunContext {
   branch?: string;
   /** Lazily created sandcastle sandbox, shared by every AI block of the run. */
   sandbox?: unknown;
+  /**
+   * Sandboxes of a kind other than Settings → Sandbox, for agent blocks that choose where they run (`runOn`): `none`
+   * = this computer. All of a run's sandboxes share the same branch and worktree.
+   */
+  sandboxes?: Partial<Record<SandboxKind, unknown>>;
   abort: AbortController;
   installedSkills: Set<string>;
   /** Only the env vars the block declares — never leak all globals. */
