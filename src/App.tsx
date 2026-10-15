@@ -271,7 +271,8 @@ export default function App() {
           <div className="flex min-h-0 flex-1">
             {/* The palette stays visible next to the chat; the canvas shrinks to make room. */}
             <Palette />
-            <main className="min-w-0 flex-1">
+            {/* Keeps room for the canvas: the side panels shrink (to their minimums) before it does. */}
+            <main className="min-w-[min(360px,30vw)] flex-1">
               <FlowCanvas />
             </main>
             {chatOpen && <ChatPanel />}

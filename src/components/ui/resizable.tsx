@@ -41,6 +41,13 @@ export function useResizable({ panel, edge, label }: ResizableOptions) {
     };
   }, [dragging, vertical]);
 
+  /** The panel's size on screen — below the stored one while a narrow window squeezes it. */
+  const shownSize = (handle: HTMLElement) => {
+    const rect = handle.parentElement?.getBoundingClientRect();
+    const shown = rect ? Math.round(vertical ? rect.width : rect.height) : 0;
+    return shown > 0 ? clampSize(Math.min(shown, sizeRef.current), panel) : sizeRef.current;
+  };
+
   const end = (e: PointerEvent<HTMLElement>) => {
     const d = drag.current;
     if (!d || d.pointerId !== e.pointerId) return;
@@ -66,7 +73,7 @@ export function useResizable({ panel, edge, label }: ResizableOptions) {
       e.currentTarget.focus();
       e.currentTarget.setPointerCapture(e.pointerId);
       window.getSelection()?.removeAllRanges();
-      drag.current = { pointerId: e.pointerId, startSize: sizeRef.current, startPos: vertical ? e.clientX : e.clientY };
+      drag.current = { pointerId: e.pointerId, startSize: shownSize(e.currentTarget), startPos: vertical ? e.clientX : e.clientY };
       setDragging(true);
     },
     onPointerMove: (e: PointerEvent<HTMLElement>) => {
@@ -79,7 +86,7 @@ export function useResizable({ panel, edge, label }: ResizableOptions) {
     onLostPointerCapture: end,
     onDoubleClick: () => commit(panel.defaultSize),
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
-      const next = e.key === "Enter" ? panel.defaultSize : keyboardSize(e.key, sizeRef.current, edge, panel, e.shiftKey);
+      const next = e.key === "Enter" ? panel.defaultSize : keyboardSize(e.key, shownSize(e.currentTarget), edge, panel, e.shiftKey);
       if (next === null) return;
       e.preventDefault();
       commit(next);
@@ -128,9 +135,11 @@ type ResizablePanelProps = ResizableOptions &
  *  re-renders while dragging — `children` keep their identity — so heavy panels stay smooth. */
 export function ResizablePanel({ panel, edge, label, as: Tag = "aside", className, style, children, ...rest }: ResizablePanelProps) {
   const { size, dragging, handleProps } = useResizable({ panel, edge, label });
-  const sizeStyle: CSSProperties = isVerticalEdge(edge) ? { width: size } : { height: size };
+  // Side panels give way (down to their minimum) when the window is too narrow for all of them at their chosen
+  // widths, so the canvas between them keeps usable room instead of being squeezed to nothing.
+  const sizeStyle: CSSProperties = isVerticalEdge(edge) ? { width: size, minWidth: panel.min, flexShrink: 1 } : { height: size, flexShrink: 0 };
   return (
-    <Tag {...rest} className={cn("relative shrink-0", className)} style={{ ...style, ...sizeStyle }}>
+    <Tag {...rest} className={cn("relative", className)} style={{ ...style, ...sizeStyle }}>
       {children}
       <ResizeHandle edge={edge} dragging={dragging} handleProps={handleProps} />
     </Tag>
