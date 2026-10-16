@@ -32,11 +32,11 @@ export function SandboxImageSettings({ settings }: { settings: Settings }) {
     if (saveStatus === "saved") refresh();
   }, [refresh, saveStatus, settings.sandbox, settings.sandboxImage]);
 
-  const doImport = async () => {
+  const doImport = async (file: string) => {
     setImporting(true);
     setMsg(undefined);
     try {
-      const { output } = await api.importSandbox(bundle.trim());
+      const { output } = await api.importSandbox(file);
       setMsg({ ok: true, text: output || "Imported." });
       refresh();
     } catch (e) {
@@ -74,7 +74,17 @@ export function SandboxImageSettings({ settings }: { settings: Settings }) {
               <CheckCircle2 className="size-3.5" /> {st.image} is loaded in {st.runtime}
             </span>
           )}
-          {st?.runtimeAvailable && !st.imagePresent && (
+          {st?.runtimeAvailable && !st.imagePresent && st.bundled && (
+            <>
+              <span className="flex items-center gap-1 text-amber-400">
+                <XCircle className="size-3.5" /> {st.image} is not loaded yet
+              </span>
+              <Button size="sm" variant="outline" className="ml-auto h-6" disabled={importing} onClick={() => void doImport("")}>
+                {importing ? <Loader2 className="animate-spin" /> : <PackageOpen />} Load bundled image
+              </Button>
+            </>
+          )}
+          {st?.runtimeAvailable && !st.imagePresent && !st.bundled && (
             <span className="flex items-center gap-1 text-amber-400">
               <XCircle className="size-3.5" /> {st.image} is not loaded — import the offline bundle below
             </span>
@@ -88,7 +98,7 @@ export function SandboxImageSettings({ settings }: { settings: Settings }) {
           <Input
             className="font-mono text-xs"
             value={bundle}
-            placeholder="…/sandflow-sandbox-image-x.y.z-linux-amd64.tar.gz"
+            placeholder="…/my-agent-image.tar.gz"
             onChange={(e) => setBundle(e.target.value)}
           />
           {desktop && (
@@ -104,13 +114,13 @@ export function SandboxImageSettings({ settings }: { settings: Settings }) {
               <FolderOpen />
             </Button>
           )}
-          <Button variant="outline" disabled={!bundle.trim() || importing} onClick={() => void doImport()}>
+          <Button variant="outline" disabled={!bundle.trim() || importing} onClick={() => void doImport(bundle.trim())}>
             {importing ? <Loader2 className="animate-spin" /> : <PackageOpen />} Import
           </Button>
         </div>
         <p className="text-[11px] text-muted-foreground">
-          Download <code>sandflow-sandbox-image-…-linux-&lt;arch&gt;.tar.gz</code> from the release on a connected machine and
-          copy it over. Runs <code>{st?.runtime ?? "docker"} load</code>; nothing is pulled from the internet.
+          The installer already contains the default image — this is for your own image saved with{" "}
+          <code>docker save</code>. Runs <code>{st?.runtime ?? "docker"} load</code>; nothing is pulled from the internet.
         </p>
         {msg && <div className={`text-xs whitespace-pre-wrap ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.text}</div>}
       </div>

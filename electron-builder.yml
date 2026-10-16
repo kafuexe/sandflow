@@ -14,24 +14,41 @@ files:
   - package.json
 
 # Base skills ship next to the app (copied into sandboxes at run time), and so does a copy of the base pack
-# (installed on first start when GitHub can't be reached).
+# (installed on first start when GitHub can't be reached). The sandbox image (`npm run sandbox:bundle`,
+# built by CI) is loaded into Docker / Podman on first start, so an install needs no separate download.
 extraResources:
   - from: skills
     to: skills
   - from: packs
     to: packs
+  - from: build/sandbox
+    to: sandbox
+    filter: ["sandflow-agent.tar.gz"]
 
 # sandcastle spawns processes / reads templates from its own package dir.
 asarUnpack:
   - node_modules/@ai-hero/sandcastle/**
 
+# One guided installer: pick per-user / all-users and the folder, shortcuts, then a prerequisites check
+# (build/installer.nsh). Updates install silently over it.
 win:
-  target: nsis
+  target:
+    - target: nsis
+      arch: [x64]
 nsis:
+  artifactName: Sandflow-Setup-${version}.${ext}
   oneClick: false
   perMachine: false
+  allowElevation: true
   allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  include: build/installer.nsh
+  # The sandbox image is already gzipped — don't spend minutes recompressing it.
+  preCompressedFileExtensions: [".gz"]
 
+# Not built by the release workflow for now (Windows and Linux only).
 mac:
   category: public.app-category.developer-tools
   target:
@@ -42,9 +59,18 @@ mac:
 
 linux:
   category: Development
+  artifactName: Sandflow-${version}-${arch}.${ext}
+  synopsis: Visual flow builder for sandboxed coding agents
+  maintainer: Ofek Tal <kafuexe@users.noreply.github.com>
   target:
-    - AppImage # auto-updatable; needs FUSE (libfuse2)
-    - tar.gz # no FUSE needed — for locked-down / air-gapped hosts
+    - target: deb # Debian / Ubuntu: installs to /opt/Sandflow with a menu entry; updates in place
+      arch: [x64]
+    - target: AppImage # any distro, no install; needs FUSE (libfuse2)
+      arch: [x64]
+deb:
+  # git is required for every flow. Docker / Podman are only suggested — Sandbox: None works without them,
+  # and recommending one would pull docker.io in next to an existing Docker Desktop / docker-ce.
+  fpm: ["--depends", "git", "--deb-suggests", "docker.io | docker-ce | podman"]
 
 # CI creates a draft release per tag, every platform uploads into it, then it's published.
 publish:
