@@ -15,12 +15,16 @@ import type {
   NodeIO,
   QuestionRecord,
   ResolvedConfig,
+  RunFlag,
+  FlagSeverity,
   RunState,
   SandboxKind,
   Settings,
+  StackRunInfo,
   SkillFileRef,
 } from "../shared/types";
 import type { PackRuntimeInfo } from "./packs";
+import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
 
 export interface NodeResult {
@@ -29,6 +33,8 @@ export interface NodeResult {
   route?: string;
   /** script / subflow: the named exit it leaves through. */
   exit?: string;
+  /** Flags to raise on the run, from this node (e.g. a script's `flags` output). */
+  flags?: { severity: FlagSeverity; message: string; details?: string }[];
 }
 
 export type NodeRunner = (
@@ -58,8 +64,14 @@ export interface RunContext {
   settings: Settings;
   /** Set by Create task; used as the sandbox branch. */
   branch?: string;
+  /** Branch the sandbox branch is cut from when it doesn't exist yet (default: BASE_BRANCH). */
+  baseBranch?: string;
   /** Lazily created sandcastle sandbox, shared by every AI block of the run. */
   sandbox?: unknown;
+  /** Sandboxes while they're being created, by kind. */
+  sandboxPending?: Partial<Record<SandboxKind, Promise<unknown>>>;
+  /** A Box Stack task with an isolated workspace: the context of the run that started it (where it merges into). */
+  parentContext?: RunContext;
   /**
    * Sandboxes of a kind other than Settings → Sandbox, for agent blocks that choose where they run (`runOn`): `none`
    * = this computer. All of a run's sandboxes share the same branch and worktree.
@@ -74,6 +86,8 @@ export interface RunContext {
   log(level: LogLine["level"], msg: string, nodeId?: string): void;
   /** Pause the run until the user answers (rejects when the run is cancelled). */
   ask(nodeId: string, question: string): Promise<string>;
+  /** Raise a flag on the run: saved with it, shown in the run list and as an alert. */
+  flag(severity: FlagSeverity, message: string, o?: { nodeKey?: string; details?: string; fromRunId?: string }): RunFlag;
   /** Teardown callbacks run when the run ends (e.g. sandbox.close()). */
   cleanup: Array<() => Promise<unknown>>;
   /** Where agent logs are written (per node). */
@@ -105,6 +119,22 @@ export interface StartRunOptions {
   startNodeId?: string;
   /** Starting prompt for this run only; overrides `settings.startingPrompt`. */
   prompt?: string;
+  /** Called for every flag raised on this run. */
+  onFlag?: (run: RunState, flag: RunFlag) => void;
+  /** Run the flow from its Flow input with these inputs (like a subflow); the exit reached goes to `run.result`. */
+  entry?: NodeIO;
+  /** Subflow nesting depth this run starts at (stack children run one deeper than their stack). */
+  depth?: number;
+  parent?: { runId: string; nodeKey: string };
+  stack?: StackRunInfo;
+  /** Work in this run's sandbox (a stack's Shared workspace): sandbox, branch and installed skills are shared. */
+  share?: RunContext;
+  /** Sandbox branch for this run, and the branch it's cut from. */
+  branch?: string;
+  baseBranch?: string;
+  parentContext?: RunContext;
+  /** Called when this run starts a child run (a stack's task), so the caller can track, save and stream it. */
+  onSpawn?: (child: RunHandle) => void;
   /** Longest each cleanup step (e.g. closing a sandbox) may take before the run ends without it. Default 20 s. */
   cleanupTimeoutMs?: number;
   /** Logged as warnings when the run starts (e.g. it shares a branch with another run). */
@@ -138,6 +168,7 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
     outerFlows,
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
+    flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
   };
   return new Proxy(ctx, {
@@ -163,6 +194,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
     prompt: settings.startingPrompt,
     trigger: opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
     triggerNodeId: opts.startNodeId,
+    ...(opts.parent ? { parent: opts.parent } : {}),
+    ...(opts.stack ? { stack: opts.stack } : {}),
+    ...(opts.entry ? { input: opts.entry } : {}),
   };
   const emit = () => opts.onChange?.(run);
 
@@ -188,6 +222,13 @@ export function startRun(opts: StartRunOptions): RunHandle {
       run.logs.push({ ts: Date.now(), level, nodeId, msg });
       if (run.logs.length > MAX_LOGS) run.logs.splice(0, run.logs.length - MAX_LOGS);
       emit();
+    },
+    flag(severity, message, o = {}) {
+      const f: RunFlag = { id: randomUUID().slice(0, 8), severity, message, at: Date.now(), ...o };
+      (run.flags ??= []).push(f);
+      ctx.log(severity === "error" ? "error" : "warn", `⚑ ${message}`, o.nodeKey);
+      opts.onFlag?.(run, f);
+      return f;
     },
     ask(nodeId, question) {
       if (ctx.abort.signal.aborted) return Promise.reject(new Error("Run cancelled"));
@@ -220,6 +261,16 @@ export function startRun(opts: StartRunOptions): RunHandle {
     },
   };
 
+  ctx.branch = opts.branch;
+  ctx.baseBranch = opts.baseBranch;
+  ctx.parentContext = opts.parentContext;
+  if (opts.share) {
+    // Shared workspace: the sandbox (and whatever was set up in it) belongs to the run that owns it.
+    const owner = opts.share;
+    for (const k of ["sandbox", "sandboxes", "sandboxPending", "branch", "baseBranch", "installedSkills", "preparedPacks", "cleanup"] as const) {
+      Object.defineProperty(ctx, k, { get: () => owner[k], set: (v) => ((owner as unknown as Record<string, unknown>)[k] = v), enumerable: true });
+    }
+  }
   for (const w of opts.warnings ?? []) ctx.log("warn", w);
 
   let steps = 0;
@@ -332,6 +383,42 @@ export function startRun(opts: StartRunOptions): RunHandle {
           if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
           if (r.exit === undefined) ctx.log("warn", `Flow "${child.name}" ended without reaching a Flow output — nothing continues after it`, k);
           result = { outputs: r.outputs ?? {}, exit: r.exit };
+        } else if (cfg.kind === "stack") {
+          if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
+          result = await runStack(
+            {
+              ctx,
+              scoped: gctx,
+              nodeKey: k,
+              label: label(nodeId),
+              ai: runners.ai,
+              spawn: (child, o) => {
+                const h = startRun({
+                  ...opts,
+                  flow: child,
+                  trigger: run.trigger,
+                  startNodeId: undefined,
+                  prompt: undefined,
+                  settings,
+                  entry: o.entry,
+                  depth: depth + 1,
+                  parent: { runId: run.id, nodeKey: k },
+                  stack: o.stack,
+                  share: o.shared ? ctx : undefined,
+                  branch: o.branch,
+                  baseBranch: o.baseBranch,
+                  parentContext: o.shared ? undefined : ctx,
+                  onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
+                });
+                opts.onSpawn?.(h);
+                return h;
+              },
+              settled: (h) => opts.onChange?.(h.state),
+            },
+            node,
+            cfg,
+            inputs,
+          );
         } else if (cfg.kind === "script") {
           if (!runners.script) throw new Error("Script blocks aren't supported here");
           result = await untilStopped(runners.script(gctx, node, cfg, inputs));
@@ -349,10 +436,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
         throw new Error(`${label(nodeId)}: ${(e as Error).message}`);
       }
 
+      for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
+
       // Named exits (Script / subflow): the result leaves through one exit and keeps both artifact and steer.
       const exits = cfg.kind === "script" ? cfg.script.exits.filter(Boolean) : cfg.kind === "subflow" ? null : [];
       let exit: string | undefined;
-      if (cfg.kind === "subflow") exit = result.exit;
+      if (cfg.kind === "subflow" || cfg.kind === "stack") exit = result.exit;
       else if (exits?.length) {
         exit = result.exit;
         if (!exit || !exits.includes(exit)) {
@@ -360,7 +449,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
           exit = exits[0];
         }
       }
-      const byExit = exit !== undefined || cfg.kind === "subflow";
+      const byExit = exit !== undefined || cfg.kind === "subflow" || cfg.kind === "stack";
 
       const outputs: NodeIO = {};
       if ((byExit || cfg.outputs.artifact) && result.outputs.artifact !== undefined) outputs.artifact = result.outputs.artifact;
@@ -426,19 +515,23 @@ export function startRun(opts: StartRunOptions): RunHandle {
   let settled = false;
   const done = (async () => {
     try {
-      await runGraph(flow, "", 0);
+      const r = await runGraph(flow, "", opts.depth ?? 0, opts.entry);
+      if (opts.entry) run.result = r;
       run.status = ctx.abort.signal.aborted ? "cancelled" : "done";
     } catch (e) {
       run.status = ctx.abort.signal.aborted ? "cancelled" : "failed";
       if (run.status === "failed") {
         run.error = (e as Error).message;
         ctx.log("error", run.error);
+        // A stack child's failure is reported by its stack (it may be retried).
+        if (!opts.parent) ctx.flag("error", `Run failed: ${run.error}`);
       }
     } finally {
       settled = true;
       // Each step is bounded: a sandbox that won't close must not keep the run (and Stop) hanging.
       const limit = opts.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
-      for (const fn of ctx.cleanup.splice(0)) {
+      // A shared workspace's cleanup belongs to the run that owns it.
+      for (const fn of opts.share ? [] : ctx.cleanup.splice(0)) {
         let timer: NodeJS.Timeout | undefined;
         try {
           const step = Promise.resolve().then(fn);

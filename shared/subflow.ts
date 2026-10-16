@@ -3,6 +3,7 @@
 // `exit:<name>` handle per output name.
 
 import { resolveNode } from "./resolve";
+import { STACK_EXITS } from "./stack";
 import type { BlockDef, ExitHandle, Flow, FlowNode, ResolvedConfig } from "./types";
 
 export const DEFAULT_EXIT = "done";
@@ -21,6 +22,10 @@ export interface FlowInterface {
   exits: string[];
   hasInput: boolean;
 }
+
+/** The flow a subflow or stack node runs ("" for other nodes). */
+export const childFlowId = (cfg: ResolvedConfig | undefined) =>
+  cfg?.kind === "subflow" ? cfg.subflow.flowId : cfg?.kind === "stack" ? cfg.stack.flowId : "";
 
 function tryResolve(node: FlowNode, blocks: BlockDef[]): ResolvedConfig | undefined {
   try {
@@ -58,6 +63,7 @@ export function flowInterface(flow: Flow, blocks: BlockDef[]): FlowInterface {
 export function resolveNodeIn(node: FlowNode, blocks: BlockDef[], flows: Flow[]): ResolvedConfig & { exits: string[] } {
   const cfg = resolveNode(node, blocks);
   if (cfg.kind === "script") return { ...cfg, exits: cfg.script.exits.filter(Boolean) };
+  if (cfg.kind === "stack") return { ...cfg, inputs: { ...cfg.inputs, artifact: true, steer: true }, exits: [...STACK_EXITS] };
   if (cfg.kind !== "subflow") return { ...cfg, exits: [] };
   const child = flows.find((f) => f.id === cfg.subflow.flowId);
   if (!child) return { ...cfg, inputs: { ...cfg.inputs, artifact: false, steer: false }, outputs: { artifact: false, steer: false }, exits: [] };
@@ -77,8 +83,7 @@ export function subflowIds(flowId: string, flows: Flow[], blocks: BlockDef[]): S
     const f = flows.find((x) => x.id === id);
     if (!f) return;
     for (const n of f.nodes) {
-      const cfg = tryResolve(n, blocks);
-      const child = cfg?.kind === "subflow" ? cfg.subflow.flowId : "";
+      const child = childFlowId(tryResolve(n, blocks));
       if (child && !out.has(child)) {
         out.add(child);
         walk(child);
@@ -96,8 +101,7 @@ export function subflowCycle(flowId: string, flows: Flow[], blocks: BlockDef[]):
     const f = flows.find((x) => x.id === id);
     if (!f) return undefined;
     for (const n of f.nodes) {
-      const cfg = tryResolve(n, blocks);
-      const child = cfg?.kind === "subflow" ? cfg.subflow.flowId : "";
+      const child = childFlowId(tryResolve(n, blocks));
       if (!child) continue;
       if (path.includes(child)) return [...path, child].map(name).join(" › ");
       const found = walk(child, [...path, child]);

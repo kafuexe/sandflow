@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { BlockEditor } from "@/components/BlockEditor";
 import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
+import { FlagAlerts } from "@/components/FlagAlerts";
 import { FlowCanvas } from "@/components/FlowCanvas";
 import { FlowSwitcher } from "@/components/FlowSwitcher";
 import { useMissingInputs, useTriggerMissingInputs } from "@/components/InputsPanel";
@@ -296,6 +297,7 @@ export default function App() {
       <SettingsDialog />
       <PacksDialog />
       {view === "builder" && <QuestionDialog />}
+      <FlagAlerts />
     </ReactFlowProvider>
   );
 }

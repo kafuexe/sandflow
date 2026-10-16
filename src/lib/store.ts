@@ -349,7 +349,7 @@ export const useStore = create<State>((set, get) => {
         set({ runs, triggers });
         // Follow a new triggered run of the flow on screen, unless you're watching one that's still going.
         const { run, currentFlowId } = get();
-        const fresh = runs.find((r) => r.flowId === currentFlowId && !r.finishedAt && r.id !== run?.id);
+        const fresh = runs.find((r) => r.flowId === currentFlowId && !r.parent && !r.finishedAt && r.id !== run?.id);
         if (fresh && (!run || run.finishedAt) && fresh.startedAt > (run?.startedAt ?? 0)) void get().watch(fresh.id);
       } catch {
         /* server restarting — try again next tick */

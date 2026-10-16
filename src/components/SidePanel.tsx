@@ -14,7 +14,7 @@ import { CORE_PACK } from "../../shared/packs";
 import { templateChain } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
 import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../shared/subflow";
-import type { BlockDef, Flow, FlowNode, ResolvedConfig } from "../../shared/types";
+import type { BlockDef, Flow, FlowNode, ResolvedConfig, StackConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
 import { NodeRunOn } from "./RunOnSelect";
@@ -69,6 +69,11 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
             : "—"}
         </div>
       </Row>
+      {cfg.kind === "stack" && (
+        <Row k="Orchestrator">
+          {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
+        </Row>
+      )}
       {(cfg.kind === "ai" || cfg.kind === "manager") && (
         <>
           <Row k="Agent">
@@ -277,6 +282,114 @@ function TriggerStatusCard({ flowId, nodeId, cfg, active }: { flowId: string; no
   );
 }
 
+/** A Box Stack node: which flow runs per task, how many at once, how failures are retried, and the orchestrator's instructions. */
+function StackEditor({ flow, node, cfg, readOnly }: { flow: Flow; node: FlowNode; cfg: ResolvedConfig; readOnly: boolean }) {
+  const flows = useStore((s) => s.data?.flows ?? []);
+  const blocks = useStore((s) => s.data?.blocks ?? []);
+  const { updateNodeOverrides, setCurrentFlow } = useStore.getState();
+  const own = node.data.overrides?.stack ?? {};
+  const s = cfg.stack;
+  const set = (patch: Partial<StackConfig>) => {
+    const next: Partial<StackConfig> = { ...own, ...patch };
+    for (const k of Object.keys(next) as (keyof StackConfig)[]) if (next[k] === undefined) delete next[k];
+    updateNodeOverrides(node.id, { stack: Object.keys(next).length ? next : undefined });
+  };
+  const child = flows.find((f) => f.id === s.flowId);
+  const choices = flows.filter((f) => {
+    if (f.id === flow.id) return false;
+    const trial = flows.map((x) =>
+      x.id === flow.id ? { ...x, nodes: x.nodes.map((n) => (n.id === node.id ? { ...n, data: { ...n.data, overrides: { ...n.data.overrides, stack: { ...own, flowId: f.id } } } } : n)) } : x,
+    );
+    return !subflowCycle(flow.id, trial, blocks);
+  });
+  const fi = child ? flowInterface(child, blocks) : undefined;
+  const num = (v: string, min: number) => (v === "" ? undefined : Math.max(min, Math.floor(Number(v)) || min));
+  return (
+    <fieldset disabled={readOnly} className="min-w-0 space-y-3">
+      <div className="space-y-1.5">
+        <Label>Flow to run for each task</Label>
+        <Select value={s.flowId || undefined} onValueChange={(id) => set({ flowId: id, successExits: undefined })}>
+          <SelectTrigger size="sm" className="w-full">
+            <SelectValue placeholder="Pick a flow" />
+          </SelectTrigger>
+          <SelectContent>
+            {choices.map((f) => (
+              <SelectItem key={f.id} value={f.id}>
+                {f.name}
+                {f.pack && <span className="text-muted-foreground"> · {f.pack}</span>}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {child && fi && !fi.hasInput && <p className="text-[11px] text-amber-400">“{child.name}” has no Flow input, so it can't receive a task.</p>}
+        {child && (
+          <Button size="sm" variant="outline" disabled={false} onClick={() => setCurrentFlow(child.id)}>
+            <Workflow /> Open “{child.name}”
+          </Button>
+        )}
+      </div>
+      {fi && fi.exits.length > 0 && (
+        <div className="space-y-1.5">
+          <Label>Counts as success</Label>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {fi.exits.map((x) => (
+              <label key={x} className="flex items-center gap-1.5 text-sm">
+                <input
+                  type="checkbox"
+                  className="accent-orange-400"
+                  checked={s.successExits.includes(x)}
+                  onChange={(e) => set({ successExits: e.target.checked ? [...s.successExits, x] : s.successExits.filter((y) => y !== x) })}
+                />
+                <span className="font-mono text-xs">{x}</span>
+              </label>
+            ))}
+          </div>
+          <p className="text-[11px] text-muted-foreground">Any other exit, or an error, rejects the task and it's tried again.</p>
+        </div>
+      )}
+      <div className="space-y-1.5">
+        <Label>Workspace</Label>
+        <Select value={s.workspace} onValueChange={(v) => set({ workspace: v as StackConfig["workspace"] })}>
+          <SelectTrigger size="sm" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="isolated">Isolated: a branch and worktree per task</SelectItem>
+            <SelectItem value="shared">Shared: every task works in this run's worktree</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-[11px] text-muted-foreground">
+          {s.workspace === "isolated"
+            ? "Tasks don't see each other's changes. Merge their branches in the combine step, or add “Merge into parent branch” to the task flow."
+            : "Best for read-only work like exploring or reviewing: tasks running at once edit the same files."}
+        </p>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        {([
+          ["maxConcurrent", "At once", 1],
+          ["maxChildren", "Max tasks", 1],
+          ["maxRetries", "Retries", 0],
+        ] as const).map(([k, label, min]) => (
+          <div key={k} className="space-y-1.5">
+            <Label htmlFor={`stack-${k}`}>{label}</Label>
+            <Input id={`stack-${k}`} type="number" min={min} className="h-8" value={own[k] ?? ""} placeholder={String(s[k])} onChange={(e) => set({ [k]: num(e.target.value, min) })} />
+          </div>
+        ))}
+      </div>
+      {([
+        ["splitInstructions", "How to split the input into tasks"],
+        ["combineInstructions", "How to combine the results"],
+      ] as const).map(([k, label]) => (
+        <div key={k} className="space-y-1.5">
+          <Label htmlFor={`stack-${k}`}>{label}</Label>
+          <Textarea id={`stack-${k}`} rows={3} value={own[k] ?? ""} placeholder={s[k]} onChange={(e) => set({ [k]: e.target.value || undefined })} />
+        </div>
+      ))}
+      <p className="text-[11px] text-muted-foreground">The orchestrator uses this block's agent settings (Edit block definition).</p>
+    </fieldset>
+  );
+}
+
 function BlockPanel() {
   const flow = useCurrentFlow();
   const blocks = useStore((s) => s.data?.blocks ?? []);
@@ -347,6 +460,7 @@ function BlockPanel() {
           </div>
         </div>
         {cfg?.kind === "script" && <ScriptEditor node={node} cfg={cfg} pack={filesPack} />}
+        {cfg?.kind === "stack" && <StackEditor flow={flow} node={node} cfg={cfg} readOnly={readOnly} />}
         {cfg?.kind === "flow-input" && (
           <div className="space-y-2">
             <div className="text-xs font-medium">What this flow takes in when it runs as a subflow</div>

@@ -1,8 +1,9 @@
 // State for the Agent screen: every run (manual, agent or triggered), live-updated, plus the new-run draft.
 
 import { create } from "zustand";
+import { summarize as toSummary } from "../../shared/runs";
 import type { RunState, RunSummary } from "../../shared/types";
-import { api, ApiError, subscribeRun } from "./api";
+import { api, ApiError, subscribeFlags, subscribeRun, type FlagEvent } from "./api";
 import { useStore } from "./store";
 
 interface AgentState {
@@ -18,6 +19,8 @@ interface AgentState {
   error?: string;
   /** Run ids whose answer is being sent. */
   answering: Record<string, boolean>;
+  /** Flag popups on screen, newest first. */
+  alerts: FlagEvent[];
 
   /** Merge a fresh runs list (the app polls it — see `refreshActivity` in the main store). */
   ingest(runs: RunSummary[]): void;
@@ -27,6 +30,12 @@ interface AgentState {
   start(): Promise<void>;
   stop(id: string): Promise<void>;
   answer(id: string, text: string): Promise<boolean>;
+  /** Close a popup (the flag stays on the run). */
+  closeAlert(flagId: string): void;
+  /** Clear a flag on the run: it leaves the Flagged list once none are left. */
+  dismissFlag(runId: string, flagId: string): Promise<void>;
+  /** Show the run on the Agent screen. */
+  openRun(id: string): void;
 }
 
 /**
@@ -35,21 +44,6 @@ interface AgentState {
  * which stalled every other request, e.g. the reload that shows an assistant edit in the builder.
  */
 const subs = new Map<string, () => void>();
-
-function toSummary(r: RunState): RunSummary {
-  const t = r.trigger;
-  return {
-    id: r.id,
-    flowId: r.flowId,
-    flowName: r.flowName,
-    status: r.status,
-    startedAt: r.startedAt,
-    finishedAt: r.finishedAt,
-    trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
-    prompt: r.prompt,
-    pendingQuestion: r.pendingQuestion,
-  };
-}
 
 export const useAgent = create<AgentState>((set, get) => {
   function apply(run: RunState) {
@@ -96,6 +90,7 @@ export const useAgent = create<AgentState>((set, get) => {
     draftFlowId: null,
     starting: false,
     answering: {},
+    alerts: [],
 
     ingest(fresh) {
       // Live subscriptions are fresher than the list for the runs they cover.
@@ -146,6 +141,22 @@ export const useAgent = create<AgentState>((set, get) => {
         set({ error: (e as Error).message });
       }
     },
+    closeAlert(flagId) {
+      set({ alerts: get().alerts.filter((a) => a.flag.id !== flagId) });
+    },
+    async dismissFlag(runId, flagId) {
+      try {
+        await api.dismissFlag(runId, flagId);
+        const run = get().detail[runId];
+        if (run) apply({ ...run, flags: run.flags?.map((f) => (f.id === flagId ? { ...f, dismissed: true } : f)) });
+      } catch (e) {
+        set({ error: (e as Error).message });
+      }
+    },
+    openRun(id) {
+      useStore.getState().setView("agent");
+      get().select(id);
+    },
     async answer(id, text) {
       set({ answering: { ...get().answering, [id]: true }, error: undefined });
       try {
@@ -169,3 +180,19 @@ export const useWaitingCount = () => useAgent((s) => s.list.filter((r) => r.pend
 useStore.subscribe((s, prev) => {
   if (s.runs !== prev.runs) useAgent.getState().ingest(s.runs);
 });
+
+// Flags from every run, app-wide: a popup per flag, and the run list / open run kept in step.
+subscribeFlags(
+  (e) => {
+    const s = useAgent.getState();
+    useAgent.setState({ alerts: [e, ...s.alerts.filter((a) => a.flag.id !== e.flag.id)] });
+    const run = s.detail[e.runId];
+    if (run && !run.flags?.some((f) => f.id === e.flag.id)) useAgent.setState({ detail: { ...s.detail, [e.runId]: { ...run, flags: [...(run.flags ?? []), e.flag] } } });
+    void useStore.getState().refreshActivity();
+  },
+  (e) => {
+    useAgent.getState().closeAlert(e.flagId);
+    void useStore.getState().refreshActivity();
+  },
+);
+
