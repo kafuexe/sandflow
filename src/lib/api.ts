@@ -10,6 +10,7 @@ import type {
   PackInfo,
   PackManifest,
   PackPreview,
+  RunFlag,
   RunState,
   RunSummary,
   Settings,
@@ -81,7 +82,11 @@ export const api = {
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   sandboxStatus: () =>
-    request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean }>("GET", "/sandbox/status"),
+    request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean; bundled: boolean }>(
+      "GET",
+      "/sandbox/status",
+    ),
+  /** Empty path = the bundle shipped with the app. */
   importSandbox: (path: string) => request<{ output: string }>("POST", "/sandbox/import", { path }),
   listSkills: () => request<SkillRef[]>("GET", "/skills"),
   uploadSkill: (name: string, files: { path: string; content: string }[]) =>
@@ -97,22 +102,80 @@ export const api = {
   listRuns: () => request<RunSummary[]>("GET", "/runs"),
   triggers: () => request<TriggersInfo>("GET", "/triggers"),
   cancel: (id: string) => request("POST", `/runs/${encodeURIComponent(id)}/cancel`, {}),
+  dismissFlag: (runId: string, flagId: string) =>
+    request("POST", `/runs/${encodeURIComponent(runId)}/flags/${encodeURIComponent(flagId)}/dismiss`, {}),
 };
+
+/** A flag raised on a top-level run (flags from stack tasks arrive as copies on their top-level run). */
+export interface FlagEvent {
+  runId: string;
+  runTitle: string;
+  flowName: string;
+  flag: RunFlag;
+}
+
+/**
+ * One connection to /api/data/events for the whole app, however many subscribe: each EventSource holds one of the
+ * browser's ~6 connections per host. Closed when the last subscriber leaves.
+ */
+let dataEvents: EventSource | undefined;
+let dataSubscribers = 0;
+/** The latest change event, replayed to a subscriber that joins an open connection (it missed the initial one). */
+let lastChange: DataChange | undefined;
+
+function onDataEvents(listeners: Record<string, (ev: MessageEvent) => void>): () => void {
+  if (!dataEvents) {
+    dataEvents = new EventSource("/api/data/events");
+    lastChange = undefined;
+    dataEvents.addEventListener("change", (ev) => (lastChange = JSON.parse((ev as MessageEvent).data) as DataChange));
+  }
+  const es = dataEvents;
+  dataSubscribers++;
+  for (const [type, fn] of Object.entries(listeners)) es.addEventListener(type, fn as EventListener);
+  return () => {
+    for (const [type, fn] of Object.entries(listeners)) es.removeEventListener?.(type, fn as EventListener);
+    if (--dataSubscribers === 0 && dataEvents === es) {
+      es.close();
+      dataEvents = undefined;
+    }
+  };
+}
+
+/** Flags raised and cleared anywhere, live. */
+export function subscribeFlags(onFlag: (e: FlagEvent) => void, onDismissed: (e: { runId: string; flagId: string }) => void): () => void {
+  return onDataEvents({
+    flag: (ev) => onFlag(JSON.parse(ev.data) as FlagEvent),
+    "flag-dismissed": (ev) => onDismissed(JSON.parse(ev.data) as { runId: string; flagId: string }),
+  });
+}
 
 /**
  * Flows/blocks changed on the server (e.g. by the assistant). `initial` marks the server's current revision, sent
  * first on every (re)connect — after a server restart it can be lower than the one the client saw.
  */
 export function subscribeData(onChange: (c: DataChange, initial: boolean) => void): () => void {
-  const es = new EventSource("/api/data/events");
   let initial = true;
-  es.addEventListener("open", () => (initial = true));
-  es.addEventListener("change", (ev) => {
-    const first = initial;
-    initial = false;
-    onChange(JSON.parse((ev as MessageEvent).data) as DataChange, first);
+  let closed = false;
+  const joined = lastChange;
+  const unsubscribe = onDataEvents({
+    open: () => (initial = true),
+    change: (ev) => {
+      const first = initial;
+      initial = false;
+      onChange(JSON.parse(ev.data) as DataChange, first);
+    },
   });
-  return () => es.close();
+  // Joined a connection that already delivered the initial revision: hand it over as this subscriber's initial one.
+  if (joined)
+    queueMicrotask(() => {
+      if (closed || !initial) return;
+      initial = false;
+      onChange(joined, true);
+    });
+  return () => {
+    closed = true;
+    unsubscribe();
+  };
 }
 
 /** Live chat state (streams while the assistant answers). */

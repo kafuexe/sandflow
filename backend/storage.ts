@@ -4,6 +4,7 @@ import { CORE_BLOCKS } from "../shared/core";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
 import { sanitizeFlowColor } from "../shared/flows";
 import { BASE_PACK } from "../shared/packs";
+import { summarize } from "../shared/runs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
 import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
 
@@ -77,6 +78,8 @@ export function migrateLegacy(blocks: BlockDef[], flows: Flow[]): { blocks: Bloc
 
 export type Storage = ReturnType<typeof createStorage>;
 
+const INTERRUPTED_FLAG = "interrupted";
+
 /**
  * A saved run without `finishedAt` was active when Sandflow last stopped (e.g. a crash) — nothing will
  * ever finish it, so report it as cancelled instead of forever "running".
@@ -84,29 +87,43 @@ export type Storage = ReturnType<typeof createStorage>;
 export function settleInterrupted(r: RunState): RunState {
   if (r.finishedAt) return r;
   const last = r.logs.at(-1)?.ts ?? r.startedAt;
+  const error = r.error ?? "Interrupted — Sandflow stopped while this run was active";
+  const flags = r.flags ?? [];
   return {
     ...r,
     status: "cancelled",
     finishedAt: last,
     pendingQuestion: undefined,
-    error: r.error ?? "Interrupted — Sandflow stopped while this run was active",
+    error,
+    // A stack task's interruption shows on its top-level run, which was interrupted too.
+    flags: r.parent || flags.some((f) => f.id === INTERRUPTED_FLAG) ? flags : [...flags, { id: INTERRUPTED_FLAG, severity: "error", message: error, at: last }],
   };
 }
 
-export function summarize(r: RunState): RunSummary {
-  const t = r.trigger;
-  return {
-    id: r.id,
-    flowId: r.flowId,
-    flowName: r.flowName,
-    status: r.status,
-    startedAt: r.startedAt,
-    finishedAt: r.finishedAt,
-    trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
-    prompt: r.prompt,
-    pendingQuestion: r.pendingQuestion,
-  };
+/** Mark one of the run's flags as looked at. False when the run has no such flag. */
+export function dismissFlag(r: RunState, flagId: string): boolean {
+  const f = r.flags?.find((x) => x.id === flagId);
+  if (!f) return false;
+  f.dismissed = true;
+  return true;
 }
+
+/**
+ * The newest `limit` top-level runs plus every child run under them. `runs` must be newest first; a child always
+ * starts after its parent, so it comes before it.
+ */
+export function limitRuns(runs: RunSummary[], limit: number): RunSummary[] {
+  const parentOf = new Map(runs.filter((r) => r.parent).map((r) => [r.id, r.parent!.runId]));
+  const rootOf = (id: string) => {
+    let cur = id;
+    for (let i = 0; i < 20 && parentOf.has(cur); i++) cur = parentOf.get(cur)!;
+    return cur;
+  };
+  const roots = new Set(runs.filter((r) => !r.parent).slice(0, limit).map((r) => r.id));
+  return runs.filter((r) => roots.has(r.parent ? rootOf(r.id) : r.id));
+}
+
+export { summarize };
 
 export interface StorageOptions extends PackStoreOptions {
   /** Use this pack store instead of creating one over `<dir>/packs`. */
@@ -126,6 +143,8 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
   const packs = opts.packs ?? createPackStore(dir, { tokens, ...opts });
   let baseChecked = false;
   const write = (name: string, value: unknown) => writeAtomic(file(name), JSON.stringify(value, null, 2));
+  /** Run summaries by file name, with the file's mtime/size when it was read. */
+  const summaryCache = new Map<string, { mtimeMs: number; size: number; summary: RunSummary }>();
   const runFile = (id: string) => {
     if (!RUN_ID_RE.test(id)) throw new Error("Invalid run id");
     return path.join(dir, "runs", `${id}.json`);
@@ -193,17 +212,26 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
       } catch {
         return [];
       }
-      return names
-        .sort()
-        .reverse()
-        .slice(0, limit)
-        .flatMap((n) => {
-          try {
-            return [summarize(settleInterrupted(JSON.parse(fs.readFileSync(path.join(dir, "runs", n), "utf8")) as RunState))];
-          } catch {
-            return [];
+      const out: RunSummary[] = [];
+      let roots = 0;
+      // Newest first; stop at the limit-th top-level run — anything older can't be a child of the ones we keep.
+      for (const n of names.sort().reverse()) {
+        try {
+          const file = path.join(dir, "runs", n);
+          // The UI polls this list: only parse run files that changed since last time.
+          const st = fs.statSync(file);
+          let s = summaryCache.get(n);
+          if (!s || s.mtimeMs !== st.mtimeMs || s.size !== st.size) {
+            s = { mtimeMs: st.mtimeMs, size: st.size, summary: summarize(settleInterrupted(JSON.parse(fs.readFileSync(file, "utf8")) as RunState)) };
+            summaryCache.set(n, s);
           }
-        });
+          out.push(s.summary);
+          if (!s.summary.parent && ++roots >= limit) break;
+        } catch {
+          /* unreadable run file */
+        }
+      }
+      return limitRuns(out, limit);
     },
     saveArtifact(runId: string, nodeId: string, n: number, text: string) {
       runFile(runId);

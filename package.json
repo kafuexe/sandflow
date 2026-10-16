@@ -1,7 +1,7 @@
 {
   "name": "sandflow",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "description": "Visual flow builder for sandboxed coding agents (auto + AI blocks) powered by @ai-hero/sandcastle",
   "author": "Ofek Tal",
@@ -10,12 +10,15 @@
     "url": "https://github.com/kafuexe/sandflow.git"
   },
   "main": "dist-electron/main.js",
+  "desktopName": "sandflow.desktop",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist-electron/main.js --external:electron --external:electron-updater --external:@ai-hero/sandcastle --external:@ai-hero/sandcastle/* && esbuild electron/preload.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist-electron/preload.cjs --external:electron",
     "app": "npm run build && npm run build:electron && electron .",
     "app:dist": "npm run build && npm run build:electron && electron-builder --publish never",
+    "sandbox:bundle": "node scripts/bundle-sandbox.mjs",
+    "icon": "electron scripts/render-icon.cjs",
     "start": "vite preview --port 5173",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

@@ -14,6 +14,9 @@ class FakeEventSource {
   }
 }
 
+// The app-wide /api/data/events stream (data changes and flags) is one connection, opened once; only run streams count here.
+const runStreams = () => [...open].filter((u) => u.startsWith("/api/runs/"));
+
 afterEach(() => {
   open.clear();
   vi.unstubAllGlobals();
@@ -33,12 +36,12 @@ describe("agent run streams", () => {
     const { useAgent } = await import("../src/lib/agent");
     const a = () => useAgent.getState();
     a().ingest(["r1", "r2", "r3", "r4", "r5"].map(summary));
-    expect(open.size).toBe(0);
+    expect(runStreams()).toEqual([]);
     a().select("r2");
-    await vi.waitFor(() => expect([...open]).toEqual(["/api/runs/r2/events"]));
+    await vi.waitFor(() => expect(runStreams()).toEqual(["/api/runs/r2/events"]));
     a().select("r4");
-    await vi.waitFor(() => expect([...open]).toEqual(["/api/runs/r4/events"]));
+    await vi.waitFor(() => expect(runStreams()).toEqual(["/api/runs/r4/events"]));
     a().ingest(["r1", "r2", "r3", "r4", "r5"].map(summary));
-    expect([...open]).toEqual(["/api/runs/r4/events"]);
+    expect(runStreams()).toEqual(["/api/runs/r4/events"]);
   });
 });

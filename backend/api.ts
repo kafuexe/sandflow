@@ -9,15 +9,23 @@ import { validateSettings } from "../shared/settings";
 import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
-import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunState, Settings, TriggerEvent } from "../shared/types";
+import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
 import { startRun, type NodeRunner, type RunHandle, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
-import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
+import {
+  ensureSandboxReady,
+  execCli,
+  importSandboxImage,
+  loadBundledSandboxImage,
+  sandboxImageStatus,
+  setBundledSandboxImage,
+  type Exec,
+} from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
-import { settleInterrupted, summarize, type Storage } from "./storage";
+import { dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
 import { startWebhookServer, type WebhookServer } from "./webhooks";
 
@@ -64,6 +72,8 @@ export interface ApiOptions {
   assistant?: AssistantRunner;
   /** Try to pull the base pack from GitHub at start while the installed one is the copy shipped with the app. */
   fetchBasePack?: boolean;
+  /** The sandbox image bundle shipped with the app; loaded automatically while the default image is missing. */
+  bundledSandboxImage?: string;
 }
 
 export function createApi(
@@ -78,6 +88,12 @@ export function createApi(
     runtimeRoot: path.join(storage.dir, "packs-runtime"),
   };
   const exec = opts.exec ?? execCli;
+  setBundledSandboxImage(opts.bundledSandboxImage);
+  if (opts.bundledSandboxImage) {
+    // First start after an install / update: load the shipped image in the background so the first run
+    // doesn't wait for it. Quietly skipped when Docker / Podman isn't running yet — runs retry it.
+    void ensureSandboxReady(storage.load().settings, exec).catch(() => {});
+  }
   const runs = new Map<string, RunHandle>();
   const listeners = new Map<string, Set<(s: RunState) => void>>();
 
@@ -89,6 +105,12 @@ export function createApi(
   function changed(c: Omit<DataChange, "rev">) {
     rev++;
     dataListeners.forEach((fn) => fn({ rev, ...c }));
+  }
+  /** Flag events go out on the same stream as data changes, so every view hears about them. */
+  const flagListeners = new Set<(event: "flag" | "flag-dismissed", data: object) => void>();
+  function announceFlag(run: RunState, flag: RunFlag) {
+    const runTitle = run.trigger?.title || run.prompt?.split("\n")[0]?.slice(0, 80) || run.flowName;
+    flagListeners.forEach((fn) => fn("flag", { runId: run.id, runTitle, flowName: run.flowName, flag }));
   }
   function checkRev(url: URL) {
     const seen = url.searchParams.get("rev");
@@ -126,13 +148,33 @@ export function createApi(
     }
   }
 
+  /** Saves of live runs are throttled per run; a finished run is always saved. */
+  const lastSave = new Map<string, number>();
+  /** Runs still going, with the branch they share (if any) — for the concurrency warning. */
+  const branchKeys = new Map<string, string>();
+  function activeRuns(): ActiveRunInfo[] {
+    return [...runs.values()]
+      .filter((h) => !h.state.finishedAt)
+      .map((h) => ({ id: h.state.id, flowName: h.state.flowName, startedAt: h.state.startedAt, branchKey: branchKeys.get(h.state.id) }));
+  }
+
+  function track(handle: RunHandle) {
+    runs.set(handle.state.id, handle);
+    void handle.done.then((s) => {
+      branchKeys.delete(s.id);
+      storage.saveRun(s);
+      lastSave.delete(s.id);
+      setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
+      if (!s.parent) drainQueue(s.flowId);
+    });
+  }
+
   /** Start a run (manual, or fired by a trigger node). */
   function launch(
     flow: Flow,
     data: AppData,
     extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string } = {},
   ): RunHandle & { warning?: string } {
-    let lastSave = 0;
     // Runs are independent (own context, sandbox, branch and logs), so any number may run at once — the one thing
     // they can share is an explicit BRANCH_NAME in the same REPO_PATH. Say so instead of refusing the run.
     const branchKey = sharedBranchKey(data.env);
@@ -149,32 +191,21 @@ export function createApi(
       loadSkill: skills.read,
       packs: runPacks,
       ...extra,
+      onFlag: announceFlag,
+      // Stack children are runs of their own: answerable, cancellable and streamed like any other.
+      onSpawn: track,
       warnings: warning ? [warning] : undefined,
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
-        if (s.finishedAt || Date.now() - lastSave > 2000) {
-          lastSave = Date.now();
+        if (s.finishedAt || Date.now() - (lastSave.get(s.id) ?? 0) > 2000) {
+          lastSave.set(s.id, Date.now());
           storage.saveRun(s);
         }
       },
     });
-    runs.set(handle.state.id, handle);
+    track(handle);
     if (branchKey) branchKeys.set(handle.state.id, branchKey);
-    void handle.done.then((s) => {
-      branchKeys.delete(s.id);
-      storage.saveRun(s);
-      setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
-      drainQueue(s.flowId);
-    });
     return Object.assign(handle, { warning });
-  }
-
-  /** Runs still going, with the branch they share (if any) — for the concurrency warning. */
-  const branchKeys = new Map<string, string>();
-  function activeRuns(): ActiveRunInfo[] {
-    return [...runs.values()]
-      .filter((h) => !h.state.finishedAt)
-      .map((h) => ({ id: h.state.id, flowName: h.state.flowName, startedAt: h.state.startedAt, branchKey: branchKeys.get(h.state.id) }));
   }
 
   // ---------- triggers ----------
@@ -182,7 +213,7 @@ export function createApi(
   /** Triggered runs waiting because their flow is busy (overlap: queue). */
   const queues = new Map<string, { nodeId: string; event: TriggerEvent }[]>();
   const MAX_QUEUE = 50;
-  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.finishedAt);
+  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.parent && !h.state.finishedAt);
 
   function startTriggered(flowId: string, nodeId: string, event: TriggerEvent): FireOutcome {
     const data = storage.load();
@@ -325,6 +356,16 @@ export function createApi(
     const route = `${method} /${parts.map((p, i) => (isId(i) ? ":id" : p)).join("/")}`;
     noteHost(req.headers.host);
 
+    if (method === "POST" && parts[0] === "runs" && parts[2] === "flags" && parts[4] === "dismiss" && parts.length === 5) {
+      const live = runs.get(parts[1]);
+      const run = live?.state ?? getRun(parts[1]);
+      if (!dismissFlag(run, parts[3])) throw new HttpError(404, "Flag not found");
+      storage.saveRun(run);
+      if (live && !run.finishedAt) listeners.get(run.id)?.forEach((fn) => fn(run));
+      flagListeners.forEach((fn) => fn("flag-dismissed", { runId: run.id, flagId: parts[3] }));
+      return send(res, 200, { ok: true });
+    }
+
     switch (route) {
       case "GET /data":
         return send(res, 200, { ...storage.load(), rev });
@@ -334,10 +375,13 @@ export function createApi(
         const push = (c: DataChange) => res.write(`event: change\ndata: ${JSON.stringify(c)}\n\n`);
         push({ rev, source: "ui" });
         dataListeners.add(push);
+        const pushFlag = (event: string, data: object) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        flagListeners.add(pushFlag);
         const beat = setInterval(() => res.write(": ping\n\n"), 15_000);
         req.on("close", () => {
           clearInterval(beat);
           dataListeners.delete(push);
+          flagListeners.delete(pushFlag);
         });
         return;
       }
@@ -479,7 +523,10 @@ export function createApi(
       case "POST /sandbox/import": {
         const { path: file } = (await readJson<{ path?: string }>(req)) ?? {};
         try {
-          return send(res, 200, { output: await importSandboxImage(storage.load().settings, String(file ?? ""), exec) });
+          const settings = storage.load().settings;
+          // No file picked = load the bundle that shipped with the app.
+          const output = file ? await importSandboxImage(settings, String(file), exec) : await loadBundledSandboxImage(settings, exec);
+          return send(res, 200, { output });
         } catch (e) {
           throw new HttpError(400, (e as Error).message);
         }
@@ -511,7 +558,7 @@ export function createApi(
         const live = [...runs.values()].map((h) => summarize(h.state));
         const liveIds = new Set(live.map((r) => r.id));
         const saved = storage.listRuns(50).filter((r) => !liveIds.has(r.id));
-        const all = [...live, ...saved].sort((a, b) => b.startedAt - a.startedAt).slice(0, 50);
+        const all = limitRuns([...live, ...saved].sort((a, b) => b.startedAt - a.startedAt), 50);
         return send(res, 200, all);
       }
 

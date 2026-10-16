@@ -4,18 +4,28 @@ A visual (n8n-style) flow builder for coding-agent pipelines. Wire **auto** bloc
 **AI** blocks (an agent running in a sandbox via [`@ai-hero/sandcastle`](https://github.com/mattpocock/sandcastle))
 and **manager** blocks (an agent that picks the next step) together on a canvas, then press **Run**.
 
-Sandflow ships as a **desktop app** (Electron — Windows, macOS, Linux) with auto-update, and can also run in the
+Sandflow ships as a **desktop app** (Electron — Windows and Linux) with auto-update, and can also run in the
 browser for development. Either way the flow engine (`backend/`) runs in Node, because git, Docker and the agent CLIs
 can't run in a browser.
 
 ## Install
 
-Download the installer for your OS from the [latest release](https://github.com/kafuexe/sandflow/releases/latest):
-`Sandflow Setup x.y.z.exe` (Windows), `.dmg` (macOS, Apple Silicon or Intel) or `.AppImage` (Linux).
-Installed apps check for updates on start and offer to restart into the new version.
+One installer per OS, from the [latest release](https://github.com/kafuexe/sandflow/releases/latest):
 
-Builds are **not code-signed** yet: Windows SmartScreen shows "Unknown publisher" (More info → Run anyway) and macOS
-needs right-click → Open the first time. macOS auto-update only works for signed builds.
+| OS | Download | |
+|---|---|---|
+| Windows 10/11 (x64) | `Sandflow-Setup-x.y.z.exe` | Guided setup: just for you or all users, install folder, shortcuts |
+| Ubuntu / Debian (x64) | `Sandflow-x.y.z-amd64.deb` | `sudo apt install ./Sandflow-x.y.z-amd64.deb` (pulls in `git`) |
+| Other Linux (x64) | `Sandflow-x.y.z-x86_64.AppImage` | `chmod +x` and run; needs FUSE (`libfuse2`) |
+
+Each installer is self-contained: the app, its Node runtime and the **sandbox image** the agents run in. On first
+start Sandflow loads that image into Docker / Podman by itself, so there's nothing else to download. The Windows
+installer checks for Git and Docker / Podman when it finishes and offers to open their download pages.
+
+Installed apps check for updates on start and offer to restart into the new version (the `.deb` updates in place
+and asks for your password).
+
+Builds are **not code-signed** yet: Windows SmartScreen shows "Unknown publisher" (More info → Run anyway).
 
 ## Prerequisites
 
@@ -37,29 +47,26 @@ inside. With **App updates: Off** the app makes no network calls of its own (oth
 and, while the installed base pack is still the shipped copy, for a newer base pack). The target machine only needs **git** and a **container runtime**
 (Docker or Podman) — or neither runtime if you use *Sandbox: None*.
 
-Each release also ships an **offline bundle** for the sandbox — `sandflow-sandbox-image-<version>-linux-amd64.tar.gz`
-(or `-arm64`, plus a `.sha256`). It's the `sandflow-agent:<version>` image (Node 22, git, jq), built from
-[`sandbox/Dockerfile`](sandbox/Dockerfile). Sandflow **never pulls images**: before a run it checks the image is
-loaded and stops with a clear message if it isn't.
+The sandbox image — `sandflow-agent:<version>` (Node 22, git, jq), built from [`sandbox/Dockerfile`](sandbox/Dockerfile)
+— is inside the installer. Sandflow **never pulls images**: it loads the shipped copy (`docker load` / `podman load`)
+on start and before a run if it's missing, and stops with a clear message if it can't.
 
-1. On a connected machine, download from the release: the installer for your OS, the sandbox bundle for your CPU
-   architecture (and its `.sha256`). Copy them across.
-2. Install Sandflow. On Linux use the `.tar.gz` if the AppImage can't run (it needs FUSE / `libfuse2`).
-3. **Settings → Sandbox → Import offline bundle**: pick the `.tar.gz` (runs `docker load` / `podman load`).
-   Or from a terminal: `docker load -i sandflow-sandbox-image-<version>-linux-amd64.tar.gz`.
-4. **Agent CLI.** The image contains no agent — Claude Code is proprietary, so Sandflow doesn't redistribute it. Put
+1. On a connected machine, download the installer for your OS from the release and copy it across.
+2. Install Sandflow (on Linux, prefer the `.deb` — the AppImage needs FUSE / `libfuse2`). Start it with Docker or
+   Podman running; **Settings → Sandbox** shows the image as loaded (or has a *Load bundled image* button).
+3. **Agent CLI.** The image contains no agent — Claude Code is proprietary, so Sandflow doesn't redistribute it. Put
    the **Linux** `claude` executable (or another agent CLI) you obtained through your own channels in a folder and set
    **Settings → Sandbox → Agent tools folder**. It's mounted read-only at `/opt/sandflow/tools`, which is on `PATH`.
    The image already sets `DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and friends so the CLI
    doesn't try to reach the internet.
-5. Point agents at your internal LLM gateway with the block **Endpoint** (see *Custom endpoint* below).
-6. **Settings → App updates**: *Off*, or *Internal server* — host a release's `latest*.yml` files and installers on
+4. Point agents at your internal LLM gateway with the block **Endpoint** (see *Custom endpoint* below).
+5. **Settings → App updates**: *Off*, or *Internal server* — host a release's `latest*.yml` files and installers on
    an internal web server and enter its URL.
-7. Skills: use bundled or uploaded **file** skills; GitHub skills need internet (`npx skills add`).
-8. Packs: add them from a **folder** or **zip** (Packs → Add pack), or from your internal GitLab / GitHub Enterprise.
+6. Skills: use bundled or uploaded **file** skills; GitHub skills need internet (`npx skills add`).
+7. Packs: add them from a **folder** or **zip** (Packs → Add pack), or from your internal GitLab / GitHub Enterprise.
 
 Using your own image? Set **Settings → Sandbox image** to its name (e.g. `registry.corp:5000/team/agent:1`); it must
-already be present locally. It should keep `ENTRYPOINT ["sleep", "infinity"]`, a writable `HOME=/home/agent`, and
+already be present locally (load it with **Settings → Sandbox → Import offline bundle**, or `docker load`). It should keep `ENTRYPOINT ["sleep", "infinity"]`, a writable `HOME=/home/agent`, and
 work for any UID, like `sandbox/Dockerfile`.
 
 ## Run from source
@@ -239,7 +246,10 @@ Notes:
 - `electron/main.ts` starts the backend on a random `127.0.0.1` port (`backend/server.ts`, which only answers requests
   addressed to that host) and opens the UI in a window. On macOS/Linux it takes `PATH` from your login shell so
   `git`, `docker`, `gh` and the agent CLIs are found. Quitting cancels active runs so sandboxes are torn down.
-- `npm run app:dist` builds an installer for the current OS into `release/` (config: `electron-builder.yml`).
+- `npm run app:dist` builds the installer for the current OS into `release/` (config: `electron-builder.yml`; Windows
+  installer steps in `build/installer.nsh`). To include the sandbox image, run `npm run sandbox:bundle` first (needs
+  Docker or Podman with Linux containers) — without it the app falls back to *Import offline bundle*.
+- The app icon is `build/icon.svg`; `npm run icon` re-renders `build/icon.png` from it.
 - **CI** (`.github/workflows/ci.yml`): typecheck, tests and builds on Windows, macOS and Linux for every push / PR.
 
 ### Releasing
@@ -253,14 +263,14 @@ git push --follow-tags
 ```
 
 `npm version` bumps `package.json` and creates the `vX.Y.Z` tag. The **Release** workflow
-(`.github/workflows/release.yml`) then checks the tag matches `package.json`, creates a draft GitHub Release, builds
-and uploads the Windows / macOS / Linux installers, and publishes the release — which is what installed apps
-auto-update from.
+(`.github/workflows/release.yml`) then checks the tag matches `package.json`, creates a draft GitHub Release with a
+download table, builds the sandbox image once, packs it into the Windows `.exe` and the Linux `.deb` / `.AppImage`,
+uploads them, and publishes the release — which is what installed apps auto-update from. macOS isn't built for now
+(the `mac` section of `electron-builder.yml` is kept for later).
 
 **Auto-update needs public releases.** While the repo is private the app can't read its releases (it logs a 404 and
 keeps working). Make the repo public, or publish releases to a separate public repo (change `publish` in
 `electron-builder.yml` and give the workflow a token for that repo).
 
-**Code signing** (optional; removes the OS warnings and is required for macOS auto-update): add `CSC_LINK` /
-`CSC_KEY_PASSWORD` (and for macOS notarization `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`) as
-repository secrets, pass them to the *Package* step, and remove `CSC_IDENTITY_AUTO_DISCOVERY: "false"`.
+**Code signing** (optional; removes the SmartScreen warning): add `CSC_LINK` / `CSC_KEY_PASSWORD` as repository
+secrets, pass them to the *Package* step, and remove `CSC_IDENTITY_AUTO_DISCOVERY: "false"`.

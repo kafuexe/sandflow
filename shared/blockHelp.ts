@@ -77,6 +77,12 @@ export const CONFIG_FIELDS: Record<keyof BlockConfig, FieldDoc> = {
   },
   script: { type: "object", kinds: ["script"], doc: "{run: command, where: sandbox|host, exits?: [names], timeoutSeconds?}", example: { run: "python scripts/report.py" } },
   subflow: { type: "object", kinds: ["subflow"], doc: "{flowId}: the flow this node runs", example: { flowId: "review-loop" } },
+  stack: {
+    type: "object",
+    kinds: ["stack"],
+    doc: "{flowId, successExits, workspace: shared|isolated, maxConcurrent, maxChildren, maxRetries, splitInstructions, combineInstructions}: split the input into tasks, run the flow once per task, combine the results",
+    example: { flowId: "fix-one-issue", successExits: ["done"], workspace: "isolated", maxConcurrent: 3, maxChildren: 10, maxRetries: 1 },
+  },
   flowOutput: { type: "object", kinds: ["flow-output"], doc: "{name}: the exit this output becomes on the parent's subflow node", example: { name: "approved" } },
 };
 
@@ -211,7 +217,7 @@ export function configProblems(cfg: unknown, kind: BlockKind, forNode = true): s
 function valueProblem(key: keyof BlockConfig, v: unknown): string | undefined {
   switch (key) {
     case "kind": {
-      const kinds: BlockKind[] = ["auto", "ai", "manager", "trigger", "condition", "script", "subflow", "flow-input", "flow-output"];
+      const kinds: BlockKind[] = ["auto", "ai", "manager", "trigger", "condition", "script", "subflow", "stack", "flow-input", "flow-output"];
       return kinds.includes(v as BlockKind) ? undefined : `unknown kind "${v}". Use one of: ${kinds.join(", ")}`;
     }
     case "inputs":
@@ -323,6 +329,9 @@ export function exampleOp(b: BlockDef, cfg: ResolvedConfig): Record<string, unkn
       break;
     case "subflow":
       ov = { subflow: { flowId: "<flow id from list_flows>" } };
+      break;
+    case "stack":
+      ov = { stack: { flowId: "<flow id from list_flows>" } };
       break;
     case "flow-output":
       ov = { flowOutput: { name: "done" } };

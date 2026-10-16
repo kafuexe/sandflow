@@ -161,9 +161,18 @@ export function scratchWorkspace(ctx: RunContext, onHost = false): Promise<strin
  * Without REPO_PATH it is a worktree of the run's scratch workspace (see `scratchWorkspace`).
  */
 export async function getSandbox(ctx: RunContext, kind: SandboxKind = ctx.settings.sandbox): Promise<SandboxLike> {
-  const isDefault = kind === ctx.settings.sandbox;
-  const cached = isDefault ? ctx.sandbox : ctx.sandboxes?.[kind];
+  const cached = kind === ctx.settings.sandbox ? ctx.sandbox : ctx.sandboxes?.[kind];
   if (cached) return cached as SandboxLike;
+  // Calls that arrive while it's being created wait for the same one (stack children sharing a workspace run at once).
+  const pending = (ctx.sandboxPending ??= {});
+  pending[kind] ??= createRunSandbox(ctx, kind).finally(() => {
+    delete pending[kind];
+  });
+  return (await pending[kind]) as SandboxLike;
+}
+
+async function createRunSandbox(ctx: RunContext, kind: SandboxKind): Promise<SandboxLike> {
+  const isDefault = kind === ctx.settings.sandbox;
   const sc = await import("@ai-hero/sandcastle");
   const settings = isDefault ? ctx.settings : { ...ctx.settings, sandbox: kind };
   // Docker/Podman: the image must already be loaded (offline bundle) — never let `docker run` try to pull it.
@@ -189,7 +198,7 @@ export async function getSandbox(ctx: RunContext, kind: SandboxKind = ctx.settin
   const sandbox = await sc.createSandbox({
     branch,
     // A scratch workspace has only its own branch to fork from.
-    baseBranch: scratch ? undefined : ctx.env.BASE_BRANCH?.trim() || undefined,
+    baseBranch: scratch ? undefined : ctx.baseBranch || ctx.env.BASE_BRANCH?.trim() || undefined,
     sandbox: provider as Parameters<typeof sc.createSandbox>[0]["sandbox"],
     cwd: repo,
   });

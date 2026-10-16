@@ -17,9 +17,24 @@ export type EdgeInputKind = "artifact" | "steer";
  * subflow – runs another flow inside this one; its exits are the child flow's Flow output blocks.
  * flow-input / flow-output – where a flow used as a subflow receives its input / hands its result back.
  */
-export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "flow-input" | "flow-output";
+export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "stack" | "flow-input" | "flow-output";
 
-export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment";
+/** A Box Stack: an orchestrator splits the input, runs `flowId` once per task (several at once) and combines the results. */
+export interface StackConfig {
+  flowId: string;
+  /** Child exits that count as success; any other exit, or an error, rejects the attempt. */
+  successExits: string[];
+  /** shared = every child works in this run's sandbox; isolated = a worktree and branch per child. */
+  workspace: "shared" | "isolated";
+  maxConcurrent: number;
+  maxChildren: number;
+  /** Per task: how many times a rejected task is tried again. */
+  maxRetries: number;
+  splitInstructions: string;
+  combineInstructions: string;
+}
+
+export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment" | "merge-parent";
 
 /** Where a condition's result leaves the block. */
 export type BranchHandle = "true" | "false";
@@ -231,6 +246,8 @@ export interface BlockConfig {
   subflow?: { flowId?: string };
   /** flow-output blocks: the exit this output becomes on the subflow node. */
   flowOutput?: { name?: string };
+  /** stack blocks. */
+  stack?: Partial<StackConfig>;
 }
 
 export interface BlockDef {
@@ -269,6 +286,7 @@ export interface ResolvedConfig {
   script: { run: string; where: "sandbox" | "host"; exits: string[]; timeoutSeconds?: number };
   subflow: { flowId: string };
   flowOutput: { name: string };
+  stack: StackConfig;
 }
 
 export interface FlowNodeData {
@@ -509,6 +527,42 @@ export interface LogLine {
   msg: string;
 }
 
+export type FlagSeverity = "warning" | "error";
+
+/** Something that went wrong in a run and needs a look — saved on the run until it's cleared. */
+export interface RunFlag {
+  id: string;
+  severity: FlagSeverity;
+  /** Node key that raised it (`stack1`, `stack1/cr`), if any. */
+  nodeKey?: string;
+  message: string;
+  /** Longer text shown when the flag is expanded. */
+  details?: string;
+  /** Set when the flag was copied up from a child run. */
+  fromRunId?: string;
+  at: number;
+  dismissed?: boolean;
+}
+
+/** Where a stack child run sits in its stack. */
+export interface StackRunInfo {
+  /** One per stack execution (a looping parent gets a new group each time it reaches the stack). */
+  groupId: string;
+  /** The stack node's label. */
+  name: string;
+  /** Task position from the split (0-based). */
+  index: number;
+  total: number;
+  /** Task name from the split. */
+  task: string;
+  /** 1-based. */
+  attempt: number;
+  maxAttempts: number;
+  outcome?: "succeeded" | "rejected" | "dropped";
+  /** Isolated workspace: the child's own branch. */
+  branch?: string;
+}
+
 export interface RunState {
   id: string;
   flowId: string;
@@ -529,6 +583,14 @@ export interface RunState {
   trigger?: TriggerEvent;
   /** Trigger node that fired (absent for manual runs). */
   triggerNodeId?: string;
+  flags?: RunFlag[];
+  /** Set on a run started by another run's stack node. */
+  parent?: { runId: string; nodeKey: string };
+  stack?: StackRunInfo;
+  /** A run started with an input (stack children): what it was handed. */
+  input?: NodeIO;
+  /** A run started with an input (stack children): the Flow output it reached and what it handed back. */
+  result?: { exit?: string; outputs?: NodeIO };
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -605,4 +667,8 @@ export interface RunSummary {
   trigger?: { source: TriggerType; type: string; author?: string; title?: string };
   prompt?: string;
   pendingQuestion?: PendingQuestion;
+  /** Undismissed flags by severity (absent when there are none). */
+  flags?: { warning: number; error: number };
+  parent?: { runId: string; nodeKey: string };
+  stack?: StackRunInfo;
 }

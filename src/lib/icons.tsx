@@ -28,6 +28,8 @@ import {
   LogIn,
   LogOut,
   FileCode,
+  GitMerge,
+  Layers,
   type LucideIcon,
 } from "lucide-react";
 
@@ -61,6 +63,8 @@ export const ICONS: Record<string, LucideIcon> = {
   "log-in": LogIn,
   "log-out": LogOut,
   "file-code": FileCode,
+  layers: Layers,
+  "git-merge": GitMerge,
 };
 
 export function BlockIcon({ name, className }: { name: string; className?: string }) {
