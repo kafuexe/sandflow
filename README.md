@@ -104,6 +104,13 @@ npm run app
   File skills are copied to `~/.claude/skills/<name>/` for Claude Code agents (other agents skip them with a warning).
   With **Sandbox: None** that is *your own* home directory.
 - **Manager**: sees its outgoing connections and routes the task to exactly one of them.
+- **Run on** (AI / manager blocks): *Sandbox container* or *This computer*. On this computer the agent runs the CLI
+  installed here (e.g. `claude` on your `PATH`) with your own login and config — `HOME` and your environment are passed
+  through, and API-key vars like `ANTHROPIC_API_KEY` become optional (they're only passed on with a custom endpoint).
+  It works in the run's worktree of `REPO_PATH` (the same branch container agents use) or, without a project, in a new
+  scratch folder; no Docker or sandbox image is needed for it. Set it per block, per node (Block tab) or for the whole
+  flow (Inputs tab); unset = Settings → Sandbox (None = this computer). **The agent can access everything your user
+  account can.** A pack's block or flow may only choose *This computer* if you trust that pack.
 - **Custom endpoint** (AI / manager blocks): point the agent at an on-prem gateway or proxy. The URL is passed as
   `ANTHROPIC_BASE_URL` (Claude Code) or `OPENAI_BASE_URL` (Codex); for other agents set *Endpoint env var*.
   Set it on *AI Agent (template)* to apply it to every agent block. Add auth vars (e.g. `ANTHROPIC_AUTH_TOKEN`)
@@ -142,7 +149,10 @@ parent's Inputs tab, its steps show in the Run tab as `Subflow › Step`, and a 
 
 ## Triggers & logic
 
-Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar).
+Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar) — no
+manual run is needed first: the trigger arms right away and its first event / scheduled time starts a run. Triggered
+runs need the flow's env vars (set them in the **Inputs** tab; for webhooks also the secret) but no starting prompt:
+the event stands in for it. While something is missing the switch says what and links to Inputs.
 
 - **Schedule**:
   - once at a date and time

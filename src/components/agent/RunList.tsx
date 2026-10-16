@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 import { nodeLabel } from "../../../shared/resolve";
 import type { RunSummary } from "../../../shared/types";
 import { FLAG_TONE, FlagIcon, RUN_TONE, RunStatusIcon, TASK_TONE, ago, useNow } from "./status";
+import { ResizablePanel } from "@/components/ui/resizable";
+import { PANELS } from "@/lib/panelSize";
 
 const flagCount = (r: RunSummary) => (r.flags ? r.flags.warning + r.flags.error : 0);
 
@@ -174,7 +176,7 @@ export function RunList() {
   );
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col border-r bg-card/30" aria-label="Runs">
+    <ResizablePanel panel={PANELS.runList} edge="right" label="Resize runs list" className="flex flex-col border-r bg-card/30" aria-label="Runs">
       <div className="p-3 pb-1">
         <Button
           className="w-full justify-start"
@@ -200,6 +202,6 @@ export function RunList() {
           )}
         </nav>
       </ScrollArea>
-    </aside>
+    </ResizablePanel>
   );
 }

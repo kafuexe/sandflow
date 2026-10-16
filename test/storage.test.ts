@@ -45,6 +45,23 @@ describe("storage", () => {
     expect(again.flows.find((f) => f.id === "base/feature-pipeline")?.name).toBe("Feature pipeline");
   });
 
+  it("keeps a flow's colour across saves and tolerates files without one (or with a bad one)", () => {
+    const dir = tmp();
+    fs.writeFileSync(
+      path.join(dir, "flows.json"),
+      JSON.stringify([
+        { id: "a", name: "A", nodes: [], edges: [] },
+        { id: "b", name: "B", nodes: [], edges: [], color: "chartreuse" },
+      ]),
+    );
+    const s = createStorage(dir);
+    const data = s.load();
+    expect(data.flows.find((f) => f.id === "a")?.color).toBeUndefined();
+    expect(data.flows.find((f) => f.id === "b")).not.toHaveProperty("color");
+    s.saveFlows(data.flows.map((f) => (f.id === "a" ? { ...f, color: "violet" as const } : f)));
+    expect(createStorage(dir).load().flows.find((f) => f.id === "a")?.color).toBe("violet");
+  });
+
   it("migrates pre-pack libraries: unchanged built-ins move to the base pack, edited ones stay yours", () => {
     const dir = tmp();
     const plan = BUILTIN_BLOCKS.find((b) => b.id === "plan")!;

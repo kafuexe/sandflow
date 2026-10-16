@@ -28,7 +28,7 @@ function gitRepo() {
 
 describe("shared sandbox", () => {
   const ctxFor = (repo: string, extra: Partial<RunContext> = {}) =>
-    ({ run: { id: `r${Math.random().toString(16).slice(2, 8)}` }, env: { REPO_PATH: repo, BASE_BRANCH: "main" }, settings, cleanup: [], log: () => {}, ...extra }) as unknown as RunContext;
+    ({ run: { id: `r${Math.random().toString(16).slice(2, 8)}` }, env: { REPO_PATH: repo, BASE_BRANCH: "main" }, settings, cleanup: [], log: () => {}, abort: new AbortController(), ...extra }) as unknown as RunContext;
 
   it("concurrent first uses create the sandbox once", async () => {
     const { repo, git } = gitRepo();

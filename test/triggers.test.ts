@@ -74,6 +74,24 @@ describe("schedule triggers", () => {
     expect(svc.status()).toEqual([]);
   });
 
+  it("a run skipped for missing inputs shows on the trigger until a run starts", () => {
+    let outcome: FireOutcome = { status: "skipped", reason: "missing inputs: REPO_PATH" };
+    const data: AppData = {
+      blocks: BUILTIN_BLOCKS,
+      flows: [flowWith({ type: "schedule", schedule: { kind: "interval", every: 1, unit: "minutes", start: "2026-01-05T00:00" } }, "schedule-trigger")],
+      settings: { startingPrompt: "", sandbox: "none", maxSteps: 40 },
+      env: {},
+    };
+    const svc = createTriggerService({ load: () => data, fire: () => outcome });
+    svc.sync();
+    vi.advanceTimersByTime(30_000);
+    expect(svc.status()[0].lastError).toBe("Run skipped: missing inputs: REPO_PATH");
+    outcome = { status: "started", runId: "r1" };
+    vi.advanceTimersByTime(60_000);
+    expect(svc.status()[0].lastError).toBeUndefined();
+    svc.stop();
+  });
+
   it("a one-off schedule in the past never fires", () => {
     const { svc, fired } = setup(flowWith({ type: "schedule", schedule: { kind: "once", at: "2025-01-01T00:00" } }, "schedule-trigger"));
     expect(svc.status()[0].nextRun).toBeUndefined();

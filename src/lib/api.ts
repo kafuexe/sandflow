@@ -78,7 +78,7 @@ export const api = {
   saveSettings: (settings: Settings) => request("PUT", "/settings", settings),
   saveEnv: (env: EnvValues) => request("PUT", "/env", env),
   /** `prompt` overrides the global starting prompt for this run only. */
-  startRun: (flowId: string, prompt?: string) => request<{ runId: string }>("POST", "/runs", { flowId, prompt }),
+  startRun: (flowId: string, prompt?: string) => request<{ runId: string; warning?: string }>("POST", "/runs", { flowId, prompt }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   sandboxStatus: () =>
@@ -110,19 +110,68 @@ export interface FlagEvent {
   flag: RunFlag;
 }
 
-/** Flags raised and cleared anywhere, live. */
-export function subscribeFlags(onFlag: (e: FlagEvent) => void, onDismissed: (e: { runId: string; flagId: string }) => void): () => void {
-  const es = new EventSource("/api/data/events");
-  es.addEventListener("flag", (ev) => onFlag(JSON.parse((ev as MessageEvent).data) as FlagEvent));
-  es.addEventListener("flag-dismissed", (ev) => onDismissed(JSON.parse((ev as MessageEvent).data) as { runId: string; flagId: string }));
-  return () => es.close();
+/**
+ * One connection to /api/data/events for the whole app, however many subscribe: each EventSource holds one of the
+ * browser's ~6 connections per host. Closed when the last subscriber leaves.
+ */
+let dataEvents: EventSource | undefined;
+let dataSubscribers = 0;
+/** The latest change event, replayed to a subscriber that joins an open connection (it missed the initial one). */
+let lastChange: DataChange | undefined;
+
+function onDataEvents(listeners: Record<string, (ev: MessageEvent) => void>): () => void {
+  if (!dataEvents) {
+    dataEvents = new EventSource("/api/data/events");
+    lastChange = undefined;
+    dataEvents.addEventListener("change", (ev) => (lastChange = JSON.parse((ev as MessageEvent).data) as DataChange));
+  }
+  const es = dataEvents;
+  dataSubscribers++;
+  for (const [type, fn] of Object.entries(listeners)) es.addEventListener(type, fn as EventListener);
+  return () => {
+    for (const [type, fn] of Object.entries(listeners)) es.removeEventListener?.(type, fn as EventListener);
+    if (--dataSubscribers === 0 && dataEvents === es) {
+      es.close();
+      dataEvents = undefined;
+    }
+  };
 }
 
-/** Flows/blocks changed on the server (e.g. by the assistant). */
-export function subscribeData(onChange: (c: DataChange) => void): () => void {
-  const es = new EventSource("/api/data/events");
-  es.addEventListener("change", (ev) => onChange(JSON.parse((ev as MessageEvent).data) as DataChange));
-  return () => es.close();
+/** Flags raised and cleared anywhere, live. */
+export function subscribeFlags(onFlag: (e: FlagEvent) => void, onDismissed: (e: { runId: string; flagId: string }) => void): () => void {
+  return onDataEvents({
+    flag: (ev) => onFlag(JSON.parse(ev.data) as FlagEvent),
+    "flag-dismissed": (ev) => onDismissed(JSON.parse(ev.data) as { runId: string; flagId: string }),
+  });
+}
+
+/**
+ * Flows/blocks changed on the server (e.g. by the assistant). `initial` marks the server's current revision, sent
+ * first on every (re)connect — after a server restart it can be lower than the one the client saw.
+ */
+export function subscribeData(onChange: (c: DataChange, initial: boolean) => void): () => void {
+  let initial = true;
+  let closed = false;
+  const joined = lastChange;
+  const unsubscribe = onDataEvents({
+    open: () => (initial = true),
+    change: (ev) => {
+      const first = initial;
+      initial = false;
+      onChange(JSON.parse(ev.data) as DataChange, first);
+    },
+  });
+  // Joined a connection that already delivered the initial revision: hand it over as this subscriber's initial one.
+  if (joined)
+    queueMicrotask(() => {
+      if (closed || !initial) return;
+      initial = false;
+      onChange(joined, true);
+    });
+  return () => {
+    closed = true;
+    unsubscribe();
+  };
 }
 
 /** Live chat state (streams while the assistant answers). */

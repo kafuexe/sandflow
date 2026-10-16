@@ -1,21 +1,22 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { nodeLabel } from "../../shared/resolve";
 import type { FlowNode, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { withMergeLock } from "../stack";
+import { runTree } from "../proc";
 import { codeOwner, trustedOnHost } from "./trust";
 
 const execFileP = promisify(execFile);
 
-async function run(cmd: string, args: string[], cwd: string, signal?: AbortSignal) {
-  try {
-    const { stdout } = await execFileP(cmd, args, { cwd, signal, maxBuffer: 20 * 1024 * 1024, windowsHide: true });
-    return stdout.trim();
-  } catch (e) {
-    const err = e as Error & { stderr?: string };
-    throw new Error(`${cmd} ${args[0] ?? ""} failed: ${(err.stderr || err.message).trim()}`);
+/** Run a command; Stop kills it and everything it started (git push → ssh, gh → …). */
+async function run(cmd: string, args: string[], cwd: string, signal?: AbortSignal, env?: NodeJS.ProcessEnv) {
+  const r = await runTree(cmd, args, { cwd, signal, env });
+  if (r.killed === "cancelled") throw new Error("Run cancelled");
+  if (r.killed || r.code !== 0) {
+    throw new Error(`${cmd} ${args[0] ?? ""} failed: ${(r.stderr.trim() || r.killed || `exit code ${r.code}`).trim()}`);
   }
+  return r.stdout.trim();
 }
 
 function requireEnv(env: Record<string, string>, name: string): string {
@@ -93,19 +94,8 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
 
   if (cfg.autoAction === "post-comment") {
     const { cmd, args } = commentCommand(ctx.run.trigger, inputs.artifact ?? "");
-    let out: string;
-    try {
-      const r = await execFileP(cmd, args, {
-        signal,
-        windowsHide: true,
-        maxBuffer: 5 * 1024 * 1024,
-        env: { ...process.env, ...env }, // e.g. GH_TOKEN / GITLAB_TOKEN if the block declares them
-      });
-      out = r.stdout;
-    } catch (e) {
-      const err = e as Error & { stderr?: string };
-      throw new Error(`${cmd} api failed: ${(err.stderr || err.message).trim()}`);
-    }
+    // e.g. GH_TOKEN / GITLAB_TOKEN if the block declares them
+    const out = await run(cmd, args, process.cwd(), signal, { ...process.env, ...env });
     let url: string | undefined;
     try {
       const j = JSON.parse(out) as { html_url?: string; id?: number };
@@ -190,24 +180,16 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
       if (!trustedOnHost(ctx, owner)) {
         throw new Error(`This command comes from pack "${owner}", which isn't allowed to run code on this machine (Packs → ${owner}). Command: ${cmd}`);
       }
-      const stdout = await new Promise<string>((resolve, reject) => {
-        const child = spawn(cmd, {
-          shell: true,
-          cwd: repo,
-          signal,
-          windowsHide: true,
-          env: { ...process.env, ...env, SANDFLOW_ARTIFACT: inputs.artifact ?? "", SANDFLOW_STEER: inputs.steer ?? "" },
-        });
-        let out = "";
-        let err = "";
-        child.stdout.on("data", (d) => (out += d));
-        child.stderr.on("data", (d) => (err += d));
-        child.on("error", reject);
-        child.on("close", (code) => {
-          if (code === 0) resolve(out);
-          else reject(new Error(`Command exited with code ${code}${err.trim() ? `: ${err.trim().slice(-2000)}` : ""}`));
-        });
+      // Its own process group: Stop kills the shell and everything it started, not just the shell.
+      const r = await runTree(cmd, null, {
+        cwd: repo,
+        signal,
+        env: { ...process.env, ...env, SANDFLOW_ARTIFACT: inputs.artifact ?? "", SANDFLOW_STEER: inputs.steer ?? "" },
       });
+      if (r.killed === "cancelled") throw new Error("Run cancelled");
+      if (r.killed) throw new Error(`Command ${r.killed}`);
+      if (r.code !== 0) throw new Error(`Command exited with code ${r.code}${r.stderr.trim() ? `: ${r.stderr.trim().slice(-2000)}` : ""}`);
+      const stdout = r.stdout;
       return { outputs: { artifact: stdout.trim() } };
     }
   }

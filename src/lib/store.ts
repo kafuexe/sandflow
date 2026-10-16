@@ -6,14 +6,18 @@ import type {
   BlockDef,
   EnvValues,
   Flow,
+  FlowColor,
   FlowEdge,
   FlowNode,
+  RunOn,
   RunState,
   RunSummary,
   Settings,
 } from "../../shared/types";
 import { cloneFlow, newFlow } from "../../shared/flows";
 import { api, ApiError, subscribeData, subscribeRun, type TriggersInfo } from "./api";
+import { pickFlowId, saveFlowId, savedFlowIds } from "./activeFlow";
+import { mergeRun, runToShow } from "./runSelection";
 
 type Section = "blocks" | "flows" | "settings" | "env";
 export type SaveStatus = "saved" | "pending" | "saving" | "error";
@@ -33,7 +37,10 @@ interface State {
   /** Packs dialog open. */
   packsOpen: boolean;
   sideTab: SideTab;
+  /** The run shown on the canvas and in the Run tab (several may be going; see `runs`). */
   run?: RunState;
+  /** A warning the server gave when starting a run (e.g. it shares a branch with another run). */
+  runWarning?: { runId: string; message: string };
   /** Recent runs (manual + triggered), newest first. */
   runs: RunSummary[];
   triggers?: TriggersInfo;
@@ -60,8 +67,12 @@ interface State {
   /** New empty flow, or a copy of `fromFlowId` (any flow, including a pack's). */
   createFlow(name: string, fromFlowId?: string): void;
   renameFlow(id: string, name: string): void;
+  /** Tag a flow with a palette colour, or clear it (undefined). */
+  setFlowColor(id: string, color: FlowColor | undefined): void;
   /** Turn a flow's triggers on/off. */
   setFlowActive(id: string, active: boolean): void;
+  /** Where the flow's agents run by default (undefined = Settings → Sandbox). */
+  setFlowRunOn(id: string, runOn: RunOn | undefined): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
   addNode(blockId: string, position: { x: number; y: number }, data?: Partial<FlowNode["data"]>): void;
@@ -82,12 +93,14 @@ interface State {
   setPacksOpen(open: boolean): void;
   setSideTab(tab: SideTab): void;
   // runs
+  /** Start a run of the current flow — also while other runs (of this or other flows) are going. */
   startRun(): Promise<void>;
   /** Show this run in the Run tab (and on the canvas if it belongs to the current flow). */
   watch(runId: string): Promise<void>;
   /** Refresh the runs list + trigger status (polled while the app is open). */
   refreshActivity(): Promise<void>;
-  cancelRun(): Promise<void>;
+  /** Stop a run (default: the one shown). */
+  cancelRun(runId?: string): Promise<void>;
   answer(text: string): Promise<void>;
 }
 
@@ -95,13 +108,19 @@ const uid = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2,
 
 let dirty = new Set<Section>();
 let timer: ReturnType<typeof setTimeout> | undefined;
+/** A save is scheduled (debounce running) — it will write `dirty`, or get a 409 and reload. */
+let saveScheduled = false;
 let unsubscribeRun: (() => void) | undefined;
 let unsubscribeData: (() => void) | undefined;
 /** Server revision of flows + blocks this client last saw. */
 let rev = 0;
+/** The reload in flight (reloads run one at a time), and whether another change arrived meanwhile. */
+let reloading: Promise<void> | undefined;
+let reloadAgain = false;
 
 export const useStore = create<State>((set, get) => {
   async function flush() {
+    saveScheduled = false;
     const data = get().data;
     if (!data || !dirty.size) return;
     const sections = dirty;
@@ -109,8 +128,9 @@ export const useStore = create<State>((set, get) => {
     set({ saveStatus: "saving", saveError: undefined });
     try {
       for (const s of sections) {
-        if (s === "blocks") rev = (await api.saveBlocks(data.blocks, rev)).rev;
-        if (s === "flows") rev = (await api.saveFlows(data.flows, rev)).rev;
+        // Never step back: a reload may already have seen a newer (assistant) revision.
+        if (s === "blocks") rev = Math.max(rev, (await api.saveBlocks(data.blocks, rev)).rev);
+        if (s === "flows") rev = Math.max(rev, (await api.saveFlows(data.flows, rev)).rev);
         if (s === "settings") await api.saveSettings(data.settings);
         if (s === "env") await api.saveEnv(data.env);
       }
@@ -140,11 +160,48 @@ export const useStore = create<State>((set, get) => {
     }, 2600);
   }
 
+  /** Read flows/blocks from the server, keeping unsaved settings/env. */
+  async function fetchData() {
+    try {
+      const { rev: r, ...server } = await api.getData();
+      // Flow/block edits made while this was loading: leave them (and the old rev) alone — their save gets a 409 and
+      // reloads, saying the edit was replaced. Applying the server's copy here would drop them without a word.
+      if (saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) return;
+      rev = r;
+      const local = get().data;
+      const data: AppData = {
+        ...server,
+        settings: local && dirty.has("settings") ? local.settings : server.settings,
+        env: local && dirty.has("env") ? local.env : server.env,
+      };
+      const cur = get().currentFlowId;
+      const sel = get().selectedNodeId;
+      const flow = data.flows.find((f) => f.id === cur) ?? data.flows[0];
+      set({
+        data,
+        currentFlowId: flow?.id ?? null,
+        selectedNodeId: flow?.nodes.some((n) => n.id === sel) ? sel : null,
+      });
+      if (!saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) {
+        // Flow/block edits whose save failed were just replaced by the server's version: nothing left to retry.
+        dirty.delete("flows");
+        dirty.delete("blocks");
+        if (!dirty.size && get().saveStatus === "error") set({ saveStatus: "saved", saveError: undefined });
+      }
+    } catch {
+      /* keep what we have; the next change event retries */
+    }
+  }
+
   function watchData() {
     unsubscribeData?.();
-    unsubscribeData = subscribeData((c) => {
-      if (c.rev <= rev) return; // our own save, or already loaded
-      if (dirty.has("flows") || dirty.has("blocks")) return; // the pending save will get a 409 and reload
+    unsubscribeData = subscribeData((c, initial) => {
+      // On (re)connect the server says where it is: any other revision means we missed changes, or the server
+      // restarted (its revisions start over, so later changes would look old and be skipped).
+      if (initial ? c.rev === rev : c.rev <= rev) return; // our own save, or already loaded
+      // A scheduled save of local flow/block edits will get a 409 and reload. Without one (e.g. the last
+      // save failed) nothing else would pick the change up, so reload now — the server's version wins.
+      if (saveScheduled && (dirty.has("flows") || dirty.has("blocks"))) return;
       void get().reload().then(() => {
         if (c.source === "assistant" && c.flowId === get().currentFlowId) flash(c.touched ?? []);
       });
@@ -155,6 +212,7 @@ export const useStore = create<State>((set, get) => {
     sections.forEach((s) => dirty.add(s));
     set({ saveStatus: "pending" });
     clearTimeout(timer);
+    saveScheduled = true;
     timer = setTimeout(flush, 500);
   }
 
@@ -176,7 +234,9 @@ export const useStore = create<State>((set, get) => {
     unsubscribeRun?.();
     unsubscribeRun = subscribeRun(runId, (run) => {
       const prev = get().run;
-      set({ run });
+      // Ignore a late event of a run we've since switched away from.
+      if (prev && prev.id !== run.id) return;
+      set({ run, runs: mergeRun(get().runs, run) });
       if (run.pendingQuestion && !prev?.pendingQuestion) set({ sideTab: "run" });
     });
   }
@@ -198,33 +258,27 @@ export const useStore = create<State>((set, get) => {
       try {
         const { rev: r, ...data } = await api.getData();
         rev = r;
-        set({ data, currentFlowId: data.flows[0]?.id ?? null, loadError: undefined });
+        // Reopen the flow that was open before the refresh (first flow only if it's gone).
+        set({ data, currentFlowId: pickFlowId(data.flows, savedFlowIds()), loadError: undefined });
         watchData();
       } catch (e) {
         set({ loadError: (e as Error).message });
       }
     },
-    async reload() {
-      try {
-        const { rev: r, ...server } = await api.getData();
-        rev = r;
-        const local = get().data;
-        const data: AppData = {
-          ...server,
-          settings: local && dirty.has("settings") ? local.settings : server.settings,
-          env: local && dirty.has("env") ? local.env : server.env,
-        };
-        const cur = get().currentFlowId;
-        const sel = get().selectedNodeId;
-        const flow = data.flows.find((f) => f.id === cur) ?? data.flows[0];
-        set({
-          data,
-          currentFlowId: flow?.id ?? null,
-          selectedNodeId: flow?.nodes.some((n) => n.id === sel) ? sel : null,
-        });
-      } catch {
-        /* keep what we have; the next change event retries */
+    reload() {
+      // One at a time: overlapping reloads could land out of order and put an older version back.
+      // A change that arrives meanwhile gets one more pass once the current one is done.
+      if (reloading) {
+        reloadAgain = true;
+        return reloading;
       }
+      reloading = (async () => {
+        do {
+          reloadAgain = false;
+          await fetchData();
+        } while (reloadAgain);
+      })().finally(() => (reloading = undefined));
+      return reloading;
     },
 
     async flushSaves() {
@@ -253,6 +307,19 @@ export const useStore = create<State>((set, get) => {
 
     setCurrentFlow(id) {
       set({ currentFlowId: id, selectedNodeId: null });
+      // Show that flow's latest active run on the canvas (without pulling the side panel to the Run tab).
+      const { runs, run } = get();
+      const show = runToShow(runs, id, run);
+      if (show && show !== run?.id) {
+        void api.getRun(show).then(
+          (r) => {
+            if (get().currentFlowId !== id) return;
+            set({ run: r });
+            watchRun(r.id);
+          },
+          () => {},
+        );
+      }
     },
     createFlow(name, fromFlowId) {
       const source = fromFlowId ? get().data?.flows.find((f) => f.id === fromFlowId) : undefined;
@@ -263,6 +330,10 @@ export const useStore = create<State>((set, get) => {
     setFlowActive(id, active) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, active } : f)) }), "flows");
+    },
+    setFlowRunOn(id, runOn) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : runOn ? { ...f, runOn } : (({ runOn: _, ...rest }) => rest)(f))) }), "flows");
     },
     async watch(runId) {
       try {
@@ -287,6 +358,14 @@ export const useStore = create<State>((set, get) => {
     renameFlow(id, name) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, name } : f)) }), "flows");
+    },
+    setFlowColor(id, color) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      const recolor = (f: Flow): Flow => {
+        const { color: _old, ...rest } = f;
+        return color ? { ...rest, color } : rest;
+      };
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? recolor(f) : f)) }), "flows");
     },
     deleteFlow(id) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
@@ -401,17 +480,27 @@ export const useStore = create<State>((set, get) => {
       }
       try {
         set({ runError: undefined });
-        const { runId } = await api.startRun(flowId);
-        set({ run: await api.getRun(runId), sideTab: "run" });
+        const { runId, warning } = await api.startRun(flowId);
+        const run = await api.getRun(runId);
+        // The new run becomes the one shown; runs already going carry on (top bar → "N running" to switch back).
+        set({ run, runs: mergeRun(get().runs, run), sideTab: "run", runWarning: warning ? { runId, message: warning } : undefined });
         watchRun(runId);
       } catch (e) {
         const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
         set({ runError: missing ? `Missing: ${missing.join(", ")}` : (e as Error).message });
       }
     },
-    async cancelRun() {
+    async cancelRun(runId) {
       const run = get().run;
-      if (run && !run.finishedAt) await api.cancel(run.id).catch(() => {});
+      const id = runId ?? (run && !run.finishedAt ? run.id : undefined);
+      if (!id) return;
+      try {
+        await api.cancel(id);
+      } catch (e) {
+        // Already finished (404) is fine; anything else is worth showing.
+        if (!(e instanceof ApiError && e.status === 404)) set({ runError: (e as Error).message });
+      }
+      void get().refreshActivity();
     },
     async answer(text) {
       const run = get().run;
@@ -426,5 +515,11 @@ export const useStore = create<State>((set, get) => {
 });
 
 /** The flow currently shown on the canvas. */
+// Keep the open flow in the URL + localStorage so a refresh comes back to it. Only after data has
+// loaded, so the initial null doesn't wipe what load() is about to restore.
+useStore.subscribe((s, prev) => {
+  if (s.data && (s.currentFlowId !== prev.currentFlowId || !prev.data)) saveFlowId(s.currentFlowId);
+});
+
 export const useCurrentFlow = () =>
   useStore((s) => s.data?.flows.find((f) => f.id === s.currentFlowId) ?? null);

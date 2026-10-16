@@ -13,10 +13,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { BlockIcon, ICONS } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { ENDPOINT_ENV } from "../../shared/agents";
-import { applyConfig, ENV_NAME_RE, resolveInherited, wouldCycle } from "../../shared/resolve";
+import { applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, resolveInherited, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
 import { ConditionEditor } from "./ConditionEditor";
+import { HostWarning, RunOnSelect } from "./RunOnSelect";
 import { SkillsEditor } from "./SkillsEditor";
 import { TriggerEditor } from "./TriggerEditor";
 
@@ -75,17 +76,34 @@ export function BlockEditor() {
   const [draft, setDraft] = useState<BlockDef | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [envInput, setEnvInput] = useState("");
+  /** The saved block the draft was copied from (to follow changes made elsewhere, e.g. by the assistant). */
+  const [source, setSource] = useState<BlockDef | null>(null);
 
   useEffect(() => {
     setErrors([]);
     setEnvInput("");
-    if (!target || !data) return setDraft(null);
-    if ("create" in target) setDraft(newBlock(target.create === "template", data.blocks));
-    else {
+    if (!target || !data) {
+      setSource(null);
+      return setDraft(null);
+    }
+    if ("create" in target) {
+      setSource(null);
+      setDraft(newBlock(target.create === "template", data.blocks));
+    } else {
       const b = data.blocks.find((x) => x.id === target.id);
+      setSource(b ?? null);
       setDraft(b ? structuredClone(b) : null);
     }
   }, [target, data?.blocks.length]);
+
+  // The block changed while the dialog is open (the assistant saved it): show the new version, unless you've
+  // started editing — then your draft stays and saving it wins.
+  const stored = target && "id" in target ? data?.blocks.find((x) => x.id === target.id) : undefined;
+  useEffect(() => {
+    if (!stored || !source || stored === source) return;
+    if (JSON.stringify(draft) === JSON.stringify(source)) setDraft(structuredClone(stored));
+    setSource(stored);
+  }, [stored]);
 
   const blocks = useMemo(() => {
     if (!data || !draft) return [];
@@ -338,6 +356,12 @@ export function BlockEditor() {
                 </Button>
               </form>
             </div>
+            {cfg.env.includes(PROJECT_ENV) && envOptionalFor(cfg, PROJECT_ENV) && (
+              <p className="mt-1.5 text-[11px] text-muted-foreground">
+                <code>{PROJECT_ENV}</code> is optional for agents: leave it empty for tasks that don&apos;t need a project (summarising, answering,
+                drafting) and the agent works in a fresh, empty temporary folder, deleted after the run (kept when the agent ran on this computer).
+              </p>
+            )}
           </Field>
 
           <Separator />
@@ -470,6 +494,10 @@ export function BlockEditor() {
                   </Select>
                 </Field>
               </div>
+              <Field label="Run on" overridden={c.runOn !== undefined} onReset={() => setCfg({ runOn: undefined })} inheritable>
+                <RunOnSelect value={cfg.runOn} onChange={(runOn) => setCfg({ runOn })} inheritLabel="Flow default (else Settings → Sandbox)" />
+              </Field>
+              {cfg.runOn === "host" && <HostWarning />}
               <div className="grid grid-cols-[2fr_1fr] gap-4">
                 <Field label="Endpoint (on-prem / proxy — empty = provider default)" overridden={c.agent?.endpoint !== undefined} onReset={() => setAgent("endpoint", undefined)} inheritable>
                   <Input

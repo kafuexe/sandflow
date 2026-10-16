@@ -1,7 +1,6 @@
 // "Edit with AI" chats: saved per flow under <data>/chats/. Each turn runs the chat's agent CLI (any agent a block
 // can use) on the host; its only way to change things is Sandflow's MCP server, scoped to the chat's flow.
 
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,6 +12,7 @@ import { validateAssistantAgent } from "../shared/settings";
 import type { AppData, AssistantAgent, Chat, ChatMessage, ChatSummary } from "../shared/types";
 import { ADAPTERS, MCP_BRIDGE, type AdapterTurn, type AssistantEvent } from "./assistantAgents";
 import type { Mcp } from "./mcp";
+import { killTree, spawnTree } from "./proc";
 
 export type { AssistantEvent } from "./assistantAgents";
 
@@ -88,10 +88,11 @@ export const cliRunner: AssistantRunner = async function* (turn) {
   const bin = resolveCli(adapter.bins, turn.env);
   const opts = { cwd: turn.workDir, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"] };
   const child = bin.viaCmd
-    ? spawn(turn.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", cmdLine(bin.cmd, command.args)], { ...opts, env: turn.env, windowsVerbatimArguments: true })
-    : spawn(bin.cmd, [...bin.args, ...command.args], { ...opts, env: bin.args.length ? { ...turn.env, ELECTRON_RUN_AS_NODE: "1" } : turn.env });
+    ? spawnTree(turn.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", cmdLine(bin.cmd, command.args)], { ...opts, env: turn.env, windowsVerbatimArguments: true })
+    : spawnTree(bin.cmd, [...bin.args, ...command.args], { ...opts, env: bin.args.length ? { ...turn.env, ELECTRON_RUN_AS_NODE: "1" } : turn.env });
 
-  const kill = () => child.kill();
+  // The agent CLI starts tools / MCP servers of its own: Stop kills all of them.
+  const kill = () => killTree(child);
   turn.signal.addEventListener("abort", kill, { once: true });
   let stderr = "";
   child.stderr.on("data", (d: Buffer) => (stderr = (stderr + d.toString()).slice(-4000)));
@@ -128,7 +129,7 @@ export const cliRunner: AssistantRunner = async function* (turn) {
     }
   } finally {
     turn.signal.removeEventListener("abort", kill);
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode === null) killTree(child);
   }
 };
 
@@ -147,11 +148,11 @@ export function systemPrompt(flowName: string, flowId: string, tools: "mcp" | "t
   } else {
     lines.push(
       "You have no tools here. Each message includes the flow's current state and the block library. To change the flow, end your reply with ONE fenced block tagged `sandflow-ops` holding JSON:",
-      "- an array of edit ops: add_node {id, block, label?, overrides?}, update_node {id, block?, label?, overrides?}, remove_node {id}, connect {edge}, disconnect {edge}, rename_flow {name}, auto_layout — e.g.",
-      '```sandflow-ops\n[{"op":"add_node","id":"review","block":"cr"},{"op":"connect","edge":"impl.artifact -> review.artifact"}]\n```',
-      '- or {"replace": {"name"?: "...", "nodes": [{id, block, label?, overrides?}], "edges": ["a.artifact -> b.artifact"]}} to rebuild the whole flow.',
+      "- an array of edit ops: add_node {block, id?, label?, overrides?, from?, to?}, update_node {id, block?, label?, overrides?}, remove_node {id}, connect {from, to} or {edge}, disconnect {edge} or {from, to}, rename_flow {name}, auto_layout — e.g.",
+      '```sandflow-ops\n[{"op":"add_node","id":"review","block":"base/cr","from":"impl"},{"op":"add_node","block":"base/shell","from":"review","overrides":{"shellCommand":"npm test"}}]\n```',
+      '- or {"replace": {"name"?: "...", "nodes": [{id, block, label?, overrides?, from?, to?}], "edges"?: ["a.artifact -> b.artifact"]}} to rebuild the whole flow.',
       "Sandflow applies it and replies if it failed so you can send a corrected block. Only include the block when you want changes. You can't set env values or run flows.",
-      "The guide below names MCP tools; in this chat the ops block does the same job (edit_flow = ops array, replace_flow = replace).",
+      "The guide below names MCP tools; in this chat the ops block does the same job (edit_flow / add_node / update_node / connect = ops array, replace_flow = replace). get_block isn't available here: the block library below lists each block's kind, handles and env.",
     );
   }
   lines.push(
@@ -275,7 +276,7 @@ export function createChatService(opts: { dir: string; load(): AppData; mcp: Mcp
         if (adapter.tools === "text") {
           const now = opts.load();
           const current = now.flows.find((f) => f.id === flow.id) ?? flow;
-          parts.push(`# Current flow\n\n${describeFlow(current, now.blocks)}`, `# Block library\n\n${describeBlocks(now.blocks)}`);
+          parts.push(`# Current flow\n\n${describeFlow(current, now.blocks, now.flows)}`, `# Block library\n\n${describeBlocks(now.blocks)}`);
         }
         const prompt = parts.length ? `${parts.join("\n\n")}\n\n# Request\n\n${request}` : request;
 

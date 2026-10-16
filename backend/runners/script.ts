@@ -12,7 +12,6 @@
 //  - in a throwaway container (`docker run --rm`) otherwise, e.g. a pack that brings its own image / Dockerfile;
 //  - on this machine only for `where: "host"` or Sandbox: None, and only for your own blocks and trusted packs.
 
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -23,7 +22,8 @@ import type { FlowNode, NodeIO, PackManifest, ResolvedConfig, Settings } from ".
 import type { NodeResult, RunContext } from "../engine";
 import type { PackRuntimeInfo } from "../packs";
 import { tail } from "../prompt";
-import { imageOf } from "../sandbox";
+import { runTree } from "../proc";
+import { execCli, imageOf } from "../sandbox";
 import { getSandbox, type SandboxLike } from "./ai";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
 
@@ -65,56 +65,16 @@ interface Captured {
   stderr: string;
 }
 
-/** Run a command (argv, or a shell string when `args` is null) with stdin, streaming stdout lines. */
-function spawnCapture(
+/** Run a command (argv, or a shell string when `args` is null) with stdin, streaming stdout lines. Stop / a timeout kills its whole process tree. */
+async function spawnCapture(
   cmd: string,
   args: string[] | null,
-  o: { cwd?: string; env?: NodeJS.ProcessEnv; stdin?: string; timeoutMs?: number; signal?: AbortSignal; onLine?: (l: string) => void },
+  o: { cwd?: string; env?: NodeJS.ProcessEnv; stdin?: string; timeoutMs?: number; signal?: AbortSignal; onLine?: (l: string) => void; onKill?: () => void },
 ): Promise<Captured> {
-  return new Promise((resolve, reject) => {
-    const child = args === null
-      ? spawn(cmd, { shell: true, cwd: o.cwd, env: o.env, windowsHide: true })
-      : spawn(cmd, args, { cwd: o.cwd, env: o.env, windowsHide: true });
-    let stdout = "";
-    let stderr = "";
-    let partial = "";
-    let killed = "";
-    const kill = (why: string) => {
-      killed = why;
-      child.kill("SIGKILL");
-    };
-    const timer = o.timeoutMs ? setTimeout(() => kill(`timed out after ${Math.round(o.timeoutMs! / 1000)}s`), o.timeoutMs) : undefined;
-    const onAbort = () => kill("cancelled");
-    o.signal?.addEventListener("abort", onAbort, { once: true });
-    child.stdout.on("data", (d: Buffer) => {
-      const s = d.toString();
-      stdout += s;
-      if (stdout.length > 20 * 1024 * 1024) kill("printed more than 20 MB");
-      if (o.onLine) {
-        const lines = (partial + s).split(/\r?\n/);
-        partial = lines.pop() ?? "";
-        lines.forEach((l) => l.trim() && o.onLine!(l));
-      }
-    });
-    child.stderr.on("data", (d: Buffer) => {
-      stderr = (stderr + d.toString()).slice(-64 * 1024);
-    });
-    child.stdin.on("error", () => {
-      /* the command didn't read its stdin */
-    });
-    child.stdin.end(o.stdin ?? "");
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      o.signal?.removeEventListener("abort", onAbort);
-      if (partial.trim() && o.onLine) o.onLine(partial);
-      if (killed) reject(new Error(`Script ${killed}`));
-      else resolve({ code: code ?? 1, stdout, stderr });
-    });
-  });
+  const r = await runTree(cmd, args, { ...o, onKill: o.onKill });
+  if (r.killed === "cancelled") throw new Error("Run cancelled");
+  if (r.killed) throw new Error(`Script ${r.killed}`);
+  return { code: r.code, stdout: r.stdout, stderr: r.stderr };
 }
 
 function binLines(m: PackManifest, dir: string, archVar = "$A"): string[] {
@@ -145,7 +105,39 @@ export function prepareScript(m: PackManifest, src: string, dirExpr: string): st
   ].join("\n");
 }
 
-const preparing = new Map<string, Promise<string>>();
+/**
+ * Host preparations in progress, shared by every run that needs the same pack version. A preparation isn't tied to
+ * the run that started it: each run waits with its own Stop, and the setup itself is only killed once every run
+ * waiting for it has been stopped.
+ */
+const preparing = new Map<string, { promise: Promise<string>; abort: AbortController; waiters: number }>();
+
+/** Wait for a shared preparation; stopping this run stops only this run's wait (and the setup once nobody waits). */
+function awaitPrep(entry: { promise: Promise<string>; abort: AbortController; waiters: number }, signal: AbortSignal): Promise<string> {
+  if (signal.aborted) return Promise.reject(new Error("Run cancelled"));
+  entry.waiters++;
+  return new Promise<string>((resolve, reject) => {
+    // Each waiter leaves exactly once: by its own Stop, or when the preparation settles.
+    let left = false;
+    const leave = () => {
+      if (left) return false;
+      left = true;
+      signal.removeEventListener("abort", onAbort);
+      entry.waiters--;
+      return true;
+    };
+    const onAbort = () => {
+      if (!leave()) return;
+      if (entry.waiters <= 0) entry.abort.abort();
+      reject(new Error("Run cancelled"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    entry.promise.then(
+      (v) => leave() && resolve(v),
+      (e) => leave() && reject(e),
+    );
+  });
+}
 
 /** A prepared copy of the pack on this machine: `<runtimeRoot>/<id>-<hash>` with setup done and executables in `.sandflow-bin`. */
 async function prepareOnHost(ctx: RunContext, info: PackRuntimeInfo, nodeId: string): Promise<string> {
@@ -153,7 +145,10 @@ async function prepareOnHost(ctx: RunContext, info: PackRuntimeInfo, nodeId: str
   const dir = path.join(root, `${info.id}-${info.hash.slice(0, 12)}`);
   const key = dir;
   const existing = preparing.get(key);
-  if (existing) return existing;
+  // A preparation everyone stopped waiting for is being killed — start a new one instead of joining it.
+  if (existing && !existing.abort.signal.aborted) return awaitPrep(existing, ctx.abort.signal);
+  if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
+  const abort = new AbortController();
   const p = (async () => {
     if (fs.existsSync(path.join(dir, ".sandflow-ready"))) return dir;
     ctx.log("info", `Preparing pack ${info.id} on this machine…`, nodeId);
@@ -162,7 +157,7 @@ async function prepareOnHost(ctx: RunContext, info: PackRuntimeInfo, nodeId: str
     fs.cpSync(info.dir, dir, { recursive: true, filter: (s) => !/[\\/](\.git|node_modules)([\\/]|$)/.test(path.relative(info.dir, s)) });
     if (info.manifest.setup?.trim()) {
       ctx.log("info", `Setup: ${info.manifest.setup.trim()}`, nodeId);
-      const r = await spawnCapture(info.manifest.setup.trim(), null, { cwd: dir, env: process.env, timeoutMs: SETUP_TIMEOUT_MS, signal: ctx.abort.signal, onLine: (l) => ctx.log("agent", l, nodeId) });
+      const r = await spawnCapture(info.manifest.setup.trim(), null, { cwd: dir, env: process.env, timeoutMs: SETUP_TIMEOUT_MS, signal: abort.signal, onLine: (l) => ctx.log("agent", l, nodeId) });
       if (r.code !== 0) {
         fs.rmSync(dir, { recursive: true, force: true });
         throw new Error(`Pack setup failed (exit ${r.code}): ${tail(r.stderr, 1000)}`);
@@ -185,15 +180,22 @@ async function prepareOnHost(ctx: RunContext, info: PackRuntimeInfo, nodeId: str
       if (name.startsWith(`${info.id}-`) && name !== path.basename(dir)) fs.rmSync(path.join(root, name), { recursive: true, force: true });
     }
     return dir;
-  })().finally(() => preparing.delete(key));
-  preparing.set(key, p);
-  return p;
+  })();
+  const entry = { promise: p, abort, waiters: 0 };
+  preparing.set(key, entry);
+  void p.catch(() => {}).finally(() => {
+    if (preparing.get(key) === entry) preparing.delete(key);
+  });
+  return awaitPrep(entry, ctx.abort.signal);
 }
 
 const runtimeOf = (s: Settings) => (s.sandbox === "podman" ? "podman" : "docker");
 
-async function cli(ctx: RunContext, args: string[], nodeId: string, o: { stdin?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; onLine?: (l: string) => void } = {}) {
-  return spawnCapture(runtimeOf(ctx.settings), args, { env: o.env ?? process.env, stdin: o.stdin, timeoutMs: o.timeoutMs, signal: ctx.abort.signal, onLine: o.onLine ?? ((l) => ctx.log("agent", l, nodeId)) });
+async function cli(ctx: RunContext, args: string[], nodeId: string, o: { stdin?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; onLine?: (l: string) => void; container?: string } = {}) {
+  const runtime = runtimeOf(ctx.settings);
+  // Killing the `docker run` client doesn't stop its container — remove the container too.
+  const onKill = o.container ? () => void execCli(runtime, ["rm", "-f", o.container!]) : undefined;
+  return spawnCapture(runtime, args, { env: o.env ?? process.env, stdin: o.stdin, timeoutMs: o.timeoutMs, signal: ctx.abort.signal, onLine: o.onLine ?? ((l) => ctx.log("agent", l, nodeId)), onKill });
 }
 
 /** The image a pack's scripts run in, building its Dockerfile the first time. */
@@ -282,16 +284,18 @@ async function runInRunSandbox(x: Invocation): Promise<{ stdout: string; output?
 async function runInContainer(x: Invocation): Promise<{ stdout: string; output?: string }> {
   const { ctx, node } = x;
   const image = await packImage(ctx, x.info, node.id);
-  const args = ["run", "--rm", "-i", "--name", `sandflow-script-${randomUUID().slice(0, 12)}`];
+  const name = `sandflow-script-${randomUUID().slice(0, 12)}`;
+  const args = ["run", "--rm", "-i", "--name", name];
   if (x.info) {
     // The prepared copy lives in a volume per pack version, so setup runs once, not every time.
     const volume = `sandflow-pack-${x.info.id}-${x.info.hash.slice(0, 12)}`;
+    const prepName = `sandflow-prep-${randomUUID().slice(0, 12)}`;
     const prep = await cli(
       ctx,
-      ["run", "--rm", "--user", "0:0", "-v", `${volume}:/opt/sandflow/pack`, "-v", `${x.info.dir}:/opt/sandflow/pack-src:ro`, "--entrypoint", "sh", image, "-c",
+      ["run", "--rm", "--name", prepName, "--user", "0:0", "-v", `${volume}:/opt/sandflow/pack`, "-v", `${x.info.dir}:/opt/sandflow/pack-src:ro`, "--entrypoint", "sh", image, "-c",
         `${prepareScript(x.info.manifest, "/opt/sandflow/pack-src", "/opt/sandflow/pack")}\nchmod -R a+rwX /opt/sandflow/pack`],
       node.id,
-      { timeoutMs: SETUP_TIMEOUT_MS },
+      { timeoutMs: SETUP_TIMEOUT_MS, container: prepName },
     );
     if (prep.code !== 0) throw new Error(`Pack setup failed (exit ${prep.code}): ${tail(prep.stderr, 1000)}`);
     args.push("-v", `${volume}:/opt/sandflow/pack`, "-e", "PACK_DIR=/opt/sandflow/pack");
@@ -310,7 +314,7 @@ async function runInContainer(x: Invocation): Promise<{ stdout: string; output?:
     // Values travel in the CLI's environment (`-e NAME`), not on its command line.
     for (const k of Object.keys(x.env)) args.push("-e", k);
     args.push("--entrypoint", "sh", image, "-c", `export PATH="/opt/sandflow/pack/.sandflow-bin:$PATH"\n${x.command}`);
-    const r = await cli(ctx, args, node.id, { stdin: x.input, env: { ...process.env, ...x.env }, timeoutMs: x.timeoutS * 1000 });
+    const r = await cli(ctx, args, node.id, { stdin: x.input, env: { ...process.env, ...x.env }, timeoutMs: x.timeoutS * 1000, container: name });
     if (r.code !== 0) throw new Error(`Script exited with code ${r.code}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
     const outFile = path.join(io, "output.json");
     return { stdout: r.stdout, output: fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : undefined };

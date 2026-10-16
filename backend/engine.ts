@@ -18,6 +18,7 @@ import type {
   RunFlag,
   FlagSeverity,
   RunState,
+  SandboxKind,
   Settings,
   StackRunInfo,
   SkillFileRef,
@@ -67,10 +68,17 @@ export interface RunContext {
   baseBranch?: string;
   /** Lazily created sandcastle sandbox, shared by every AI block of the run. */
   sandbox?: unknown;
-  /** The sandbox while it's being created. */
-  sandboxPending?: Promise<unknown>;
+  /** Sandboxes while they're being created, by kind. */
+  sandboxPending?: Partial<Record<SandboxKind, Promise<unknown>>>;
   /** A Box Stack task with an isolated workspace: the context of the run that started it (where it merges into). */
   parentContext?: RunContext;
+  /**
+   * Sandboxes of a kind other than Settings → Sandbox, for agent blocks that choose where they run (`runOn`): `none`
+   * = this computer. All of a run's sandboxes share the same branch and worktree.
+   */
+  sandboxes?: Partial<Record<SandboxKind, unknown>>;
+  /** While a subflow's node runs: the flows around it, innermost first (where they run agents is inherited). */
+  outerFlows?: Flow[];
   abort: AbortController;
   installedSkills: Set<string>;
   /** Only the env vars the block declares — never leak all globals. */
@@ -127,6 +135,10 @@ export interface StartRunOptions {
   parentContext?: RunContext;
   /** Called when this run starts a child run (a stack's task), so the caller can track, save and stream it. */
   onSpawn?: (child: RunHandle) => void;
+  /** Longest each cleanup step (e.g. closing a sandbox) may take before the run ends without it. Default 20 s. */
+  cleanupTimeoutMs?: number;
+  /** Logged as warnings when the run starts (e.g. it shares a branch with another run). */
+  warnings?: string[];
 }
 
 export interface RunHandle {
@@ -137,6 +149,7 @@ export interface RunHandle {
 }
 
 const MAX_LOGS = 2000;
+const CLEANUP_TIMEOUT_MS = 20_000;
 
 /** Where a graph run ended up: a subflow reached one of its Flow outputs (or ran out of nodes). */
 interface GraphResult {
@@ -148,10 +161,11 @@ interface GraphResult {
  * The context runners see while a node of a subflow runs: same run, sandbox and settings, but `flow` is the
  * subflow and node ids are reported under the subflow node (`<subflowNode>/<node>`).
  */
-function scopedContext(ctx: RunContext, flow: Flow, prefix: string): RunContext {
+function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: Flow[]): RunContext {
   if (!prefix) return ctx;
   const own: Partial<RunContext> = {
     flow,
+    outerFlows,
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
     flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
@@ -253,20 +267,33 @@ export function startRun(opts: StartRunOptions): RunHandle {
   if (opts.share) {
     // Shared workspace: the sandbox (and whatever was set up in it) belongs to the run that owns it.
     const owner = opts.share;
-    for (const k of ["sandbox", "sandboxPending", "branch", "baseBranch", "installedSkills", "preparedPacks", "cleanup"] as const) {
+    for (const k of ["sandbox", "sandboxes", "sandboxPending", "branch", "baseBranch", "installedSkills", "preparedPacks", "cleanup"] as const) {
       Object.defineProperty(ctx, k, { get: () => owner[k], set: (v) => ((owner as unknown as Record<string, unknown>)[k] = v), enumerable: true });
     }
   }
+  for (const w of opts.warnings ?? []) ctx.log("warn", w);
 
   let steps = 0;
+
+  /** Rejects as soon as the run is stopped: a node's runner is raced against it, so Stop never waits on a runner. */
+  const stopped = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error("Run cancelled"));
+    if (ctx.abort.signal.aborted) fail();
+    else ctx.abort.signal.addEventListener("abort", fail, { once: true });
+  });
+  stopped.catch(() => {});
+  const untilStopped = <T>(p: Promise<T>): Promise<T> => {
+    p.catch(() => {}); // it may still fail after the run was stopped — nobody waits for it any more
+    return Promise.race([p, stopped]);
+  };
 
   /**
    * Run one flow's graph. Top level (`entry` undefined): starts at the trigger node or every node without inputs.
    * As a subflow: starts at its Flow input blocks with the parent's inputs, and returns as soon as a Flow output
    * is reached.
    */
-  async function runGraph(g: Flow, prefix: string, depth: number, entry?: NodeIO): Promise<GraphResult> {
-    const gctx = scopedContext(ctx, g, prefix);
+  async function runGraph(g: Flow, prefix: string, depth: number, entry?: NodeIO, outer: Flow[] = []): Promise<GraphResult> {
+    const gctx = scopedContext(ctx, g, prefix, outer);
     const byId = new Map(g.nodes.map((n) => [n.id, n]));
     const key = (id: string) => prefix + id;
     const label = (id: string) => {
@@ -308,6 +335,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         throw new Error(`Max steps exceeded (${settings.maxSteps}) — is the flow stuck in a loop?`);
       }
       const { nodeId, inputs } = queue.shift()!;
+      if (ctx.abort.signal.aborted) return {};
       const k = key(nodeId);
       const node = byId.get(nodeId)!;
       const cfg = resolveNode(node, blocks);
@@ -351,7 +379,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
           if (!child) throw new Error(cfg.subflow.flowId ? `Subflow runs unknown flow "${cfg.subflow.flowId}"` : "Subflow has no flow selected");
           if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
           ctx.log("info", `↳ running flow "${child.name}"`, k);
-          const r = await runGraph(child, `${k}/`, depth + 1, inputs);
+          const r = await runGraph(child, `${k}/`, depth + 1, inputs, [g, ...outer]);
           if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
           if (r.exit === undefined) ctx.log("warn", `Flow "${child.name}" ended without reaching a Flow output — nothing continues after it`, k);
           result = { outputs: r.outputs ?? {}, exit: r.exit };
@@ -393,14 +421,14 @@ export function startRun(opts: StartRunOptions): RunHandle {
           );
         } else if (cfg.kind === "script") {
           if (!runners.script) throw new Error("Script blocks aren't supported here");
-          result = await runners.script(gctx, node, cfg, inputs);
+          result = await untilStopped(runners.script(gctx, node, cfg, inputs));
         } else {
-          result = await (cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs);
+          result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs));
         }
       } catch (e) {
         if (ctx.abort.signal.aborted) {
-          ns.status = "failed";
-          ns.error = "Cancelled";
+          ns.status = "idle";
+          ns.error = "Stopped";
           return {};
         }
         ns.status = "failed";
@@ -483,6 +511,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
     return {};
   }
 
+  /** Set once the graph has ended (done / failed / cancelled): a Stop during cleanup no longer changes the outcome. */
+  let settled = false;
   const done = (async () => {
     try {
       const r = await runGraph(flow, "", opts.depth ?? 0, opts.entry);
@@ -497,17 +527,30 @@ export function startRun(opts: StartRunOptions): RunHandle {
         if (!opts.parent) ctx.flag("error", `Run failed: ${run.error}`);
       }
     } finally {
+      settled = true;
+      // Each step is bounded: a sandbox that won't close must not keep the run (and Stop) hanging.
+      const limit = opts.cleanupTimeoutMs ?? CLEANUP_TIMEOUT_MS;
+      // A shared workspace's cleanup belongs to the run that owns it.
       for (const fn of opts.share ? [] : ctx.cleanup.splice(0)) {
+        let timer: NodeJS.Timeout | undefined;
         try {
-          await fn();
+          const step = Promise.resolve().then(fn);
+          step.catch(() => {});
+          const timedOut = await Promise.race([
+            step.then(() => false),
+            new Promise<boolean>((r) => (timer = setTimeout(() => r(true), limit))),
+          ]);
+          if (timedOut) ctx.log("warn", `Cleanup step didn't finish within ${Math.round(limit / 1000)}s — continuing without it`);
         } catch (e) {
           ctx.log("warn", `Cleanup failed: ${(e as Error).message}`);
+        } finally {
+          clearTimeout(timer);
         }
       }
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
       run.finishedAt = Date.now();
-      if (run.status === "cancelled") ctx.log("warn", "Run cancelled");
+      if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
       emit();
     }
     return run;
@@ -522,9 +565,23 @@ export function startRun(opts: StartRunOptions): RunHandle {
       return true;
     },
     cancel() {
-      if (run.finishedAt) return;
+      // Idempotent: a second Stop (or one after the run ended) does nothing.
+      if (run.finishedAt || ctx.abort.signal.aborted) return;
+      if (settled) {
+        // The run already ended and is only closing its sandboxes: hurry that along (kills containers / processes)
+        // but keep its real outcome — it finished, it wasn't stopped.
+        ctx.abort.abort(new Error("Run cancelled"));
+        return;
+      }
+      // Show it right away; the run finishes once cleanup (closing sandboxes) is done.
+      run.status = "cancelled";
+      const active = Object.entries(run.nodes).filter(([, ns]) => ns.status === "running" || ns.status === "waiting");
+      ctx.log("warn", `Stop requested — cancelling ${active.length ? active.map(([id]) => id).join(", ") : "the run"} and killing its processes`);
       ctx.abort.abort(new Error("Run cancelled"));
       pending?.reject(new Error("Run cancelled"));
+      run.pendingQuestion = undefined;
+      for (const ns of Object.values(run.nodes)) if (ns.status === "queued") ns.status = "idle";
+      emit();
     },
   };
 }

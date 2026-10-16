@@ -1,6 +1,6 @@
 ---
 name: sandflow-flows
-description: Use when asked to create, change, review or explain a Sandflow flow (pipelines of trigger, auto, AI, manager and If blocks). Requires the `sandflow` MCP server.
+description: Use when asked to create, change, review or explain a Sandflow flow (pipelines of trigger, auto, AI, manager and If blocks) — adding, configuring or wiring blocks. Requires the `sandflow` MCP server.
 ---
 
 # Building Sandflow flows
@@ -22,76 +22,106 @@ Claude Code: `claude mcp add --transport http sandflow <url>` or `claude --mcp-c
 
 Append `?flow=<flowId>` to the URL to limit a session to editing one flow.
 
+## Model
+
+A flow is a graph of **nodes**. Each node places a **block** from the library and may override some of its settings.
+Edges carry one of two things:
+
+- **artifact** — the main deliverable (task, plan, summary, review, reply).
+- **steer** — short guidance for the next step ("fix these 3 things").
+
+Block kinds:
+
+- **trigger** — starts the flow (Manual start, Schedule, GitHub/GitLab event). No inputs; outputs an artifact describing the event.
+- **auto** — deterministic step on the host: Create task (makes the branch), Create MR, Shell command, Post comment.
+- **ai** — an agent in a sandbox: Plan, Implement, CR, CR fix, Answer comment, or custom blocks. `REPO_PATH` is optional for agents: without it they work in an empty scratch folder (fine for summarising, answering, drafting). Auto/git steps still need it. To run an agent on the user's own computer (their installed CLI and login, no container) set the node override `{"runOn": "host"}` (`"sandbox"` = container, `"inherit"` = flow / Settings default). Only when the user asks for it — the agent then has access to their machine.
+- **manager** — an agent that sends the task down exactly ONE of its outgoing edges. Give it 2+ targets.
+- **condition** (If) — deterministic rules; continues out of `true` or `false`. An unconnected branch ends that path.
+- **script**, **subflow**, **flow-input** / **flow-output** — pack code, a flow inside a flow, and that flow's entry/exits.
+
+Nodes with no incoming edge are start nodes. Loops are allowed (CR → Manager → CR fix → CR); the engine caps total steps.
+
 ## Tools
 
 | Tool | Use |
 |---|---|
-| `list_blocks` | Every block: id, kind, edge inputs/outputs, env vars, description |
-| `list_flows` / `get_flow` | Find a flow; see its nodes, edges and validation problems |
-| `create_flow` | New flow in one call (not available in a flow-scoped session) |
-| `replace_flow` | Rebuild an existing flow's nodes and edges from scratch |
-| `edit_flow` | Batch of ops: `add_node`, `update_node`, `remove_node`, `connect`, `disconnect`, `rename_flow`, `auto_layout` — all-or-nothing |
-| `validate_flow` | Errors and warnings |
-| `flow_requirements` | Env vars / starting prompt the user must fill in (names only) |
-| `save_block` | Add or update a custom block or template |
+| `list_blocks` | Block ids, kinds, inputs/outputs, env. Filter: `{kind: "trigger"}`, `{query: "review"}` |
+| `get_block` | One block: defaults, the overrides you can set (types + examples), what still needs setting, an example op |
+| `list_flows` / `get_flow` | Find a flow; its nodes, edges, validation and inputs still empty |
+| `add_node` | Place ONE block and wire it: `{block, id?, from?, to?, overrides?}` |
+| `update_node` | Change a node; `overrides` merge in (null removes a key) |
+| `connect` | `{from: "a", to: "b"}` wires every compatible handle; `{edges: ["a.steer -> b.steer"]}` for exact ones |
+| `edit_flow` | Several ops at once, all-or-nothing; `dryRun: true` checks without saving |
+| `create_flow` / `replace_flow` | A whole flow in one call (`create_flow` isn't available in the in-app chat) |
+| `validate_flow` / `flow_requirements` | Problems / env vars and starting prompt the user must fill in |
+| `save_block` | New reusable block or template (rarely needed) |
 
-Example `edit_flow` call:
+Every edit returns the change list, the whole flow, errors/warnings and the inputs still empty — read it instead of calling get_flow again.
 
+## Placing blocks
+
+- `block` takes the full id (`base/plan`), the id without its pack (`plan`) or the name (`Shell command`). Unknown ids get a "did you mean".
+- `id` is optional: it defaults to the block id without its pack (`plan`, then `plan-2`). Choose ids when you'll reference them later (`review`, `only-mine`).
+- `from` / `to` wire the new node in the same op. A bare node id wires every compatible handle (plan → implement gets artifact AND steer); `node.handle` wires one (`check.true`, `plan.steer`, `review.exit:approved`). They may name nodes added later in the same batch.
+- `overrides` hold only what differs from the block. Unknown or misplaced fields are rejected with the list of valid ones; `get_block` shows them.
+- Layout is automatic — never send coordinates.
+
+## Recipes
+
+AI step after an existing node, with a tweak:
+`{"op": "add_node", "id": "security", "block": "base/cr", "from": "impl", "to": "manager", "overrides": {"extraInstructions": "Focus only on security issues."}}`
+(`extraInstructions` is appended to the block's prompt; `instructions` replaces it. Also: `allowQuestions`, `agent: {"model": "…"}`, `maxIterations`.)
+
+Shell command step:
+`{"op": "add_node", "id": "tests", "block": "base/shell", "from": "impl", "overrides": {"shellCommand": "npm test"}}`
+
+Triggers:
+- Schedule: `{"op": "add_node", "id": "nightly", "block": "base/schedule-trigger", "overrides": {"trigger": {"schedule": {"kind": "cron", "expr": "0 0 9 * * 1-5"}}}}` (cron has a seconds field; also `{"kind": "interval", "every": 2, "unit": "hours"}`)
+- GitHub/GitLab: `{"op": "add_node", "id": "gh", "block": "base/github-trigger", "overrides": {"trigger": {"repo": "acme/web", "events": ["merge_request.comment"]}}}`
+- The user switches the flow Active (top bar) to arm its triggers; no manual run is needed first. Runs started by a trigger need the env vars (incl. the webhook secret) but no starting prompt: the event stands in for it.
+
+If branch:
+`{"op": "add_node", "id": "only-mine", "block": "base/if", "from": "gh", "to": "answer", "overrides": {"condition": {"match": "all", "rules": [{"field": "trigger.author", "op": "equals", "value": "alice"}]}}}`
+— a bare If node in `from`/`to` means its `true` branch; wire the other with `{"op": "connect", "from": "only-mine.false", "to": "skip"}`.
+
+Rewire: `{"op": "disconnect", "from": "cr", "to": "manager"}` removes every edge between them; `{"op": "remove_node", "id": "x"}` drops its edges too.
+
+Whole flow in one call (`replace_flow`, or `create_flow` with a `name`):
 ```json
-{
-  "flowId": "feature-pipeline",
-  "ops": [
-    { "op": "add_node", "id": "security", "block": "cr", "label": "Security review",
-      "overrides": { "extraInstructions": "Focus only on security issues." } },
-    { "op": "disconnect", "edge": "cr.artifact -> manager.artifact" },
-    { "op": "connect", "edge": "cr.artifact -> security.artifact" },
-    { "op": "connect", "edge": "security.artifact -> manager.artifact" }
-  ]
-}
+{"nodes": [
+  {"id": "start", "block": "base/create-task"},
+  {"id": "plan", "block": "base/plan", "from": "start"},
+  {"id": "impl", "block": "base/implement", "from": "plan"},
+  {"id": "review", "block": "base/cr", "from": "impl"},
+  {"id": "manager", "block": "base/manager", "from": "review", "to": ["mr", "fix"]},
+  {"id": "mr", "block": "base/create-mr"},
+  {"id": "fix", "block": "base/cr-fix", "to": "review"}
+]}
 ```
 
-## Model
+## Edge syntax
 
-A flow is a graph of **nodes**. Each node places a **block** from the library (`list_blocks`). Nodes are wired by
-**edges** that carry one of two things:
+`source.handle -> target.handle` with node ids, e.g. `plan.steer -> implement.steer`. Handles default to artifact. Sources: `artifact`, `steer`, `true`/`false` (If), `exit:<name>` (Script / subflow). Targets: `artifact`, `steer`. Triggers take no inputs.
 
-- **artifact** — the main deliverable (a task, plan, summary, review, reply). Blue on the canvas.
-- **steer** — short guidance for the next step ("fix these 3 things"). Dashed amber.
+## Condition rules
 
-Block kinds:
-
-- **trigger** — starts the flow (Manual start, Schedule, GitHub/GitLab event). Takes no inputs; outputs an artifact describing the event. Use at most one per start.
-- **auto** — deterministic step on the host: Create task (makes the branch), Create MR, Shell command, Post comment.
-- **ai** — an agent in a sandbox: Plan, Implement, CR, CR fix, Answer comment, or custom blocks.
-- **manager** — an agent that sends the task down exactly ONE of its outgoing edges. Give it 2+ targets.
-- **condition** (If) — deterministic rules; continues out of `true` or `false`. An unconnected branch ends that path.
-
-Nodes with no incoming edge are start nodes. Loops are allowed (CR → Manager → CR fix → CR); the engine caps total steps.
-
-## Edges
-
-Write edges as `source.handle -> target.handle` using node ids, e.g. `plan.artifact -> implement.artifact`.
-Handles default to artifact (`plan -> implement`). If blocks connect from `check.true` / `check.false`.
-A source must output the handle and the target must accept it — `list_blocks` shows each block's `in:` and `out:`.
-Wire both artifact and steer between agent steps when the block outputs both (plan → implement usually wants both).
-
-## Working method
-
-1. `list_blocks`, then `get_flow` to see what exists. Never guess block ids.
-2. Pick short, readable node ids (`plan`, `review`, `only-mine`).
-3. For a new design use `replace_flow` (or `create_flow`) with all nodes and edges in one call. For changes use `edit_flow` with a batch of ops. Layout is automatic — never send coordinates.
-4. Read the validation in the tool result and fix every error before you finish.
-5. Customise a node with `overrides` (e.g. `extraInstructions`, `allowQuestions`, an If block's `condition`) before creating new blocks. Only `save_block` when the library has nothing close; extend a template (`tpl-ai-agent`, `tpl-auto-git`, `tpl-reviewer`).
-6. Finish with `flow_requirements` and tell the user which inputs to fill in. You can't set env values or run flows — the user does that.
-
-## Condition overrides
-
-`{"condition": {"match": "all", "rules": [{"field": "trigger.author", "op": "equals", "value": "alice"}]}}`
 Fields: `text` (input artifact), `steer`, `json.<path>`, `trigger.<path>` (type, author, body, title, labels, branch…).
 Ops: equals, not_equals, contains, not_contains, starts_with, ends_with, matches (regex), in (comma list), exists, not_exists, gt, lt, is_true, is_false.
 
+## Inputs and env
+
+Blocks declare env var NAMES (`REPO_PATH`, `ANTHROPIC_API_KEY`, `BASE_BRANCH`…); add more to a node with `overrides.env: ["JIRA_TOKEN"]`. You can't set values or run flows — the user fills them in the Inputs tab. Edit results end with what's still empty; tell the user.
+
+## Working method
+
+1. `get_flow` (and `list_blocks` if you don't know the ids). `get_block` before configuring an unfamiliar block.
+2. Make the change in as few calls as possible: `add_node` with `from`/`to`, or one `edit_flow` batch.
+3. Fix every error in the result (each names the op and the field). Warnings flag likely mistakes, e.g. a Shell command with no command.
+4. Prefer node `overrides` over new blocks. Only `save_block` for something reused across flows; extend a template (`base/tpl-ai-agent`, `base/tpl-auto-git`, `base/tpl-reviewer`).
+5. Finish by telling the user what changed and which inputs they still need to fill in.
+
 ## Common shapes
 
-- Feature: Manual start or Create task → Plan → Implement → CR → Manager → (Create MR | CR fix → CR).
-- Answer comments: GitLab/GitHub trigger → If (author/keyword) → Answer comment → Post comment.
+- Feature: Create task → Plan → Implement → CR → Manager → (Create MR | CR fix → CR).
+- Answer comments: GitHub/GitLab trigger → If (author/keyword) → Answer comment → Post comment.
 - Scheduled job: Schedule → Shell command or an ai block.

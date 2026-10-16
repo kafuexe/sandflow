@@ -1,16 +1,20 @@
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { ENDPOINT_ENV } from "../../shared/agents";
-import { nodeLabel, resolveNode } from "../../shared/resolve";
+import { CORE_PACK } from "../../shared/packs";
+import { nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
+import { hostAgentEnv, resolveRunOn } from "../../shared/runOn";
 import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
-import type { AgentProvider, FlowNode, NodeIO, QaPair, ResolvedConfig, SkillRef } from "../../shared/types";
+import type { AgentProvider, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
-import { ensureSandboxReady, sandboxProviderOptions } from "../sandbox";
+import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
-import { filesPack } from "./trust";
+import { codeOwner, filesPack, trustedOnHost } from "./trust";
 
 /** Where installed packs are mounted (read-only) inside the run's sandbox. */
 export const SANDBOX_PACKS_DIR = "/opt/sandflow/packs";
@@ -63,6 +67,7 @@ export async function installFileSkill(
   files: SkillFile[],
   nodeId: string,
   home = os.homedir(),
+  onHost = ctx.settings.sandbox === "none",
 ) {
   const rel = SKILL_HOME[provider];
   if (!rel) {
@@ -74,7 +79,7 @@ export async function installFileSkill(
   // Scripts saved with Windows line endings fail with "/bin/sh^M: bad interpreter" — normalise them.
   files = files.map((f) => (f.content.startsWith("#!") ? { ...f, content: f.content.replace(/\r\n/g, "\n") } : f));
 
-  if (ctx.settings.sandbox === "none") {
+  if (onHost) {
     const dest = path.join(home, ...rel.split("/"), skill.name);
     for (const f of files) {
       const p = path.join(dest, ...f.path.split("/"));
@@ -103,50 +108,145 @@ export function sandboxBranch(ctx: RunContext): string {
   return ctx.branch || ctx.env.BRANCH_NAME?.trim() || `sandflow/${ctx.run.id}`;
 }
 
+const execFileP = promisify(execFile);
+
+/** No REPO_PATH: agents of this run work in an empty scratch workspace instead of a project checkout. */
+export const usesScratchWorkspace = (ctx: RunContext) => !ctx.env[PROJECT_ENV]?.trim();
+
 /**
- * The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted.
- * Calls that arrive while it's being created wait for the same one (stack children sharing a workspace run at once).
+ * A fresh, empty workspace for a run without a project: a temp dir made a git repo with one empty commit, so
+ * sandcastle's worktree/branch handling works unchanged (the history is throwaway).
  */
-export async function getSandbox(ctx: RunContext): Promise<SandboxLike> {
-  if (ctx.sandbox) return ctx.sandbox as SandboxLike;
-  ctx.sandboxPending ??= createRunSandbox(ctx).finally(() => {
-    ctx.sandboxPending = undefined;
-  });
-  return (await ctx.sandboxPending) as SandboxLike;
+export async function createScratchWorkspace(): Promise<string> {
+  const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "sandflow-scratch-")));
+  const git = (...args: string[]) => execFileP("git", args, { cwd: dir, windowsHide: true });
+  try {
+    await git("init", "-q");
+    await git("-c", "user.name=Sandflow", "-c", "user.email=sandflow@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "Empty workspace");
+  } catch (e) {
+    await fs.rm(dir, { recursive: true, force: true });
+    throw new Error(`Could not create a scratch workspace (is git installed?): ${(e as Error).message}`);
+  }
+  return dir;
 }
 
-async function createRunSandbox(ctx: RunContext): Promise<SandboxLike> {
+const scratchDirs = new WeakMap<object, { dir: Promise<string>; keep: boolean }>();
+
+/**
+ * The run's scratch workspace (created once per run, shared by all its agents). It is removed when the run ends —
+ * unless an agent ran on this computer in it, then it's kept (and its path logged) so the user can look at the result.
+ */
+export function scratchWorkspace(ctx: RunContext, onHost = false): Promise<string> {
+  let entry = scratchDirs.get(ctx.run);
+  if (!entry) {
+    const created = { dir: createScratchWorkspace(), keep: false };
+    entry = created;
+    scratchDirs.set(ctx.run, entry);
+    ctx.cleanup.push(async () => {
+      const dir = await created.dir.catch(() => undefined);
+      if (dir && !created.keep) await fs.rm(dir, { recursive: true, force: true });
+    });
+  }
+  if (onHost && !entry.keep) {
+    entry.keep = true;
+    void entry.dir.then((d) => ctx.log("info", `No project path (${PROJECT_ENV}) — the agent works in a new folder on this computer: ${d}`), () => {});
+  }
+  return entry.dir;
+}
+
+/**
+ * The run's shared sandbox (created on first use): a worktree on the task branch, with every installed pack mounted.
+ * `kind` defaults to Settings → Sandbox; another kind (an agent block's own `runOn`) gets its own sandbox on the same
+ * branch — sandcastle reuses the branch's worktree, so container and host agents see the same files.
+ * Without REPO_PATH it is a worktree of the run's scratch workspace (see `scratchWorkspace`).
+ */
+export async function getSandbox(ctx: RunContext, kind: SandboxKind = ctx.settings.sandbox): Promise<SandboxLike> {
+  const cached = kind === ctx.settings.sandbox ? ctx.sandbox : ctx.sandboxes?.[kind];
+  if (cached) return cached as SandboxLike;
+  // Calls that arrive while it's being created wait for the same one (stack children sharing a workspace run at once).
+  const pending = (ctx.sandboxPending ??= {});
+  pending[kind] ??= createRunSandbox(ctx, kind).finally(() => {
+    delete pending[kind];
+  });
+  return (await pending[kind]) as SandboxLike;
+}
+
+async function createRunSandbox(ctx: RunContext, kind: SandboxKind): Promise<SandboxLike> {
+  const isDefault = kind === ctx.settings.sandbox;
   const sc = await import("@ai-hero/sandcastle");
-  const kind = ctx.settings.sandbox;
+  const settings = isDefault ? ctx.settings : { ...ctx.settings, sandbox: kind };
   // Docker/Podman: the image must already be loaded (offline bundle) — never let `docker run` try to pull it.
-  await ensureSandboxReady(ctx.settings);
+  await ensureSandboxReady(settings);
   const packMounts = (ctx.packs?.dirs() ?? [])
     .filter((p) => existsSync(p.dir))
     .map((p) => ({ hostPath: p.dir, sandboxPath: `${SANDBOX_PACKS_DIR}/${p.id}` }));
-  const provider =
+  const signal = ctx.abort.signal;
+  if (signal.aborted) throw new Error("Run cancelled");
+  const baseProvider =
     kind === "docker"
-      ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxProviderOptions(ctx.settings, packMounts))
+      ? (await import("@ai-hero/sandcastle/sandboxes/docker")).docker(sandboxProviderOptions(settings, packMounts))
       : kind === "podman"
-        ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(ctx.settings, packMounts))
+        ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(settings, packMounts))
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
-  const repo = ctx.env.REPO_PATH?.trim();
-  if (!repo) throw new Error("Missing env var REPO_PATH");
+  // Stopping the run kills the agent's processes / container, not just the wait for them.
+  const provider = stoppableProvider(baseProvider, kind, signal);
+  const scratch = usesScratchWorkspace(ctx);
+  const repo = scratch ? await scratchWorkspace(ctx, kind === "none") : ctx.env[PROJECT_ENV]!.trim();
   const branch = sandboxBranch(ctx);
-  ctx.log("info", `Creating ${kind} sandbox on branch ${branch}…`);
+  const where = kind === "none" ? "this computer" : `${kind} sandbox`;
+  ctx.log("info", scratch ? `No ${PROJECT_ENV} — preparing ${where} in an empty scratch workspace…` : `Preparing ${where} on branch ${branch}…`);
   const sandbox = await sc.createSandbox({
     branch,
-    baseBranch: ctx.baseBranch || ctx.env.BASE_BRANCH?.trim() || undefined,
+    // A scratch workspace has only its own branch to fork from.
+    baseBranch: scratch ? undefined : ctx.baseBranch || ctx.env.BASE_BRANCH?.trim() || undefined,
     sandbox: provider as Parameters<typeof sc.createSandbox>[0]["sandbox"],
     cwd: repo,
   });
-  ctx.sandbox = sandbox;
-  ctx.run.branch ??= branch;
-  ctx.cleanup.push(async () => {
+  // Stopped while the sandbox was starting: the run's cleanup has already run, so tear this one down now.
+  if (signal.aborted) {
+    await sandbox.close().catch(() => {});
+    throw new Error("Run cancelled");
+  }
+  if (isDefault) ctx.sandbox = sandbox;
+  else (ctx.sandboxes ??= {})[kind] = sandbox;
+  // A scratch branch exists nowhere after the run — don't report it as the run's branch.
+  if (!scratch) ctx.run.branch ??= branch;
+  // First in line: the worktree must close before the scratch workspace it lives in is removed.
+  ctx.cleanup.unshift(async () => {
     const res = await sandbox.close();
-    if (res.preservedWorktreePath) ctx.log("warn", `Worktree had uncommitted changes, preserved at ${res.preservedWorktreePath}`);
+    if (res.preservedWorktreePath && !scratch) ctx.log("warn", `Worktree had uncommitted changes, preserved at ${res.preservedWorktreePath}`);
   });
-  ctx.log("info", `Sandbox ready (worktree ${sandbox.worktreePath})`);
+  ctx.log("info", `${kind === "none" ? "Ready on this computer" : "Sandbox ready"} (${scratch ? "scratch workspace" : "worktree"} ${sandbox.worktreePath})`);
   return sandbox as unknown as SandboxLike;
+}
+
+/** The node's flow, then the flows around it (subflows), innermost first. */
+const flowChain = (ctx: RunContext): Flow[] => [ctx.flow, ...(ctx.outerFlows ?? [])].filter((f): f is Flow => !!f);
+
+/** Where an agent node runs: its own `runOn` (node, then block chain), then its flow's and the enclosing flows', then Settings → Sandbox. */
+export function agentRunOn(ctx: RunContext, cfg: ResolvedConfig): RunOn {
+  return resolveRunOn([cfg.runOn, ...flowChain(ctx).map((f) => f.runOn)], ctx.settings.sandbox)!;
+}
+
+/** The sandbox kind for an agent node: `none` on this computer; a container otherwise (Docker when Settings say None). */
+export function agentSandboxKind(ctx: RunContext, cfg: ResolvedConfig): SandboxKind {
+  if (agentRunOn(ctx, cfg) === "host") return "none";
+  return ctx.settings.sandbox === "none" ? "docker" : ctx.settings.sandbox;
+}
+
+/**
+ * The pack that chose to run this node on this computer (undefined = you did, or nobody chose explicitly). Like
+ * Script blocks, a pack may only do that when you trust it to run code on this machine.
+ */
+export function hostChoiceOwner(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig): string | undefined {
+  const packOf = (f: Flow | undefined) => (f?.pack && f.pack !== CORE_PACK ? f.pack : undefined);
+  if (cfg.runOn === "host") {
+    if (node.data.overrides?.runOn === "host") return packOf(ctx.flow);
+    return codeOwner(ctx, node, (c) => (c.runOn === "host" ? c.runOn : undefined));
+  }
+  // Inherited: the innermost flow that chose.
+  if (cfg.runOn === "inherit") return packOf(flowChain(ctx).find((f) => f.runOn === "sandbox" || f.runOn === "host"));
+  return undefined;
 }
 
 /** The block's env plus the custom endpoint (if any) under the provider's base-URL variable. */
@@ -206,19 +306,34 @@ function logUsage(ctx: RunContext, nodeId: string, res: RunResultLike) {
 }
 
 export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
-  const sandbox = await getSandbox(ctx);
-  const env = ctx.blockEnv(cfg);
+  const kind = agentSandboxKind(ctx, cfg);
+  const onHost = kind === "none";
+  // Chosen on the block / node / flow (not just Settings → Sandbox: None): use the local CLI's own login.
+  const explicitHost = resolveRunOn([cfg.runOn, ...flowChain(ctx).map((f) => f.runOn)]) === "host";
+  if (explicitHost) {
+    const owner = hostChoiceOwner(ctx, node, cfg);
+    if (owner && !trustedOnHost(ctx, owner)) {
+      throw new Error(
+        `Pack "${owner}" wants this agent to run on this computer, but it isn't allowed to run code here — trust the pack in Packs, or set "Run on" to Sandbox container on this node`,
+      );
+    }
+    ctx.log("warn", "Running on this computer with your own agent CLI and login — no container; the agent can access this machine", node.id);
+  }
+  const sandbox = await getSandbox(ctx, kind);
+  const blockEnv = ctx.blockEnv(cfg);
+  const env = explicitHost ? hostAgentEnv(blockEnv, !!cfg.agent.endpoint?.trim()) : blockEnv;
   const label = nodeLabel(node, ctx.blocks);
 
   for (const skill of cfg.skills) {
-    const key = skillKey(skill);
+    // Container and host have separate homes, so a skill is installed once per place.
+    const key = `${kind}:${skillKey(skill)}`;
     if (ctx.installedSkills.has(key)) continue;
     ctx.installedSkills.add(key);
     if (skill.file) {
       try {
         if (!ctx.loadSkill) throw new Error("no skill store configured");
         const files = await ctx.loadSkill(skill.file);
-        await installFileSkill(ctx, sandbox, cfg.agent.provider, skill, files, node.id);
+        await installFileSkill(ctx, sandbox, cfg.agent.provider, skill, files, node.id, undefined, onHost);
       } catch (e) {
         ctx.log("warn", `Skill ${skill.name} failed to install: ${(e as Error).message}`, node.id);
       }
@@ -236,7 +351,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
 
   // Files of the pack this block comes from: mounted in the sandbox, or right where they are without one.
   const pack = filesPack(ctx, node);
-  const packDir = pack ? (ctx.settings.sandbox === "none" ? ctx.packs?.runtime(pack)?.dir : `${SANDBOX_PACKS_DIR}/${pack}`) : undefined;
+  const packDir = pack ? (onHost ? ctx.packs?.runtime(pack)?.dir : `${SANDBOX_PACKS_DIR}/${pack}`) : undefined;
   const agent = await makeAgent(cfg, { ...agentEnv(cfg, env), ...(packDir ? { PACK_DIR: packDir } : {}) });
   if (cfg.agent.endpoint?.trim()) ctx.log("info", `Agent endpoint: ${cfg.agent.endpoint.trim()}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
@@ -263,7 +378,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     sandbox.run({
       ...baseOptions,
       agent,
-      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes, packDir }),
+      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes, packDir, scratch: usesScratchWorkspace(ctx) }),
       maxIterations: cfg.maxIterations,
     });
   // Follow up in the same agent session when possible, otherwise re-run with the extra context in the prompt.

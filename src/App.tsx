@@ -1,25 +1,27 @@
 import { useEffect, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
-import { BotMessageSquare, Check, CloudUpload, Info, Loader2, MessagesSquare, Pencil, Play, Plus, Settings, Square, Trash2, TriangleAlert, Waves, Workflow } from "lucide-react";
+import { BotMessageSquare, Check, CloudUpload, Info, Loader2, MessagesSquare, Pencil, Play, Plus, Settings, Trash2, TriangleAlert, Waves, Workflow } from "lucide-react";
 import { ChatPanel } from "@/components/ChatPanel";
 import { useChatStore } from "@/lib/chatStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { BlockEditor } from "@/components/BlockEditor";
 import { QuestionDialog, SettingsDialog } from "@/components/Dialogs";
 import { FlagAlerts } from "@/components/FlagAlerts";
 import { FlowCanvas } from "@/components/FlowCanvas";
-import { useMissingInputs } from "@/components/InputsPanel";
+import { FlowSwitcher } from "@/components/FlowSwitcher";
+import { useMissingInputs, useTriggerMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
 import { PacksDialog } from "@/components/PacksDialog";
 import { Palette } from "@/components/Palette";
+import { RunsIndicator } from "@/components/RunsIndicator";
 import { SidePanel } from "@/components/SidePanel";
 import { Switch } from "@/components/ui/switch";
-import { resolveNode } from "../shared/resolve";
+import { startsItself } from "../shared/resolve";
 import { AgentScreen } from "@/components/agent/AgentScreen";
 import { useWaitingCount } from "@/lib/agent";
 import { useCurrentFlow, useStore, type View } from "@/lib/store";
+import { activeRunsOf } from "@/lib/runSelection";
 import { cn } from "@/lib/utils";
 
 function SaveIndicator() {
@@ -78,33 +80,46 @@ function EditWithAiButton() {
   );
 }
 
-/** Arms the flow's schedule / GitHub / GitLab triggers. Shown only when the flow has such a trigger. */
+/**
+ * Arms the flow's schedule / GitHub / GitLab triggers. Shown only when the flow has such a trigger. Needs no prior
+ * run: what triggered runs still need (env vars, webhook secret) is shown here and opens the Inputs tab.
+ */
 function ActiveSwitch({ flowId }: { flowId: string }) {
   const flow = useStore((s) => s.data?.flows.find((f) => f.id === flowId));
   const blocks = useStore((s) => s.data?.blocks);
   const triggers = useStore((s) => s.triggers?.triggers);
-  const setFlowActive = useStore((s) => s.setFlowActive);
-  const hasTriggers = !!flow?.nodes.some((n) => {
-    try {
-      const cfg = resolveNode(n, blocks ?? []);
-      return cfg.kind === "trigger" && cfg.trigger.type !== "manual";
-    } catch {
-      return false;
-    }
-  });
+  const { setFlowActive, setSideTab, setView } = useStore.getState();
+  const openInputs = () => (setSideTab("inputs"), setView("builder"));
+  const missing = useTriggerMissingInputs(flowId);
+  const hasTriggers = !!flow && startsItself(flow, blocks ?? []);
   if (!flow || !hasTriggers || flow.pack) return null;
   const armed = (triggers ?? []).filter((t) => t.flowId === flowId);
-  const errors = armed.filter((t) => t.lastError).length;
+  const errors = armed.filter((t) => t.lastError);
+  const needs = missing.length ? `Triggered runs need: ${missing.join(", ")} (set in Inputs)` : "";
+  const title = flow.active
+    ? [`${armed.length} trigger(s) listening`, needs, ...errors.map((t) => `${t.label}: ${t.lastError}`)].filter(Boolean).join("\n")
+    : ["Triggers are off — switch on to start this flow on its triggers (no run needed first)", needs].filter(Boolean).join("\n");
+  const warn = missing.length > 0 || errors.length > 0;
   return (
-    <label
-      className="flex items-center gap-2 text-xs"
-      title={flow.active ? `${armed.length} trigger(s) listening${errors ? `, ${errors} with errors` : ""}` : "Triggers are off"}
-    >
-      <Switch checked={!!flow.active} onCheckedChange={(v) => setFlowActive(flowId, v)} />
-      <span className={flow.active ? (errors ? "text-amber-400" : "text-emerald-400") : "text-muted-foreground"}>
-        {flow.active ? (errors ? "Active (errors)" : "Active") : "Inactive"}
-      </span>
-    </label>
+    <div className="flex items-center gap-2 text-xs" title={title}>
+      <label className="flex items-center gap-2">
+        <Switch
+          checked={!!flow.active}
+          onCheckedChange={(v) => {
+            setFlowActive(flowId, v);
+            if (v && missing.length) openInputs();
+          }}
+        />
+        <span className={flow.active ? (warn ? "text-amber-400" : "text-emerald-400") : "text-muted-foreground"}>
+          {flow.active ? (missing.length ? "Active (needs inputs)" : errors.length ? "Active (errors)" : "Active") : "Inactive"}
+        </span>
+      </label>
+      {missing.length > 0 && (
+        <button type="button" className="max-w-48 truncate text-amber-400 underline-offset-2 hover:underline" onClick={openInputs}>
+          Missing: {missing.join(", ")}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -147,17 +162,16 @@ function ViewSwitch() {
 }
 
 function TopBar() {
-  const flows = useStore((s) => s.data?.flows ?? []);
   const flow = useCurrentFlow();
-  const run = useStore((s) => s.run);
   const view = useStore((s) => s.view);
-  const { setCurrentFlow, renameFlow, deleteFlow, setSettingsOpen, startRun, cancelRun, setSideTab } = useStore.getState();
+  const anyActive = useStore((s) => !!flow && activeRunsOf(s.runs, flow.id, s.run).length > 0);
+  const { renameFlow, deleteFlow, setSettingsOpen, startRun, setSideTab } = useStore.getState();
   const missing = useMissingInputs();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
-  const active = run && !run.finishedAt;
-  const canRun = !!flow && flow.nodes.length > 0 && missing.length === 0 && !active && !starting;
+  // Runs don't block each other: Run stays available while earlier runs (of this or other flows) are going.
+  const canRun = !!flow && flow.nodes.length > 0 && missing.length === 0 && !starting;
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
@@ -174,21 +188,10 @@ function TopBar() {
             setRenaming(null);
           }}
         >
-          <Input autoFocus value={renaming} onChange={(e) => setRenaming(e.target.value)} onBlur={() => setRenaming(null)} className="h-8 w-56" />
+          <Input autoFocus value={renaming} onChange={(e) => setRenaming(e.target.value)} onBlur={() => setRenaming(null)} className="h-8 w-60" />
         </form>
       ) : (
-        <Select value={flow?.id ?? ""} onValueChange={setCurrentFlow}>
-          <SelectTrigger size="sm" className="w-56">
-            <SelectValue placeholder="No flows" />
-          </SelectTrigger>
-          <SelectContent>
-            {flows.map((f) => (
-              <SelectItem key={f.id} value={f.id}>
-                {f.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <FlowSwitcher onNewFlow={() => setNewOpen(true)} />
       )}
       {view === "builder" && (
         <>
@@ -217,15 +220,12 @@ function TopBar() {
         <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
           <Settings /> Settings
         </Button>
-        {view === "agent" ? null : active ? (
-          <Button size="sm" variant="destructive" onClick={() => void cancelRun()}>
-            <Square /> Cancel
-          </Button>
-        ) : (
+        {view !== "agent" && flow && <RunsIndicator flowId={flow.id} />}
+        {view === "agent" ? null : (
           <Button
             size="sm"
             disabled={!canRun}
-            title={missing.length ? `Missing: ${missing.join(", ")}` : undefined}
+            title={missing.length ? `Missing: ${missing.join(", ")}` : anyActive ? "Start another run of this flow" : undefined}
             onClick={async () => {
               setStarting(true);
               await startRun();
@@ -282,9 +282,10 @@ export default function App() {
           </main>
         ) : (
           <div className="flex min-h-0 flex-1">
-            {/* The chat takes the palette's room so the canvas stays wide enough to follow the edits. */}
-            {!chatOpen && <Palette />}
-            <main className="min-w-0 flex-1">
+            {/* The palette stays visible next to the chat; the canvas shrinks to make room. */}
+            <Palette />
+            {/* Keeps room for the canvas: the side panels shrink (to their minimums) before it does. */}
+            <main className="min-w-[min(360px,30vw)] flex-1">
               <FlowCanvas />
             </main>
             {chatOpen && <ChatPanel />}

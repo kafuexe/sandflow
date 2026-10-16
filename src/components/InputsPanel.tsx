@@ -8,8 +8,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
-import { ENV_NAME_RE, flowRequirements, isSecretName } from "../../shared/resolve";
+import { ENV_NAME_RE, flowRequirements, isSecretName, PROJECT_ENV, startsItself } from "../../shared/resolve";
 import { missingInputs } from "../../shared/validate";
+import { FlowRunOn } from "./RunOnSelect";
 
 /** Inputs still missing for the current flow (drives the Run button). */
 export function useMissingInputs(): string[] {
@@ -19,6 +20,15 @@ export function useMissingInputs(): string[] {
     () => (flow && data ? missingInputs(flow, data.blocks, data.env, data.settings.startingPrompt, data.flows) : []),
     [flow, data],
   );
+}
+
+/** Inputs runs started by this flow's triggers still need (no starting prompt — the event stands in for it). */
+export function useTriggerMissingInputs(flowId: string): string[] {
+  const data = useStore((s) => s.data);
+  return useMemo(() => {
+    const flow = data?.flows.find((f) => f.id === flowId);
+    return flow && data ? missingInputs(flow, data.blocks, data.env, "", data.flows, { triggered: true }) : [];
+  }, [flowId, data]);
 }
 
 function NodeChips({ nodes }: { nodes: { id: string; label: string }[] }) {
@@ -52,6 +62,7 @@ export function InputsPanel() {
     .filter((k) => !used.has(k))
     .sort();
   const promptMissing = req.startingPromptNodes.length > 0 && !data.settings.startingPrompt.trim();
+  const hasTrigger = startsItself(flow, data.blocks);
   const newNameValid = ENV_NAME_RE.test(newName);
 
   return (
@@ -70,10 +81,17 @@ export function InputsPanel() {
                 aria-invalid={promptMissing}
                 className="max-h-60"
               />
+              {hasTrigger && (
+                <div className="text-[11px] text-muted-foreground">
+                  Only needed when you press Run: runs started by a trigger work on the event instead.
+                </div>
+              )}
               <div className="text-[11px] text-muted-foreground">Used by:</div>
               <NodeChips nodes={req.startingPromptNodes} />
             </section>
           )}
+
+          {!flow.pack && <FlowRunOn flow={flow} />}
 
           <section className="space-y-3">
             <div className="text-sm font-medium">Environment variables</div>
@@ -84,6 +102,7 @@ export function InputsPanel() {
                 <div key={e.name} className="space-y-1.5">
                   <Label htmlFor={`env-${e.name}`} className="font-mono text-xs">
                     {e.name}
+                    {e.optional && <span className="font-sans font-normal text-muted-foreground">(optional)</span>}
                   </Label>
                   <Input
                     id={`env-${e.name}`}
@@ -91,9 +110,15 @@ export function InputsPanel() {
                     value={value}
                     autoComplete="off"
                     onChange={(ev) => setEnv(e.name, ev.target.value)}
-                    aria-invalid={!value.trim()}
+                    aria-invalid={!e.optional && !value.trim()}
+                    placeholder={e.optional && e.name === PROJECT_ENV ? "Empty = scratch workspace" : undefined}
                     className="h-8 font-mono text-xs"
                   />
+                  {e.optional && e.name === PROJECT_ENV && (
+                    <div className="text-[11px] text-muted-foreground">
+                      Only agent blocks use it. Without a project path they work in a fresh, empty temporary folder, deleted after the run (kept, and its path logged, when an agent ran on this computer).
+                    </div>
+                  )}
                   <NodeChips nodes={e.nodes} />
                 </div>
               );
