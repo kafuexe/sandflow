@@ -3,6 +3,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { CORE_BLOCKS } from "../shared/core";
 import { eventMarkdown } from "../shared/events";
 import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
@@ -17,7 +18,7 @@ import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { execCli, importSandboxImage, sandboxImageStatus, type Exec } from "./sandbox";
 import { createSkillStore, type SkillFile } from "./skills";
-import { dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
+import { applyPackEdits, dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
 import { startWebhookServer, type WebhookServer } from "./webhooks";
 
@@ -374,14 +375,18 @@ export function createApi(
         const blocks = await readJson<BlockDef[]>(req);
         if (!Array.isArray(blocks)) throw new HttpError(400, "Expected an array of blocks");
         checkRev(url);
-        // Pack/core blocks always come from the server, whatever the client sent.
-        const own = blocks.filter((b) => !b.pack);
         const current = storage.load().blocks;
-        const before = new Map(current.filter((b) => !b.pack).map((b) => [b.id, JSON.stringify(b)]));
-        const touched = new Set(own.filter((b) => before.get(b.id) !== JSON.stringify(b)).map((b) => b.id));
-        const errors = validateBlocks([...current.filter((b) => b.pack), ...own], touched);
+        const own = blocks.filter((b) => !b.pack);
+        // A pack block comes from the server unless the client sent your edit of it (`modified`); one sent
+        // without `modified` is the pack's own version — that's how an edit is reverted.
+        const edits = blocks.filter((b) => b.pack && b.modified);
+        const packBlocks = [...CORE_BLOCKS, ...applyPackEdits(storage.packs.load().blocks, edits)];
+        const before = new Map(current.map((b) => [b.id, JSON.stringify(b)]));
+        const next = [...packBlocks, ...own];
+        const touched = new Set(next.filter((b) => before.get(b.id) !== JSON.stringify(b)).map((b) => b.id));
+        const errors = validateBlocks(next, touched);
         if (errors.length) throw new HttpError(400, errors[0], { errors });
-        storage.saveBlocks(own);
+        storage.saveBlocks(next);
         syncTriggers();
         changed({ source: "ui" });
         return send(res, 200, { ok: true, rev });

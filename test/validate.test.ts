@@ -64,6 +64,10 @@ describe("missingInputs", () => {
     expect(missing).toContain("ANTHROPIC_API_KEY");
     expect(missing).not.toContain("REPO_PATH");
   });
+  it("takes ANTHROPIC_AUTH_TOKEN (a gateway's bearer token, e.g. LiteLLM) in place of ANTHROPIC_API_KEY", () => {
+    const env = Object.fromEntries(["REPO_PATH", "ANTHROPIC_AUTH_TOKEN", "BRANCH_NAME", "BASE_BRANCH", "MR_PROVIDER"].map((k) => [k, "x"]));
+    expect(missingInputs(DEFAULT_FLOW, BUILTIN_BLOCKS, env, "do it")).toEqual([]);
+  });
   it("is empty when all filled", () => {
     const env = Object.fromEntries(
       ["REPO_PATH", "ANTHROPIC_API_KEY", "BRANCH_NAME", "BASE_BRANCH", "MR_PROVIDER"].map((k) => [k, "x"]),

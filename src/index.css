@@ -84,6 +84,21 @@
   body {
     @apply bg-background text-foreground antialiased;
   }
+  /* Native scrollbars (the agent screen, the assistant chat, dialogs…) look like <ScrollArea>'s thumb. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    background-clip: padding-box;
+    border: 1px solid transparent;
+    border-radius: 9999px;
+  }
 }
 
 /* React Flow handles */

@@ -15,7 +15,7 @@ const MARK: Record<NodeRunStatus, React.ReactNode> = {
 /** The flow's blocks in order, showing where this run is right now. */
 export function StepRail({ run, rf }: { run: RunState; rf: RunFlow }) {
   return (
-    <ol className="flex items-center gap-1 overflow-x-auto pb-1 text-xs [scrollbar-width:thin]" aria-label="Flow progress">
+    <ol className="flex items-center gap-1 overflow-x-auto pb-1 text-xs" aria-label="Flow progress">
       {rf.steps.map((step, i) => {
         const ns = run.nodes[step.id];
         const status = ns?.status ?? "idle";

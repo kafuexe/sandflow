@@ -58,6 +58,20 @@ describe("api", () => {
     expect(again.env).toEqual(env);
   });
 
+  it("saves edits of a pack block (keeping its id and pack) and reverts them", async () => {
+    const data = (await (await fetch(`${base}/data`)).json()) as AppData;
+    const edited = data.blocks.map((b) => (b.id === "base/plan" ? { ...b, name: "My plan", pack: "evil", modified: true } : b));
+    expect((await fetch(`${base}/blocks`, json("PUT", edited))).status).toBe(200);
+    let again = (await (await fetch(`${base}/data`)).json()) as AppData;
+    expect(again.blocks.find((b) => b.id === "base/plan")).toMatchObject({ name: "My plan", pack: "base", modified: true });
+    // A pack block the client sends with no `modified` is just the pack's — the edit is dropped.
+    const reverted = again.blocks.map((b) => (b.id === "base/plan" ? { ...b, modified: undefined } : b));
+    expect((await fetch(`${base}/blocks`, json("PUT", reverted))).status).toBe(200);
+    again = (await (await fetch(`${base}/data`)).json()) as AppData;
+    expect(again.blocks.find((b) => b.id === "base/plan")).toMatchObject({ name: "Plan" });
+    expect(again.blocks.find((b) => b.id === "base/plan")?.modified).toBeUndefined();
+  });
+
   it("round-trips a flow's colour and drops one outside the palette", async () => {
     const data = (await (await fetch(`${base}/data`)).json()) as AppData;
     const own = data.flows.filter((f) => !f.pack);

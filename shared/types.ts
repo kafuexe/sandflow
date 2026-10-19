@@ -259,8 +259,10 @@ export interface BlockDef {
   extends?: string | null;
   /** Legacy: shipped inside the app before packs existed (now migrated to the base pack). */
   builtin?: boolean;
-  /** Pack this block comes from (read-only; set when packs load). Absent = one of your own blocks. */
+  /** Pack this block comes from (set when packs load). Absent = one of your own blocks. */
   pack?: string;
+  /** A pack block you've edited: your version replaces the pack's until you revert it (pack updates don't apply). */
+  modified?: boolean;
   config: BlockConfig;
 }
 
