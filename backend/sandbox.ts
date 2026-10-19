@@ -1,5 +1,6 @@
 // Container-runtime helpers for air-gapped use: the sandbox image is loaded from an offline bundle and
-// must already exist locally — Sandflow never pulls it.
+// must already exist locally — Sandflow never pulls it. The installers ship that bundle, so the default
+// image is loaded from it automatically.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs";
@@ -23,18 +24,42 @@ export interface SandboxImageStatus {
   runtimeAvailable: boolean;
   image: string;
   imagePresent: boolean;
+  /** The app ships a bundle for this image (it's the default image), so it can be loaded without picking a file. */
+  bundled: boolean;
 }
 
 const runtimeOf = (s: Settings): "docker" | "podman" => (s.sandbox === "podman" ? "podman" : "docker");
 export const imageOf = (s: Settings) => s.sandboxImage?.trim() || DEFAULT_SANDBOX_IMAGE;
 
+let bundledImageFile: string | undefined;
+let bundledLoad: Promise<string> | undefined;
+
+/** The `sandflow-agent:<version>` bundle shipped inside the installed app (resources/sandbox/). */
+export function setBundledSandboxImage(file: string | undefined) {
+  bundledImageFile = file && fs.existsSync(file) ? file : undefined;
+}
+
+/** Only the default image comes with the app — a custom image is the user's to provide. */
+function bundledFileFor(s: Settings) {
+  return s.sandbox !== "none" && imageOf(s) === DEFAULT_SANDBOX_IMAGE ? bundledImageFile : undefined;
+}
+
+/** Load the shipped bundle (one load at a time — a run and the startup check may both ask for it). */
+export function loadBundledSandboxImage(s: Settings, exec: Exec = execCli): Promise<string> {
+  const file = bundledFileFor(s);
+  if (!file) return Promise.reject(new Error("This build doesn't ship a bundle for the configured image"));
+  bundledLoad ??= importSandboxImage(s, file, exec).finally(() => (bundledLoad = undefined));
+  return bundledLoad;
+}
+
 export async function sandboxImageStatus(s: Settings, exec: Exec = execCli): Promise<SandboxImageStatus> {
   const runtime = runtimeOf(s);
   const image = imageOf(s);
   const version = await exec(runtime, ["version", "--format", "{{.Server.Version}}"]).catch(() => ({ code: 1 }));
-  if (version.code !== 0) return { runtime, runtimeAvailable: false, image, imagePresent: false };
+  const bundled = !!bundledFileFor(s);
+  if (version.code !== 0) return { runtime, runtimeAvailable: false, image, imagePresent: false, bundled };
   const inspect = await exec(runtime, ["image", "inspect", image, "--format", "{{.Id}}"]);
-  return { runtime, runtimeAvailable: true, image, imagePresent: inspect.code === 0 };
+  return { runtime, runtimeAvailable: true, image, imagePresent: inspect.code === 0, bundled };
 }
 
 /** `docker load -i <file>` (accepts .tar and .tar.gz). Returns the runtime's "Loaded image: …" output. */
@@ -46,11 +71,18 @@ export async function importSandboxImage(s: Settings, file: string, exec: Exec =
   return r.stdout.trim();
 }
 
-/** Fail fast with an actionable message instead of letting `docker run` try to pull the image. */
+/**
+ * Fail fast with an actionable message instead of letting `docker run` try to pull the image. A missing
+ * default image is first loaded from the bundle shipped with the app.
+ */
 export async function ensureSandboxReady(s: Settings, exec: Exec = execCli): Promise<void> {
   if (s.sandbox === "none") return;
-  const st = await sandboxImageStatus(s, exec);
+  let st = await sandboxImageStatus(s, exec);
   if (!st.runtimeAvailable) throw new Error(`${st.runtime} isn't available — is it installed and running?`);
+  if (!st.imagePresent && st.bundled) {
+    await loadBundledSandboxImage(s, exec);
+    st = await sandboxImageStatus(s, exec);
+  }
   if (!st.imagePresent) {
     throw new Error(
       `Sandbox image "${st.image}" isn't loaded. Import the offline bundle in Settings → Sandbox (Sandflow never pulls images).`,

@@ -129,6 +129,9 @@ describe("api", () => {
     expect(execCalls.at(-1)).toEqual(["docker", "load", "-i", file]);
     const missing = await fetch(`${base}/sandbox/import`, json("POST", { path: path.join(dir, "nope.tar") }));
     expect(missing.status).toBe(400);
+    // No path = the bundle shipped with the app; this API was created without one.
+    const noBundle = await fetch(`${base}/sandbox/import`, json("POST", {}));
+    expect(noBundle.status).toBe(400);
   });
 
   it("rejects non-JSON writes (blocks cross-site simple requests)", async () => {

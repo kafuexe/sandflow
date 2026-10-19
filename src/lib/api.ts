@@ -82,7 +82,11 @@ export const api = {
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   sandboxStatus: () =>
-    request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean }>("GET", "/sandbox/status"),
+    request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean; bundled: boolean }>(
+      "GET",
+      "/sandbox/status",
+    ),
+  /** Empty path = the bundle shipped with the app. */
   importSandbox: (path: string) => request<{ output: string }>("POST", "/sandbox/import", { path }),
   listSkills: () => request<SkillRef[]>("GET", "/skills"),
   uploadSkill: (name: string, files: { path: string; content: string }[]) =>

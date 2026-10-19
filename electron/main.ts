@@ -121,6 +121,10 @@ async function start() {
     webRoot: path.join(appRoot, "dist"),
     bundledSkillsDir: app.isPackaged ? path.join(process.resourcesPath, "skills") : path.join(appRoot, "skills"),
     bundledPacksDir: app.isPackaged ? path.join(process.resourcesPath, "packs") : path.join(appRoot, "packs"),
+    // Built by CI (or `npm run sandbox:bundle`) and shipped in the installer.
+    bundledSandboxImage: app.isPackaged
+      ? path.join(process.resourcesPath, "sandbox", "sandflow-agent.tar.gz")
+      : path.join(appRoot, "build", "sandbox", "sandflow-agent.tar.gz"),
     runners: { auto: runAuto, ai: runAi, script: runScript },
   });
   console.log(`Sandflow backend listening on ${server.url}`);
