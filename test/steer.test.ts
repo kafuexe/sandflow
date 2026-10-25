@@ -8,7 +8,7 @@ import { startRun, type NodeRunner, type RunContext } from "../backend/engine";
 import { runTree } from "../backend/proc";
 import { runAi } from "../backend/runners/ai";
 import { resumingAgent, steerPrompt } from "../backend/runners/steer";
-import { containerKillScript, stoppableProvider, withAgentEnv } from "../backend/sandbox";
+import { containerKillScript, pidRecordingCommand, stoppableProvider, withAgentEnv } from "../backend/sandbox";
 import { BUILTIN_BLOCKS } from "../shared/library";
 import type { BlockConfig, Flow, RunState, Settings } from "../shared/types";
 
@@ -208,6 +208,21 @@ describe("steering a running agent", () => {
     expect(h.steer("b", "hi")).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/run has ended/) });
   });
 
+  it("caps how many messages may wait for one agent (they're saved with the run)", async () => {
+    const ai: NodeRunner = (ctx, node) => {
+      ctx.steerable!(node.id, () => {}); // never reads them
+      return new Promise((_r, reject) => ctx.abort.signal.addEventListener("abort", () => reject(new Error("Run cancelled"))));
+    };
+    const { h } = start(flowWith(), undefined, { ai });
+    await until(() => h.state.nodes.a.status === "running");
+    for (let i = 0; i < 20; i++) expect(h.steer("a", `m${i}`).ok).toBe(true);
+    expect(h.steer("a", "one more")).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/already waiting/) });
+    h.cancel();
+    await h.done;
+    expect(h.state.steers).toHaveLength(20);
+    expect(h.state.steers!.every((s) => s.status === "dropped")).toBe(true);
+  });
+
   it("Stop during a steer still stops everything: no resumed turn keeps going, the run ends cancelled", async () => {
     const { sandbox, calls } = fakeSandbox();
     const { h } = start(flowWith(), sandbox);
@@ -334,6 +349,41 @@ describe.runIf(posix)("interrupting one agent's command (not the run)", () => {
     expect(removed).toEqual([]); // the container stays
     expect(runAbort.signal.aborted).toBe(false);
     release();
+  }, 10_000);
+
+  it("container kill script: a kill that comes before the command recorded its pid stops it from starting", async () => {
+    const pid = path.join(tmp(), "pid");
+    expect((await runTree("sh", ["-c", containerKillScript(pid)])).code).toBe(0);
+    const r = await runTree("sh", ["-c", pidRecordingCommand(pid, "echo started")]);
+    expect(r.stdout).not.toContain("started");
+    expect(r.code).toBe(143);
+    expect(fs.existsSync(pid) || fs.existsSync(`${pid}.stop`)).toBe(false);
+  });
+
+  it("container command: removes its pid file when it ends and keeps the command's exit code", async () => {
+    const pid = path.join(tmp(), "pid");
+    const r = await runTree("sh", ["-c", pidRecordingCommand(pid, "echo hi; exit 3")]);
+    expect(r.stdout.trim()).toBe("hi");
+    expect(r.code).toBe(3);
+    expect(fs.existsSync(pid)).toBe(false);
+  });
+
+  it.runIf(process.platform === "linux")("container kill script: finds the tree through /proc when the image has no pgrep", async () => {
+    const d = tmp();
+    const bin = path.join(d, "bin");
+    fs.mkdirSync(bin);
+    // Just what the scripts need — no pgrep.
+    for (const t of ["sh", "cat", "sleep", "rm", "touch"]) {
+      const real = ["/usr/bin", "/bin"].map((b) => path.join(b, t)).find((f) => fs.existsSync(f))!;
+      fs.symlinkSync(real, path.join(bin, t));
+    }
+    const pid = path.join(d, "pid");
+    let child = 0;
+    const p = runTree(path.join(bin, "sh"), ["-c", pidRecordingCommand(pid, TREE)], { env: { PATH: bin }, onLine: (l) => (child = Number(l)) });
+    await until(() => child > 0 && fs.existsSync(pid));
+    await runTree(path.join(bin, "sh"), ["-c", containerKillScript(pid)], { env: { PATH: bin } });
+    await p;
+    await until(() => !alive(child));
   }, 10_000);
 });
 

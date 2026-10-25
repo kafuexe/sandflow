@@ -3,7 +3,7 @@
 
 import os from "node:os";
 import { describe, expect, it } from "vitest";
-import { stoppableProvider, takeAgentEnv, withAgentEnv } from "../backend/sandbox";
+import { pidRecordingCommand, stoppableProvider, takeAgentEnv, withAgentEnv } from "../backend/sandbox";
 import { capRunActivity, type AgentActivity } from "../shared/activity";
 import { auxModelEnv, isClaudeModel } from "../shared/agents";
 
@@ -56,7 +56,9 @@ describe("agent env reaches the agent process", () => {
     expect(write.stdin).toBe(`export ANTHROPIC_BASE_URL='http://gw'\nexport TOKEN='a'\\''b'\n`);
     const file = write.cmd.split("> ")[1];
     // The shell also records its pid, so steering can stop just this agent (see the steer tests).
-    expect(run.cmd).toMatch(new RegExp(`^\\. ${file}; rm -f ${file}; echo \\$\\$ > /tmp/\\.sandflow-pid-[\\w-]+; claude --print --model 'glm-4\\.6' -p -$`));
+    const pid = /echo \$\$ > (\/tmp\/\.sandflow-pid-[\w-]+);/.exec(run.cmd)?.[1];
+    expect(pid).toBeDefined();
+    expect(run.cmd).toBe(`. ${file}; rm -f ${file}; ${pidRecordingCommand(pid!, "claude --print --model 'glm-4.6' -p -")}`);
     expect(run.stdin).toBe("p");
     for (const c of calls) expect(c.cmd).not.toContain("http://gw");
   });

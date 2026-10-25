@@ -190,13 +190,25 @@ export function takeAgentEnv(command: string): { command: string; env?: Record<s
 }
 
 /**
- * Shell run inside a container to kill a command tree started there: the shell that ran it wrote its pid to
- * `pidFile`. Every descendant (found with procps' pgrep, which the sandbox image has) gets SIGTERM, then SIGKILL.
+ * An agent's command run inside a container, recording its shell's pid in `pidFile` so `containerKillScript` can stop
+ * it on its own (steering) — killing the `docker exec` client wouldn't. It doesn't start at all when the kill came
+ * first (`<pidFile>.stop`), and removes its pid file when it ends (so a stale pid is never killed later).
+ * `pidFile` is a path Sandflow makes (never user input), unique per command: concurrent agents and runs sharing a
+ * container each have their own.
+ */
+export const pidRecordingCommand = (pidFile: string, command: string) =>
+  `echo $$ > ${pidFile}; trap 'rm -f ${pidFile}' EXIT; if [ -e ${pidFile}.stop ]; then rm -f ${pidFile}.stop; exit 143; fi; ${command}`;
+
+/**
+ * Shell run inside a container to kill a command tree started by `pidRecordingCommand`. It first leaves a stop
+ * marker (a command that hasn't recorded its pid yet then never starts), then gives the recorded shell and every
+ * descendant SIGTERM, then SIGKILL. Descendants come from procps' pgrep, or /proc when the image has no pgrep.
  */
 export const containerKillScript = (pidFile: string) =>
-  `p=$(cat ${pidFile} 2>/dev/null); [ -n "$p" ] || exit 0; all=""; ` +
-  `walk() { all="$all $1"; for c in $(pgrep -P "$1"); do walk "$c"; done; }; walk "$p"; ` +
-  `kill -TERM $all 2>/dev/null; sleep 2; kill -KILL $all 2>/dev/null; rm -f ${pidFile}; exit 0`;
+  `touch ${pidFile}.stop; p=$(cat ${pidFile} 2>/dev/null); [ -n "$p" ] || exit 0; all=""; ` +
+  `kids() { if command -v pgrep >/dev/null 2>&1; then pgrep -P "$1"; else cat /proc/"$1"/task/*/children 2>/dev/null; fi; }; ` +
+  `walk() { all="$all $1"; for c in $(kids "$1"); do walk "$c"; done; }; walk "$p"; ` +
+  `kill -TERM $all 2>/dev/null; sleep 2; kill -KILL $all 2>/dev/null; rm -f ${pidFile} ${pidFile}.stop; exit 0`;
 
 /** Shell lines exporting `env` (sourced from a file inside a container). */
 export const exportLines = (env: Record<string, string>) =>
@@ -253,7 +265,7 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
         // An agent's command records its shell's pid, so it can be killed on its own (steering) — killing the
         // `docker exec` client wouldn't stop it.
         const pidFile = token ? `/tmp/.sandflow-pid-${randomUUID()}` : undefined;
-        const command = pidFile ? `echo $$ > ${pidFile}; ${bare}` : bare;
+        const command = pidFile ? pidRecordingCommand(pidFile, bare) : bare;
         const start = async () => {
           if (!agentEnv || !Object.keys(agentEnv).length) return handle.exec(command, o);
           // Readable only by the sandbox user, read and removed as the agent's command starts.

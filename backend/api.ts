@@ -347,8 +347,20 @@ export function createApi(
   /**
    * Resume a finished run as a new run of its flow as it is now (see shared/resume.ts), from `fromNodeIds` (default:
    * its failed / stopped / still-queued steps). The new run works on the original's branch, which must still exist.
+   * Runs being resumed right now (the checks await git) are in `resuming`: a second resume of the same one is refused.
    */
+  const resuming = new Set<string>();
   async function resumeRun(id: string, fromNodeIds?: string[]) {
+    if (resuming.has(id)) throw new HttpError(409, "This run is already being resumed");
+    resuming.add(id);
+    try {
+      return await planAndResume(id, fromNodeIds);
+    } finally {
+      resuming.delete(id);
+    }
+  }
+
+  async function planAndResume(id: string, fromNodeIds?: string[]) {
     const orig = getRun(id);
     if (runs.get(id) && !orig.finishedAt) throw new HttpError(409, "The run is still going — stop it first");
     const already = [...runs.values()].find((h) => !h.state.finishedAt && h.state.resumedFrom?.runId === id);
@@ -363,6 +375,7 @@ export function createApi(
     const missing = missingInputs(flow, data.blocks, data.env, prompt, data.flows, { triggered: !!orig.triggerNodeId });
     if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
     const notes = [...plan.warnings];
+    let env = data.env;
     if (plan.repo) {
       const repo = data.env.REPO_PATH?.trim();
       if (!repo) {
@@ -371,13 +384,27 @@ export function createApi(
         });
       }
       if (repo !== plan.repo) notes.push(`REPO_PATH changed since the original run (${plan.repo} → ${repo}); continuing on branch ${plan.branch} in ${repo}.`);
+      // A run still working on that branch (e.g. an earlier resume of this run) would share its worktree with this
+      // one. That's only refused for the run's own branch — an explicit BRANCH_NAME shared by runs just warns.
+      const explicit = data.env.BRANCH_NAME?.trim();
+      const busy = activeRuns().find((r) => r.branchKey === `${repo}\0${plan.branch}`);
+      if (busy && plan.branch !== explicit) {
+        throw new HttpError(409, `Can't resume: run ${busy.id} ("${busy.flowName}") is still working on branch ${plan.branch} — wait for it to finish or stop it first`, {
+          runId: busy.id,
+        });
+      }
+      // Steps that read BRANCH_NAME (scripts, Create task) work on the branch the run continues, not one set since.
+      if (explicit && explicit !== plan.branch) {
+        notes.push(`BRANCH_NAME is now ${explicit}, but this run continues the original run's branch ${plan.branch} — its steps get BRANCH_NAME=${plan.branch}.`);
+        env = { ...data.env, BRANCH_NAME: plan.branch! };
+      }
       // A branch the original run actually used must still be there: it holds the earlier steps' code changes.
       if (orig.branch && plan.branch === orig.branch && !(await branchExists(repo, orig.branch))) {
         const problem = `Branch ${orig.branch} no longer exists in ${repo}, so the code changes the earlier steps made are gone (was it deleted or merged?). Restore the branch, re-run from the first step, or start a new run.`;
         throw new HttpError(409, `Can't resume: ${problem}`, { problems: [problem] });
       }
     }
-    return launch(flow, data, { prompt, branch: plan.branch, resume: { from: orig, plan } }, notes);
+    return launch(flow, env === data.env ? data : { ...data, env }, { prompt, branch: plan.branch, resume: { from: orig, plan } }, notes);
   }
 
   function getRun(id: string): RunState {
@@ -788,7 +815,7 @@ export function createApi(
       case "POST /runs/:id/resume": {
         const body = (await readJson<{ fromNodeIds?: unknown }>(req)) ?? {};
         const from = body.fromNodeIds;
-        if (from !== undefined && (!Array.isArray(from) || from.some((x) => typeof x !== "string"))) {
+        if (from !== undefined && (!Array.isArray(from) || from.length > 100 || from.some((x) => typeof x !== "string" || x.length > 200))) {
           throw new HttpError(400, "fromNodeIds must be a list of node ids");
         }
         const started = await resumeRun(parts[1], from as string[] | undefined);

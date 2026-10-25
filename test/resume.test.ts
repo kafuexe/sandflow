@@ -287,4 +287,46 @@ describe("resume: API", () => {
     expect(ok.status).toBe(200);
     expect((await finished(((await ok.json()) as { runId: string }).runId)).status).toBe("done");
   });
+
+  it("one resume at a time: two at once start one run; a run still on the branch blocks another resume; BRANCH_NAME follows the branch", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    let block = false;
+    const seenEnv: (string | undefined)[] = [];
+    const runner: NodeRunner = async (ctx: RunContext, n, cfg, inputs) => {
+      ctx.run.branch ??= ctx.branch ?? `sandflow/${ctx.run.id}`;
+      seenEnv.push(ctx.env.BRANCH_NAME);
+      if (cfg.shellCommand === "bad-command") throw new Error("not found");
+      if (block && n.id === "b") await gate;
+      return { outputs: { artifact: `${n.id}(${inputs.artifact ?? ""})` } };
+    };
+    const { git } = await setup(runner);
+    await saveFlow(chain(undefined, "base/shell"));
+    const { runId } = (await (await fetch(`${base}/runs`, json("POST", { flowId: "f" }))).json()) as { runId: string };
+    await finished(runId);
+    git("branch", `sandflow/${runId}`);
+    // A resume that fails again (b still broken), so it can be resumed in turn.
+    const r2 = (await (await fetch(`${base}/runs/${runId}/resume`, json("POST", {}))).json()) as { runId: string };
+    expect((await finished(r2.runId)).status).toBe("failed");
+
+    await saveFlow(chain("echo b", "base/shell"));
+    block = true;
+    // BRANCH_NAME changed since: the resumed steps still see the branch they continue.
+    await fetch(`${base}/env`, json("PUT", { REPO_PATH: path.join(dir, "repo"), BRANCH_NAME: "other" }));
+    seenEnv.length = 0;
+    const both = await Promise.all([1, 2].map(() => fetch(`${base}/runs/${r2.runId}/resume`, json("POST", {}))));
+    expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
+    const r3 = (await both.find((r) => r.status === 200)!.json()) as { runId: string; warning?: string };
+    expect(r3.warning).toMatch(/BRANCH_NAME is now other/);
+
+    // The first run, resumed again while r3 works on the same branch: refused.
+    const busy = await fetch(`${base}/runs/${runId}/resume`, json("POST", {}));
+    expect(busy.status).toBe(409);
+    expect(((await busy.json()) as { error: string }).error).toMatch(/still working on branch sandflow\//);
+
+    release();
+    expect((await finished(r3.runId)).status).toBe("done");
+    expect(seenEnv.length).toBeGreaterThan(0);
+    expect(seenEnv.every((b) => b === `sandflow/${runId}`)).toBe(true);
+  });
 });

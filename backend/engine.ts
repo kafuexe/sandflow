@@ -31,6 +31,10 @@ import type { PackRuntimeInfo } from "./packs";
 import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
 
+/** Steering messages one agent may have waiting, and a run may get in all. */
+const MAX_PENDING_STEERS = 20;
+const MAX_RUN_STEERS = 500;
+
 export interface NodeResult {
   outputs: NodeIO;
   /** manager: id of the chosen target node. */
@@ -721,6 +725,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
         return { ok: false, status: 409, error: `This step isn't running (it's ${ns.status}) — only an agent that is working can be steered` };
       }
       if (!onSteer) return { ok: false, status: 409, error: "Only AI agent and manager blocks can be steered" };
+      // Steers are saved with the run: keep a runaway client from growing it without bound.
+      const steers = run.steers ?? [];
+      if (steers.filter((s) => s.nodeId === nodeKey && s.status === "pending").length >= MAX_PENDING_STEERS) {
+        return { ok: false, status: 409, error: `${MAX_PENDING_STEERS} messages are already waiting for this agent — wait until it has read them` };
+      }
+      if (steers.length >= MAX_RUN_STEERS) return { ok: false, status: 409, error: `This run already got ${MAX_RUN_STEERS} steering messages — that's the limit` };
       const steer: SteerRecord = { id: randomUUID().slice(0, 8), nodeId: nodeKey, message: text, sentAt: Date.now(), status: "pending" };
       (run.steers ??= []).push(steer);
       ctx.log("info", `Steering message received: ${text}`, nodeKey);
