@@ -259,6 +259,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
   let pending: { resolve: (a: string) => void; reject: (e: Error) => void } | undefined;
   /** Running agent nodes that take steering messages, by node key. */
   const steerTargets = new Map<string, () => void>();
+  /** Node keys that ever took steering messages. */
+  const steerSeen = new Set<string>();
 
   // Agent activity arrives line by line; it's collected and pushed with the run state a few times a second.
   const activityQueue = new Map<string, (AgentActivity & { chunk?: boolean })[]>();
@@ -316,6 +318,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     },
     steerable(nodeId, onSteer) {
       steerTargets.set(nodeId, onSteer);
+      steerSeen.add(nodeId);
       const mine = () => (run.steers ?? []).filter((s) => s.nodeId === nodeId && s.status === "pending");
       return {
         pending: mine,
@@ -724,7 +727,11 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (ns.status !== "running" && ns.status !== "waiting") {
         return { ok: false, status: 409, error: `This step isn't running (it's ${ns.status}) — only an agent that is working can be steered` };
       }
-      if (!onSteer) return { ok: false, status: 409, error: "Only AI agent and manager blocks can be steered" };
+      if (!onSteer) {
+        // An agent that took messages a moment ago is wrapping up its step (its status changes right after).
+        if (steerSeen.has(nodeKey)) return { ok: false, status: 409, error: "This agent is finishing its step — it can't take messages any more" };
+        return { ok: false, status: 409, error: "Only AI agent and manager blocks can be steered" };
+      }
       // Steers are saved with the run: keep a runaway client from growing it without bound.
       const steers = run.steers ?? [];
       if (steers.filter((s) => s.nodeId === nodeKey && s.status === "pending").length >= MAX_PENDING_STEERS) {

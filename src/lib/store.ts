@@ -512,7 +512,7 @@ export const useStore = create<State>((set, get) => {
     async resumeRun(runId, fromNodeIds) {
       // The resumed run uses the flow as saved: write pending edits (the config fix) first.
       if (!(await get().flushSaves())) {
-        set({ runError: `Can't resume: ${get().saveError}` });
+        set({ runError: `Can't resume: ${get().saveError}`, sideTab: "run" });
         return undefined;
       }
       try {
@@ -525,7 +525,8 @@ export const useStore = create<State>((set, get) => {
         return id;
       } catch (e) {
         const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
-        set({ runError: missing ? `Missing: ${missing.join(", ")}` : (e as Error).message });
+        // Shown in the Run tab (the Block tab's "Re-run from here" has nowhere to say it).
+        set({ runError: missing ? `Missing: ${missing.join(", ")}` : (e as Error).message, sideTab: "run" });
         return undefined;
       }
     },

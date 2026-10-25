@@ -208,6 +208,24 @@ describe("steering a running agent", () => {
     expect(h.steer("b", "hi")).toMatchObject({ ok: false, status: 409, error: expect.stringMatching(/run has ended/) });
   });
 
+  it("a steer that lands just as the turn ends isn't lost and doesn't fail the node: it's the agent's next turn", async () => {
+    const { sandbox, calls } = fakeSandbox();
+    const { h } = start(flowWith(), sandbox);
+    await until(() => calls.length === 1);
+    calls[0].finish("<artifact>plan v1</artifact>");
+    expect(h.steer("a", "also cover logout").ok).toBe(true); // same tick: the turn already ended
+    await until(() => calls.length === 2);
+    // The finished turn's session is followed up (sandcastle's `resume`) with the message.
+    expect(calls[1].prompt).toBe(steerPrompt(["also cover logout"], false));
+    calls[1].finish("<artifact>plan v2</artifact>");
+    await until(() => calls.length === 3);
+    calls[2].finish("<artifact>done</artifact>");
+    const run = await h.done;
+    expect(run.status).toBe("done");
+    expect(run.nodes.a.outputs?.artifact).toBe("plan v2");
+    expect(run.steers?.[0]).toMatchObject({ status: "applied", how: "next-turn" });
+  });
+
   it("caps how many messages may wait for one agent (they're saved with the run)", async () => {
     const ai: NodeRunner = (ctx, node) => {
       ctx.steerable!(node.id, () => {}); // never reads them
