@@ -15,6 +15,7 @@ import type {
   RunSummary,
   Settings,
   SkillRef,
+  SteerRecord,
 } from "../../shared/types";
 
 /** What to stage a pack from. */
@@ -84,6 +85,9 @@ export const api = {
   resumeRun: (id: string, fromNodeIds?: string[]) =>
     request<{ runId: string; warning?: string }>("POST", `/runs/${encodeURIComponent(id)}/resume`, fromNodeIds ? { fromNodeIds } : {}),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
+  /** Send a steering message to a running agent node (node keys of subflow nodes contain "/"). */
+  steer: (id: string, nodeKey: string, message: string) =>
+    request<{ ok: true; steer: SteerRecord }>("POST", `/runs/${encodeURIComponent(id)}/nodes/${encodeURIComponent(nodeKey)}/steer`, { message }),
   sandboxStatus: () =>
     request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean; bundled: boolean }>(
       "GET",

@@ -423,6 +423,26 @@ export function createApi(
       return send(res, 200, { ok: true });
     }
 
+    // Node keys of subflow nodes contain "/" — sent URL-encoded as one path segment.
+    if (method === "POST" && parts[0] === "runs" && parts[2] === "nodes" && parts[4] === "steer" && parts.length === 5) {
+      const h = runs.get(parts[1]);
+      const { message } = (await readJson<{ message?: unknown }>(req)) ?? {};
+      if (typeof message !== "string") throw new HttpError(400, "Send { message: string }");
+      if (!h) {
+        getRun(parts[1]); // 404 for an unknown run
+        throw new HttpError(409, "This run has ended — there's no agent left to steer");
+      }
+      let nodeKey: string;
+      try {
+        nodeKey = decodeURIComponent(parts[3]);
+      } catch {
+        throw new HttpError(400, "Invalid node id");
+      }
+      const r = h.steer(nodeKey, message);
+      if (!r.ok) throw new HttpError(r.status, r.error);
+      return send(res, 200, { ok: true, steer: r.steer });
+    }
+
     switch (route) {
       case "GET /data":
         return send(res, 200, { ...storage.load(), rev });

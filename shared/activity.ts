@@ -1,7 +1,8 @@
 // What an agent block is doing while it runs: its thinking, replies and tool calls, parsed from the agent CLI's
 // output stream. Shared by the server (parsing, capping) and the UI (showing it).
 
-export type ActivityKind = "thinking" | "text" | "tool" | "tool_result" | "result";
+/** `steer`: a steering message from the user, as the agent received it. */
+export type ActivityKind = "thinking" | "text" | "tool" | "tool_result" | "result" | "steer";
 
 export interface AgentActivity {
   ts: number;

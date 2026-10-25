@@ -52,6 +52,8 @@ interface State {
   /** Node id → when the assistant last touched it (drives the canvas glow). */
   highlight: Record<string, number>;
   view: View;
+  /** The canvas's "Steer" button was pressed on this node: its side panel focuses the steering box. */
+  steerFocus?: { nodeKey: string; at: number };
 
   load(): Promise<void>;
   /** Re-read flows/blocks from the server, keeping unsaved settings/env. */
@@ -90,6 +92,8 @@ interface State {
   removeEnv(name: string): void;
   // ui
   selectNode(id: string | null): void;
+  /** Select a running agent node and focus its "Steer this agent" box. */
+  steerNode(id: string): void;
   openEditor(target: EditorTarget): void;
   setSettingsOpen(open: boolean): void;
   setPacksOpen(open: boolean): void;
@@ -469,6 +473,9 @@ export const useStore = create<State>((set, get) => {
 
     selectNode(id) {
       set({ selectedNodeId: id, ...(id ? { sideTab: "block" as const } : {}) });
+    },
+    steerNode(id) {
+      set({ selectedNodeId: id, sideTab: "block", steerFocus: { nodeKey: id, at: Date.now() } });
     },
     openEditor(editor) {
       set({ editor });

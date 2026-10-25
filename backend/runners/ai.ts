@@ -14,7 +14,8 @@ import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
 import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider, withAgentEnv } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
-import { agentStreamHandler } from "./activity";
+import { agentStreamHandler, type StreamEvent } from "./activity";
+import { resumingAgent, Steering, steerPrompt } from "./steer";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
 
 /** Where installed packs are mounted (read-only) inside the run's sandbox. */
@@ -23,6 +24,7 @@ export const SANDBOX_PACKS_DIR = "/opt/sandflow/packs";
 /** The subset of sandcastle's `Sandbox` / `SandboxRunResult` this runner relies on. */
 interface RunResultLike {
   stdout: string;
+  completionSignal?: string;
   commits: { sha: string }[];
   iterations: { usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number } }[];
   resume?: (prompt: string, options?: Record<string, unknown>) => Promise<RunResultLike>;
@@ -51,6 +53,8 @@ export function skillInstallCommand(skill: SkillRef, provider: AgentProvider): s
 }
 
 const MAX_QUESTION_ROUNDS = 5;
+/** Extra turns for steering messages that couldn't be delivered mid-turn. */
+const MAX_STEER_TURNS = 10;
 const COMPLETE = "<promise>COMPLETE</promise>";
 
 /** Where each agent reads user-level skills from (relative to $HOME). Only Claude Code for now. */
@@ -362,6 +366,12 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
 }
 
 async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO, release: (() => void)[]): Promise<NodeResult> {
+  // Steering messages are accepted from the start; ones sent while the sandbox is prepared go into the first prompt.
+  const steering = new Steering({
+    steerable: ctx.steerable ? (onSteer) => ctx.steerable!(node.id, onSteer) : undefined,
+    log: (level, msg) => ctx.log(level, msg, node.id),
+  });
+  release.push(() => steering.close());
   const kind = agentSandboxKind(ctx, cfg);
   const onHost = kind === "none";
   // Chosen on the block / node / flow (not just Settings → Sandbox: None): use the local CLI's own login.
@@ -418,6 +428,8 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const scoped = withAgentEnv(await makeAgent(cfg, fullEnv), fullEnv);
   release.push(scoped.release);
   const agent = scoped.agent;
+  steering.agent = agent;
+  steering.interrupt = scoped.interrupt;
   ctx.log(
     "info",
     cfg.agent.model.trim()
@@ -429,42 +441,125 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   if (endpoint) ctx.log("info", `Agent endpoint: ${endpoint}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
   const qa: QaPair[] = [];
+  const stream = agentStreamHandler(ctx, node.id, cfg.agent.provider);
   const baseOptions = {
     name: label,
-    signal: ctx.abort.signal,
     ...(cfg.maxIterations > 1 ? { completionSignal: COMPLETE } : {}),
     ...(ctx.logDir
       ? {
           logging: {
             type: "file",
             path: path.join(ctx.logDir, `${node.id.replace(/[^\w-]/g, "_")}.log`),
-            onAgentStreamEvent: agentStreamHandler(ctx, node.id, cfg.agent.provider),
+            onAgentStreamEvent: (ev: StreamEvent & { iteration?: number }) => {
+              stream(ev);
+              // The agent's session id, so a steering message can resume it.
+              if (ev.type === "raw" && typeof ev.line === "string") steering.seeLine(ev.line, ev.iteration);
+            },
           },
         }
       : {}),
   };
 
-  const runFresh = () =>
+  type Start = (signal: AbortSignal) => Promise<RunResultLike>;
+  const runFresh = (signal: AbortSignal, maxIterations = cfg.maxIterations) =>
     sandbox.run({
       ...baseOptions,
+      signal,
       agent,
-      prompt: buildPrompt({ cfg, inputs, startingPrompt: ctx.settings.startingPrompt, qa, routes, packDir, scratch: usesScratchWorkspace(ctx) }),
-      maxIterations: cfg.maxIterations,
+      prompt: buildPrompt({
+        cfg,
+        inputs,
+        startingPrompt: ctx.settings.startingPrompt,
+        qa,
+        routes,
+        packDir,
+        scratch: usesScratchWorkspace(ctx),
+        steering: steering.applied,
+      }),
+      maxIterations,
     });
   // Follow up in the same agent session when possible, otherwise re-run with the extra context in the prompt.
-  const followUp = (res: RunResultLike, message: string) =>
-    res.resume ? res.resume(message, { name: label, signal: ctx.abort.signal }) : runFresh();
+  // Steering messages that are still waiting go along with it.
+  const followUp = (res: RunResultLike, message: string): Start => {
+    const steers = steering.take("next-turn");
+    const text = steers.length ? `${steerPrompt(steers, false)}\n\n${message}` : message;
+    return (signal) => (res.resume ? res.resume(text, { name: label, signal }) : runFresh(signal));
+  };
+  const merge = (a: RunResultLike | undefined, b: RunResultLike): RunResultLike =>
+    a ? { ...b, stdout: a.stdout + b.stdout, commits: [...a.commits, ...b.commits], iterations: [...a.iterations, ...b.iterations] } : b;
 
-  let res = await runFresh();
-  logUsage(ctx, node.id, res);
+  /**
+   * One turn of the agent (`budget` = its iterations). A steering message interrupts it and resumes the same
+   * session with the message; then, in an iteration loop, the iterations still due run as usual.
+   */
+  const turn = async (start: Start, budget = 1): Promise<RunResultLike> => {
+    let call = start;
+    let resuming = false;
+    let used = 0;
+    let done: RunResultLike | undefined;
+    for (;;) {
+      const ctl = new AbortController();
+      steering.begin(ctl);
+      let res: RunResultLike;
+      try {
+        res = await call(AbortSignal.any([ctx.abort.signal, ctl.signal]));
+      } catch (e) {
+        if (ctx.abort.signal.aborted) throw e;
+        if (steering.steered(ctl)) {
+          if (!resuming) used += Math.max(1, steering.iteration);
+          const session = steering.session!;
+          await steering.settled();
+          if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
+          const messages = steering.take("interrupt");
+          ctx.log("info", `Resuming the agent's session ${session} with the steering message`, node.id);
+          call = (signal) => sandbox.run({ ...baseOptions, signal, agent: resumingAgent(agent, session), prompt: steerPrompt(messages, true), maxIterations: 1 });
+          resuming = true;
+          continue;
+        }
+        if (resuming) {
+          // E.g. the agent was stopped before its session was saved: start over, the messages are in the prompt.
+          ctx.log("warn", `Couldn't resume the agent's session after steering (${tail((e as Error).message, 300)}) — starting it again with your message in its prompt`, node.id);
+          call = (signal) => runFresh(signal, Math.max(1, budget - used));
+          resuming = false;
+          continue;
+        }
+        throw e;
+      } finally {
+        steering.end(ctl);
+      }
+      if (!resuming) used += Math.max(1, res.iterations.length);
+      done = merge(done, res);
+      // Iteration loop: an interrupted iteration was finished by the resumed turn; the rest still run.
+      if (resuming && budget - used > 0 && !res.completionSignal) {
+        const left = budget - used;
+        call = (signal) => runFresh(signal, left);
+        resuming = false;
+        continue;
+      }
+      logUsage(ctx, node.id, done);
+      return done;
+    }
+  };
+  /** Steering messages that arrived when the agent couldn't take them mid-turn: one more turn with them. */
+  const settle = async (res: RunResultLike): Promise<RunResultLike> => {
+    for (let i = 0; i < MAX_STEER_TURNS && steering.pending().length; i++) {
+      const steers = steering.take("next-turn");
+      ctx.log("info", "Giving the agent the steering message as its next turn", node.id);
+      res = await turn((signal) => (res.resume ? res.resume(steerPrompt(steers, false), { name: label, signal }) : runFresh(signal)));
+    }
+    return res;
+  };
+
+  // Messages sent while the sandbox was being prepared are part of the first prompt.
+  steering.take("next-turn");
+  let res = await settle(await turn((signal) => runFresh(signal), cfg.maxIterations));
   let parsed = parseOutput(res.stdout);
 
   if (cfg.allowQuestions) {
     for (let round = 0; parsed.question && round < MAX_QUESTION_ROUNDS; round++) {
       const answer = await ctx.ask(node.id, parsed.question);
       qa.push({ question: parsed.question, answer });
-      res = await followUp(res, `The user answered your question.\n\nQ: ${parsed.question}\nA: ${answer}\n\nContinue the task and follow the output protocol.`);
-      logUsage(ctx, node.id, res);
+      res = await settle(await turn(followUp(res, `The user answered your question.\n\nQ: ${parsed.question}\nA: ${answer}\n\nContinue the task and follow the output protocol.`)));
       parsed = parseOutput(res.stdout);
     }
   }
@@ -473,7 +568,7 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     const valid = routes?.map((r) => r.id) ?? [];
     if (valid.length && (!parsed.route || !valid.includes(parsed.route))) {
       ctx.log("warn", `Invalid route "${parsed.route ?? ""}" — asking the manager again`, node.id);
-      res = await followUp(res, `"${parsed.route ?? ""}" is not a valid route. Reply with exactly one of: ${valid.map((v) => `<route>${v}</route>`).join(" ")}`);
+      res = await settle(await turn(followUp(res, `"${parsed.route ?? ""}" is not a valid route. Reply with exactly one of: ${valid.map((v) => `<route>${v}</route>`).join(" ")}`)));
       const retry = parseOutput(res.stdout);
       parsed = { ...parsed, route: retry.route, steer: retry.steer ?? parsed.steer };
     }

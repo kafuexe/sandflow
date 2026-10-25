@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
-import { ArrowDown, Brain, ChevronRight, CornerDownRight, Loader2, MessageSquare, Wrench } from "lucide-react";
+import { ArrowDown, Brain, ChevronRight, CornerDownRight, Loader2, MessageSquare, Navigation, Wrench } from "lucide-react";
 import { DEFAULT_FILTER, groupActivity, loadFilter, loadOpen, saveFilter, saveOpen, shown, type ActivityFilter } from "@/lib/activityView";
 import { cn } from "@/lib/utils";
 import type { AgentActivity } from "../../shared/activity";
@@ -143,6 +143,16 @@ export function ActivityRow({ a }: { a: AgentActivity }) {
       );
     case "result":
       return <div className={cn("text-[10px] font-medium", a.isError ? "text-red-300" : "text-emerald-300")}>{a.text}</div>;
+    case "steer":
+      return (
+        <div className="flex gap-1.5 rounded border border-sky-400/30 bg-sky-400/10 px-1.5 py-1 text-foreground">
+          <Navigation className="mt-0.5 size-3 shrink-0 text-sky-300" aria-hidden />
+          <p className="min-w-0 whitespace-pre-wrap">
+            <span className="font-medium text-sky-200">You steered: </span>
+            {a.text}
+          </p>
+        </div>
+      );
   }
 }
 

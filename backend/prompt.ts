@@ -18,10 +18,12 @@ export interface PromptParts {
   packDir?: string;
   /** No project: the agent works in an empty scratch directory that is thrown away after the run. */
   scratch?: boolean;
+  /** Steering messages the user sent this agent while it worked, oldest first. */
+  steering?: string[];
 }
 
 /** Builds the inline prompt string for an AI / manager block (never a prompt file — see plan §0). */
-export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, scratch }: PromptParts): string {
+export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, scratch, steering }: PromptParts): string {
   const sections: string[] = [];
   const role = [cfg.instructions, cfg.extraInstructions].filter((s) => s.trim()).join("\n\n");
   sections.push(`# Role\n${role || "You are a helpful software engineering agent."}`);
@@ -51,6 +53,9 @@ export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, 
     sections.push(
       `# Previous Q&A\n${qa.map((p) => `Q: ${p.question}\nA: ${p.answer}`).join("\n\n")}`,
     );
+  }
+  if (steering?.length) {
+    sections.push(`# Steering from the user\nThe user sent these messages while you worked on this — follow them:\n${steering.map((m) => `- ${m}`).join("\n")}`);
   }
   if (routes?.length) {
     const list = routes

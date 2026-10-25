@@ -270,3 +270,38 @@ describe("concurrent runs", () => {
     expect(seen[s1.id]).toEqual(seen[s2.id]);
   });
 });
+
+describe("steering a running node", () => {
+  it("POST /runs/:id/nodes/:nodeId/steer: 200 for a running agent, 409 when it isn't running, 404 / 400 otherwise", async () => {
+    const got: string[] = [];
+    await start((ctx, node) => {
+      const inbox = ctx.steerable!(node.id, () => got.push(...inbox.pending().map((s) => s.message)));
+      return new Promise((_r, reject) => ctx.abort.signal.addEventListener("abort", () => reject(new Error("Run cancelled"))));
+    });
+    await fetch(`${base}/env`, json("PUT", env));
+    await fetch(`${base}/settings`, json("PUT", { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 }));
+    const { runId } = (await (await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline" }))).json()) as { runId: string };
+    let run: RunState;
+    do run = (await (await fetch(`${base}/runs/${runId}`)).json()) as RunState;
+    while (!Object.values(run.nodes).some((n) => n.status === "running"));
+    const running = Object.entries(run.nodes).find(([, n]) => n.status === "running")![0];
+    const idle = Object.entries(run.nodes).find(([, n]) => n.status === "idle")![0];
+    const steer = (node: string, body: unknown, id = runId) => fetch(`${base}/runs/${id}/nodes/${encodeURIComponent(node)}/steer`, json("POST", body));
+
+    const ok = await steer(running, { message: "focus on tests" });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, steer: { nodeId: running, message: "focus on tests", status: "pending" } });
+    expect(got).toEqual(["focus on tests"]);
+
+    const notRunning = await steer(idle, { message: "x" });
+    expect(notRunning.status).toBe(409);
+    expect(((await notRunning.json()) as { error: string }).error).toMatch(/isn't running/);
+    expect((await steer("sub/inner", { message: "x" })).status).toBe(404);
+    expect((await steer(running, { message: 3 })).status).toBe(400);
+    expect((await steer(running, { message: "x" }, "2026-01-01T00-00-00-000Z-nope0000")).status).toBe(404);
+
+    await fetch(`${base}/runs/${runId}/cancel`, json("POST", {}));
+    const ended = await steer(running, { message: "x" });
+    expect(ended.status).toBe(409);
+  });
+});

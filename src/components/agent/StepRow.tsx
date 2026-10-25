@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { ChevronRight, Loader2 } from "lucide-react";
+import { ChevronRight, Loader2, Navigation } from "lucide-react";
 import { activityOf } from "@/lib/activityView";
+import { offersSteer, steersOf } from "@/lib/steer";
 import { BlockIcon } from "@/lib/icons";
 import type { StepItem } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import type { RunState } from "../../../shared/types";
 import type { AgentActivity } from "../../../shared/activity";
 import { ActivityFilterBar, ActivityList, useActivityFilter } from "../AgentActivity";
+import { SteerBox } from "../SteerBox";
 import { Disclosure } from "./Disclosure";
 import { RerunFromHere } from "../ResumeControls";
 import { useAgent } from "@/lib/agent";
@@ -77,6 +79,10 @@ export function StepRow({
   const lines = item.lines.slice(-MAX_LINES);
   const output = latest && item.status === "done" ? ns?.outputs?.artifact : undefined;
   const activity = activityOf(run.activity, item.nodeId, item.execution);
+  const canSteer = latest && item.status === "running" && offersSteer(run, item.nodeId, cfg?.kind);
+  const [steering, setSteering] = useState(false);
+  // Messages still on their way stay visible even with the box closed.
+  const pendingSteers = latest && steersOf(run, item.nodeId).some((s) => s.status === "pending");
 
   return (
     <li className="relative flex gap-3">
@@ -93,7 +99,19 @@ export function StepRow({
           <span className="ml-auto shrink-0 text-xs tabular-nums">
             <StatusText item={item} now={now} />
           </span>
+          {canSteer && (
+            <button
+              type="button"
+              aria-expanded={steering}
+              onClick={() => setSteering(!steering)}
+              title="Send this agent a message while it works"
+              className="flex h-6 shrink-0 items-center gap-1 self-center rounded-full border border-sky-400/50 px-2 text-xs text-sky-300 outline-none hover:bg-sky-400/10 focus-visible:ring-2 focus-visible:ring-ring/60"
+            >
+              <Navigation className="size-3" aria-hidden /> Steer
+            </button>
+          )}
         </div>
+        {((canSteer && steering) || pendingSteers) && <SteerBox run={run} nodeKey={item.nodeId} cfg={cfg} autoFocus={steering} />}
         {item.note && (
           <p className="text-xs text-muted-foreground">
             {item.note.startsWith("routed to ") ? `Handed off to ${item.note.slice(10)}` : `Condition: ${item.note}`}

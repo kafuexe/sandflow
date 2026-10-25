@@ -20,11 +20,13 @@ import type {
   FlagSeverity,
   RunState,
   SandboxKind,
+  SteerRecord,
   Settings,
   StackRunInfo,
   SkillFileRef,
 } from "../shared/types";
 import type { ResumePlan } from "../shared/resume";
+import { MAX_STEER_CHARS } from "../shared/types";
 import type { PackRuntimeInfo } from "./packs";
 import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
@@ -90,6 +92,11 @@ export interface RunContext {
   activity?(nodeId: string, items: ActivityDraft[]): void;
   /** Pause the run until the user answers (rejects when the run is cancelled). */
   ask(nodeId: string, question: string): Promise<string>;
+  /**
+   * An agent node accepts steering messages while it runs: `onSteer` is called for each message the user sends it
+   * (see `RunHandle.steer`). Close the inbox when the node is done.
+   */
+  steerable?(nodeId: string, onSteer: () => void): SteerInbox;
   /** Raise a flag on the run: saved with it, shown in the run list and as an alert. */
   flag(severity: FlagSeverity, message: string, o?: { nodeKey?: string; details?: string; fromRunId?: string }): RunFlag;
   /** Teardown callbacks run when the run ends (e.g. sandbox.close()). */
@@ -102,6 +109,20 @@ export interface RunContext {
   /** Packs whose runtime copy is already prepared in this run's sandbox. */
   preparedPacks: Set<string>;
 }
+
+/** Steering messages for one running agent node. */
+export interface SteerInbox {
+  /** Messages not handed to the agent yet, oldest first. */
+  pending(): SteerRecord[];
+  /** The agent got these (logged, and shown in its activity). */
+  applied(records: SteerRecord[], how: NonNullable<SteerRecord["how"]>): void;
+  /** Note for the user on still-pending messages (e.g. "queued until the agent's next turn"). */
+  note(records: SteerRecord[], note: string): void;
+  /** The node is done: anything still pending is dropped with `why`. */
+  close(why?: string): void;
+}
+
+export type SteerResult = { ok: true; steer: SteerRecord } | { ok: false; status: 400 | 404 | 409; error: string };
 
 export interface StartRunOptions {
   flow: Flow;
@@ -155,6 +176,8 @@ export interface RunHandle {
   state: RunState;
   done: Promise<RunState>;
   answer(answer: string): boolean;
+  /** Send a steering message to a running agent node (by node key). */
+  steer(nodeKey: string, message: string): SteerResult;
   cancel(): void;
 }
 
@@ -181,6 +204,7 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
     activity: (nodeId, items) => ctx.activity?.(prefix + nodeId, items),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
+    steerable: (nodeId, onSteer) => ctx.steerable!(prefix + nodeId, onSteer),
     flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
   };
@@ -229,6 +253,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
   const emit = () => opts.onChange?.(run);
 
   let pending: { resolve: (a: string) => void; reject: (e: Error) => void } | undefined;
+  /** Running agent nodes that take steering messages, by node key. */
+  const steerTargets = new Map<string, () => void>();
 
   // Agent activity arrives line by line; it's collected and pushed with the run state a few times a second.
   const activityQueue = new Map<string, (AgentActivity & { chunk?: boolean })[]>();
@@ -283,6 +309,41 @@ export function startRun(opts: StartRunOptions): RunHandle {
       ctx.log(severity === "error" ? "error" : "warn", `⚑ ${message}`, o.nodeKey);
       opts.onFlag?.(run, f);
       return f;
+    },
+    steerable(nodeId, onSteer) {
+      steerTargets.set(nodeId, onSteer);
+      const mine = () => (run.steers ?? []).filter((s) => s.nodeId === nodeId && s.status === "pending");
+      return {
+        pending: mine,
+        applied(records, how) {
+          if (!records.length) return;
+          const at = Date.now();
+          for (const r of records) {
+            r.status = "applied";
+            r.appliedAt = at;
+            r.how = how;
+            r.note = undefined;
+            ctx.log("info", `Steered by user: ${r.message}`, nodeId);
+          }
+          ctx.activity?.(nodeId, records.map((r) => ({ kind: "steer" as const, text: r.message })));
+          emit();
+        },
+        note(records, note) {
+          for (const r of records) r.note = note;
+          if (records.length) emit();
+        },
+        close(why = "The step ended before the agent got this message") {
+          if (steerTargets.get(nodeId) === onSteer) steerTargets.delete(nodeId);
+          const left = mine();
+          for (const r of left) {
+            r.status = "dropped";
+            r.note = why;
+          }
+          if (left.length) {
+            ctx.log("warn", `${left.length} steering message${left.length === 1 ? "" : "s"} not delivered: ${why}`, nodeId);
+          }
+        },
+      };
     },
     ask(nodeId, question) {
       if (ctx.abort.signal.aborted) return Promise.reject(new Error("Run cancelled"));
@@ -628,6 +689,10 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (run.status !== "done" && topQueue.length) run.unstarted = topQueue.map((q) => ({ nodeId: q.nodeId, inputs: q.inputs }));
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
+      steerTargets.clear();
+      for (const st of run.steers ?? []) {
+        if (st.status === "pending") Object.assign(st, { status: "dropped", note: "The run ended before the agent got this message" });
+      }
       flushActivity();
       run.finishedAt = Date.now();
       if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
@@ -643,6 +708,25 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (!pending) return false;
       pending.resolve(a);
       return true;
+    },
+    steer(nodeKey, message) {
+      const text = message.trim();
+      if (!text) return { ok: false, status: 400, error: "The steering message is empty" };
+      if (text.length > MAX_STEER_CHARS) return { ok: false, status: 400, error: `The steering message is too long (max ${MAX_STEER_CHARS} characters)` };
+      if (run.finishedAt || settled || ctx.abort.signal.aborted) return { ok: false, status: 409, error: "This run has ended — there's no agent left to steer" };
+      const ns = run.nodes[nodeKey];
+      if (!ns) return { ok: false, status: 404, error: `No step "${nodeKey}" in this run` };
+      const onSteer = steerTargets.get(nodeKey);
+      if (ns.status !== "running" && ns.status !== "waiting") {
+        return { ok: false, status: 409, error: `This step isn't running (it's ${ns.status}) — only an agent that is working can be steered` };
+      }
+      if (!onSteer) return { ok: false, status: 409, error: "Only AI agent and manager blocks can be steered" };
+      const steer: SteerRecord = { id: randomUUID().slice(0, 8), nodeId: nodeKey, message: text, sentAt: Date.now(), status: "pending" };
+      (run.steers ??= []).push(steer);
+      ctx.log("info", `Steering message received: ${text}`, nodeKey);
+      onSteer();
+      emit();
+      return { ok: true, steer };
     },
     cancel() {
       // Idempotent: a second Stop (or one after the run ended) does nothing.
