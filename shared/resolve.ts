@@ -25,7 +25,8 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   extraInstructions: "",
   autoAction: "shell",
   shellCommand: "",
-  agent: { provider: "claudeCode", model: "claude-opus-4-8", effort: "high" },
+  // No model = the agent CLI's own default model (no --model flag), like the Edit-with-AI chat.
+  agent: { provider: "claudeCode", model: "", effort: "high" },
   runOn: "inherit",
   maxIterations: 1,
   trigger: { type: "manual", overlap: "queue" },

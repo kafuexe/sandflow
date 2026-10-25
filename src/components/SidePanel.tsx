@@ -71,13 +71,13 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
       </Row>
       {cfg.kind === "stack" && (
         <Row k="Orchestrator">
-          {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
+          {cfg.agent.provider} · {cfg.agent.model || "default model"} · {cfg.agent.effort}
         </Row>
       )}
       {(cfg.kind === "ai" || cfg.kind === "manager") && (
         <>
           <Row k="Agent">
-            {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
+            {cfg.agent.provider} · {cfg.agent.model || "default model"} · {cfg.agent.effort}
             {cfg.maxIterations > 1 && ` · ≤${cfg.maxIterations} iterations`}
             {cfg.agent.endpoint && <div className="truncate font-mono text-muted-foreground" title={cfg.agent.endpoint}>→ {cfg.agent.endpoint}</div>}
           </Row>
@@ -394,7 +394,7 @@ function StackEditor({ flow, node, cfg, readOnly }: { flow: Flow; node: FlowNode
 function originLabel(o: AgentOrigin): string {
   if (o.layer === "node") return "set on this node";
   if (o.layer === "block") return `from ${o.blockName}${o.template && !/template/i.test(o.blockName) ? " (template)" : ""}`;
-  return "Sandflow's default";
+  return "no model set: the CLI's default";
 }
 
 /**
@@ -424,11 +424,11 @@ function NodeAgent({ node, blocks, readOnly }: { node: FlowNode; blocks: BlockDe
         <Label htmlFor="node-model">Model</Label>
         {overridden ? (
           <>
-            <Badge variant="outline" className="border-amber-500/60 text-[10px] text-amber-500" title={`Overrides ${inherited.agent.model} (${originLabel(blockOrigin)})`}>
+            <Badge variant="outline" className="border-amber-500/60 text-[10px] text-amber-500" title={`Overrides ${inherited.agent.model || "the CLI default"} (${originLabel(blockOrigin)})`}>
               overridden on this node
             </Badge>
             {!readOnly && (
-              <button type="button" onClick={() => setModel(undefined)} className="text-muted-foreground hover:text-foreground" title={`Reset to ${inherited.agent.model} (${originLabel(blockOrigin)})`} aria-label="Reset the model to the inherited one">
+              <button type="button" onClick={() => setModel(undefined)} className="text-muted-foreground hover:text-foreground" title={`Reset to ${inherited.agent.model || "the CLI default"} (${originLabel(blockOrigin)})`} aria-label="Reset the model to the inherited one">
                 <RotateCcw className="size-3" />
               </button>
             )}
@@ -449,7 +449,7 @@ function NodeAgent({ node, blocks, readOnly }: { node: FlowNode; blocks: BlockDe
         id="node-model"
         className="h-8 font-mono"
         value={own.model ?? ""}
-        placeholder={inherited.agent.model}
+        placeholder={inherited.agent.model || "CLI default"}
         onChange={(e) => setModel(e.target.value.trim() ? e.target.value : undefined)}
       />
       {overridden && Object.keys(own).some((k) => k !== "model") && (

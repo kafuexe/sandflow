@@ -277,15 +277,44 @@ async function makeAgent(cfg: ResolvedConfig, env: Record<string, string>) {
     throw new Error(`Agent provider "${cfg.agent.provider}" is not exported by @ai-hero/sandcastle`);
   }
   const model = cfg.agent.model?.trim();
-  if (!model) throw new Error(`No model set for ${cfg.agent.provider} — set one on the block (or the template it extends)`);
   // Env goes on the agent only — agent env and sandbox env must not overlap.
-  return factory(model, { effort: cfg.agent.effort, env });
+  const agent = factory(model || CLI_DEFAULT_MODEL, { effort: cfg.agent.effort, env });
+  return model ? agent : withoutModelFlag(agent as AgentLike);
+}
+
+/** Stand-in model name for "no model set": its `--model` / `-m` flag is removed from the CLI command. */
+export const CLI_DEFAULT_MODEL = "__sandflow_cli_default_model__";
+
+type AgentLike = {
+  buildPrintCommand?: (...a: unknown[]) => { command: string } & Record<string, unknown>;
+  buildInteractiveArgs?: (...a: unknown[]) => string[];
+} & Record<string, unknown>;
+
+/**
+ * Sandcastle's agent providers always pass a model (`--model <m>`, codex `-m <m>`). With no model set we want the
+ * CLI's own default — the same as the Edit-with-AI chat — so drop the placeholder's flag from the command it builds.
+ */
+export function withoutModelFlag<T extends AgentLike>(agent: T): T {
+  const flag = new RegExp(` (?:--model|-m) '${CLI_DEFAULT_MODEL}'`, "g");
+  const out: AgentLike = { ...agent };
+  const print = agent.buildPrintCommand;
+  if (print) out.buildPrintCommand = (...a) => {
+    const r = print.apply(agent, a);
+    return { ...r, command: r.command.replace(flag, "") };
+  };
+  const interactive = agent.buildInteractiveArgs;
+  if (interactive) out.buildInteractiveArgs = (...a) => {
+    const args = interactive.apply(agent, a);
+    const i = args.indexOf(CLI_DEFAULT_MODEL);
+    return i > 0 && (args[i - 1] === "--model" || args[i - 1] === "-m") ? [...args.slice(0, i - 1), ...args.slice(i + 1)] : args;
+  };
+  return out as T;
 }
 
 /** Where the node's model was set, for the run log: this node, a block / template in its chain, or the default. */
 function modelSource(node: FlowNode, ctx: RunContext): string {
   const o = agentOrigin("model", node.data.blockId, ctx.blocks, node.data.overrides);
-  return o.layer === "node" ? "set on this node" : o.layer === "block" ? `from ${o.blockName}` : "Sandflow's default";
+  return o.layer === "node" ? "set on this node" : o.layer === "block" ? `from ${o.blockName}` : "no model set";
 }
 
 function routesFor(ctx: RunContext, node: FlowNode): RouteOption[] {
@@ -389,7 +418,13 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const scoped = withAgentEnv(await makeAgent(cfg, fullEnv), fullEnv);
   release.push(scoped.release);
   const agent = scoped.agent;
-  ctx.log("info", `Agent: ${cfg.agent.provider} · model ${cfg.agent.model} (${modelSource(node, ctx)})`, node.id);
+  ctx.log(
+    "info",
+    cfg.agent.model.trim()
+      ? `Agent: ${cfg.agent.provider} · model ${cfg.agent.model} (${modelSource(node, ctx)})`
+      : `Agent: ${cfg.agent.provider} · the CLI's default model (no model set)`,
+    node.id,
+  );
   if (Object.keys(aux).length) ctx.log("info", `Gateway with a non-Claude model: Claude Code's other models (${Object.keys(aux).join(", ")}) use ${cfg.agent.model} too`, node.id);
   if (endpoint) ctx.log("info", `Agent endpoint: ${endpoint}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;

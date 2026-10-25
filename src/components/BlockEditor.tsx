@@ -514,7 +514,7 @@ export function BlockEditor() {
                 <Field label="Model" overridden={c.agent?.model !== undefined} onReset={() => setAgent("model", undefined)} inheritable>
                   <Input
                     value={c.agent?.model ?? ""}
-                    placeholder={inherited.agent.model}
+                    placeholder={inherited.agent.model || "CLI default"}
                     onChange={(e) => setAgent("model", e.target.value.trim() ? e.target.value : undefined)}
                   />
                 </Field>
@@ -536,7 +536,10 @@ export function BlockEditor() {
               {(() => {
                 const from = c.agent?.model?.trim() ? undefined : draft.extends ? agentOrigin("model", draft.extends, blocks) : { layer: "default" as const };
                 const parts = [
-                  from && `Model ${inherited.agent.model} — ${from.layer === "block" ? `inherited from ${from.blockName}` : "Sandflow's default"}.`,
+                  from &&
+                    (inherited.agent.model
+                      ? `Model ${inherited.agent.model} — ${from.layer === "block" ? `inherited from ${from.blockName}` : "Sandflow's default"}.`
+                      : "No model set — the agent CLI uses its own default model."),
                   below.size > 0 && `Used by ${below.size} block${below.size === 1 ? "" : "s"} that extend${below.size === 1 ? "s" : ""} this${ownModelBelow.length ? `; ${ownModelBelow.join(", ")} set${ownModelBelow.length === 1 ? "s" : ""} its own model` : ""}.`,
                 ].filter(Boolean);
                 if (!parts.length && !nodeModelOverrides.length) return null;

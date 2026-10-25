@@ -53,7 +53,7 @@ export const BUILTIN_BLOCKS: BlockDef[] = [
       inputs: { artifact: true, steer: true, startingPrompt: true },
       outputs: { artifact: true, steer: true },
       env: ["REPO_PATH", "ANTHROPIC_API_KEY"],
-      agent: { provider: "claudeCode", model: "claude-opus-4-8", effort: "high" },
+      agent: { provider: "claudeCode", effort: "high" },
     },
   },
   {
