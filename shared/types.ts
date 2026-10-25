@@ -524,6 +524,27 @@ export interface QuestionRecord {
   answeredAt?: number;
 }
 
+/**
+ * A message the user sent to a working agent node mid-run ("focus on X", "stop and summarize"). It reaches the agent
+ * by interrupting its current turn and resuming the same session with it (`interrupt`), or — for agents that can't
+ * resume a session — at the agent's next turn (`next-turn`).
+ */
+export interface SteerRecord {
+  id: string;
+  nodeId: string;
+  message: string;
+  sentAt: number;
+  /** pending: not handed to the agent yet; dropped: the step ended first. */
+  status: "pending" | "applied" | "dropped";
+  appliedAt?: number;
+  how?: "interrupt" | "next-turn";
+  /** Why it was dropped, or how it was delivered when that's worth saying. */
+  note?: string;
+}
+
+/** Longest steering message accepted. */
+export const MAX_STEER_CHARS = 4000;
+
 export interface LogLine {
   ts: number;
   level: "info" | "warn" | "error" | "agent";
@@ -579,6 +600,8 @@ export interface RunState {
   pendingQuestion?: PendingQuestion;
   /** Every question asked so far, in order. */
   questions?: QuestionRecord[];
+  /** Steering messages sent to agent nodes while they worked, in the order sent. */
+  steers?: SteerRecord[];
   /** The starting prompt this run used (a per-run prompt, or the global one). */
   prompt?: string;
   logs: LogLine[];

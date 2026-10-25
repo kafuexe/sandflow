@@ -55,7 +55,8 @@ describe("agent env reaches the agent process", () => {
     expect(write.cmd).toMatch(/^umask 077 && cat > \/tmp\/\.sandflow-env-[\w-]+$/);
     expect(write.stdin).toBe(`export ANTHROPIC_BASE_URL='http://gw'\nexport TOKEN='a'\\''b'\n`);
     const file = write.cmd.split("> ")[1];
-    expect(run.cmd).toBe(`. ${file}; rm -f ${file}; claude --print --model 'glm-4.6' -p -`);
+    // The shell also records its pid, so steering can stop just this agent (see the steer tests).
+    expect(run.cmd).toMatch(new RegExp(`^\\. ${file}; rm -f ${file}; echo \\$\\$ > /tmp/\\.sandflow-pid-[\\w-]+; claude --print --model 'glm-4\\.6' -p -$`));
     expect(run.stdin).toBe("p");
     for (const c of calls) expect(c.cmd).not.toContain("http://gw");
   });

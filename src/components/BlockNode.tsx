@@ -1,11 +1,12 @@
 import { memo } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { Check, HelpCircle, KeyRound, Loader2, MessageSquareText, X } from "lucide-react";
+import { Check, HelpCircle, KeyRound, Loader2, MessageSquareText, Navigation, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { TASK_TONE } from "@/components/agent/status";
 import { BlockIcon } from "@/lib/icons";
 import { groupRuns, taskTone } from "@/lib/runGroups";
+import { offersSteer } from "@/lib/steer";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { describeCondition } from "../../shared/conditions";
@@ -180,6 +181,8 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const flows = useStore((s) => s.data?.flows ?? []);
   // Only the shown run's states, and only when it is a run of the flow on the canvas.
   const runNode = useStore((s) => (s.run?.flowId === s.currentFlowId ? s.run?.nodes[id] : undefined));
+  const runLive = useStore((s) => s.run?.flowId === s.currentFlowId && !s.run?.finishedAt);
+  const steerNode = useStore((s) => s.steerNode);
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
   const touchedAt = useStore((s) => s.highlight[id]);
   const flowActive = useStore((s) => !!s.data?.flows.find((f) => f.id === s.currentFlowId)?.active);
@@ -220,6 +223,20 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
       )}
     >
       <StatusBadge status={status} executions={runNode?.executions ?? 0} />
+      {runLive && offersSteer({ nodes: { [id]: runNode! } }, id, cfg.kind) && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            steerNode(id);
+          }}
+          aria-label={`Steer ${data.label || block?.name || "this agent"}`}
+          title="Steer this agent: send it a message while it works"
+          className="nodrag nopan absolute -top-2.5 -left-2.5 z-10 flex items-center gap-1 rounded-full border border-sky-400 bg-card px-1.5 py-0.5 text-[10px] font-medium text-sky-300 shadow outline-none hover:bg-sky-400/15 focus-visible:ring-2 focus-visible:ring-ring/60"
+        >
+          <Navigation className="size-3" aria-hidden /> Steer
+        </button>
+      )}
       {cfg.kind !== "trigger" && <HandleRow cfg={cfg} side="in" />}
       {cfg.kind === "condition" ? (
         <BranchHandles taken={runNode?.branch} />

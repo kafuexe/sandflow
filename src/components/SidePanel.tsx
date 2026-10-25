@@ -20,6 +20,10 @@ import { InputsPanel } from "./InputsPanel";
 import { NodeRunOn } from "./RunOnSelect";
 import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
+import { ActivityFilterBar, ActivityList, useActivityFilter } from "./AgentActivity";
+import { SteerBox } from "./SteerBox";
+import { activityOf } from "@/lib/activityView";
+import { steerability } from "@/lib/steer";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
 
@@ -459,6 +463,58 @@ function NodeAgent({ node, blocks, readOnly }: { node: FlowNode; blocks: BlockDe
   );
 }
 
+const LIVE_STATUS: Record<string, string> = {
+  idle: "Not started yet",
+  queued: "Queued",
+  running: "Working",
+  waiting: "Waiting for your answer",
+  done: "Finished",
+  failed: "Failed",
+};
+
+/** While the run on the canvas is going: this node's state, the "Steer this agent" box and its live AI activity. */
+function LiveNode({ node, cfg }: { node: FlowNode; cfg: ResolvedConfig | undefined }) {
+  const run = useStore((s) => s.run);
+  const flowId = useStore((s) => s.currentFlowId);
+  const activityFilter = useActivityFilter();
+  const ns = run?.nodes[node.id];
+  if (!run || run.finishedAt || run.flowId !== flowId || !ns) return null;
+  const st = steerability(run, node.id, cfg);
+  const items = activityOf(run.activity, node.id, ns.executions);
+  return (
+    <section aria-label="This block in the current run" className="space-y-2">
+      <div className="flex items-center gap-2 text-xs">
+        <Radio className={cn("size-3.5", ns.status === "running" ? "animate-pulse text-sky-300 motion-reduce:animate-none" : "text-muted-foreground")} aria-hidden />
+        <span className="font-medium">Current run</span>
+        <span className="text-muted-foreground">
+          {LIVE_STATUS[ns.status]}
+          {ns.executions > 1 && ` · execution ${ns.executions}`}
+        </span>
+      </div>
+      {st.agent ? (
+        <SteerBox run={run} nodeKey={node.id} cfg={cfg} />
+      ) : (
+        <p className="rounded-lg border bg-card/40 p-2 text-[11px] text-muted-foreground">{st.hint}</p>
+      )}
+      {st.agent && (ns.status !== "idle" || items.length > 0) && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-muted-foreground">AI activity</span>
+            <div className="ml-auto">
+              <ActivityFilterBar {...activityFilter} />
+            </div>
+          </div>
+          {items.length ? (
+            <ActivityList items={items} filter={activityFilter.filter} />
+          ) : (
+            <p className="rounded-md bg-black/30 p-3 text-xs text-muted-foreground">Nothing yet — its thinking, replies and tool calls show up here.</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function BlockPanel() {
   const flow = useCurrentFlow();
   const blocks = useStore((s) => s.data?.blocks ?? []);
@@ -501,6 +557,7 @@ function BlockPanel() {
   return (
     <ScrollArea className="h-full">
       <div className="space-y-4 p-3">
+        <LiveNode node={node} cfg={cfg} />
         {readOnly && (
           <div className="flex items-center gap-2 rounded-lg border p-2 text-xs text-muted-foreground">
             <Lock className="size-3.5 shrink-0" />

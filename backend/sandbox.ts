@@ -125,11 +125,49 @@ const EXEC_ENV_RE = /^: sandflow-env:([0-9a-f-]{36}); /;
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
+// An agent's commands in flight (by its env token), so one agent's current turn can be stopped without stopping the
+// run — to steer it (see `interrupt` below).
+interface InFlight {
+  kill(): void;
+  done: Promise<unknown>;
+}
+const inFlight = new Map<string, Set<InFlight>>();
+
+function trackInFlight(token: string, kill: () => void, done: Promise<unknown>) {
+  const entry: InFlight = { kill, done };
+  let set = inFlight.get(token);
+  if (!set) inFlight.set(token, (set = new Set()));
+  set.add(entry);
+  const untrack = () => {
+    set.delete(entry);
+    if (!set.size && inFlight.get(token) === set) inFlight.delete(token);
+  };
+  done.then(untrack, untrack);
+}
+
+/** How long `interrupt` waits for the killed command to end before going on anyway. */
+const INTERRUPT_WAIT_MS = 10_000;
+
+/** Kills what the agent with this token is running right now; resolves once it ended (or after `waitMs`). */
+export async function interruptAgent(token: string, waitMs = INTERRUPT_WAIT_MS): Promise<boolean> {
+  const running = [...(inFlight.get(token) ?? [])];
+  if (!running.length) return false;
+  for (const r of running) r.kill();
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    Promise.allSettled(running.map((r) => r.done)),
+    new Promise((resolve) => (timer = setTimeout(resolve, waitMs))),
+  ]);
+  clearTimeout(timer);
+  return true;
+}
+
 /**
  * The agent provider, with `env` given to the agent's process whenever it runs in a sandbox made by
- * `stoppableProvider`. Call `release` once the agent is done.
+ * `stoppableProvider`. Call `release` once the agent is done. `interrupt` kills the agent's current command (its
+ * process tree, on this computer or in the container) without stopping the run or the sandbox.
  */
-export function withAgentEnv<A extends object>(agent: A, env: Record<string, string>): { agent: A; release(): void } {
+export function withAgentEnv<A extends object>(agent: A, env: Record<string, string>): { agent: A; release(): void; interrupt(): Promise<boolean> } {
   const token = randomUUID();
   execEnvs.set(token, Object.fromEntries(Object.entries(env).filter(([k]) => ENV_KEY_RE.test(k))));
   const wrapped = new Proxy(agent, {
@@ -142,14 +180,23 @@ export function withAgentEnv<A extends object>(agent: A, env: Record<string, str
       };
     },
   });
-  return { agent: wrapped, release: () => void execEnvs.delete(token) };
+  return { agent: wrapped, release: () => void execEnvs.delete(token), interrupt: () => interruptAgent(token) };
 }
 
-/** A command without its env marker, and the env it asks for (if any). */
-export function takeAgentEnv(command: string): { command: string; env?: Record<string, string> } {
+/** A command without its env marker, the env it asks for (if any), and the agent's token. */
+export function takeAgentEnv(command: string): { command: string; env?: Record<string, string>; token?: string } {
   const m = EXEC_ENV_RE.exec(command);
-  return m ? { command: command.slice(m[0].length), env: execEnvs.get(m[1]) } : { command };
+  return m ? { command: command.slice(m[0].length), env: execEnvs.get(m[1]), token: m[1] } : { command };
 }
+
+/**
+ * Shell run inside a container to kill a command tree started there: the shell that ran it wrote its pid to
+ * `pidFile`. Every descendant (found with procps' pgrep, which the sandbox image has) gets SIGTERM, then SIGKILL.
+ */
+export const containerKillScript = (pidFile: string) =>
+  `p=$(cat ${pidFile} 2>/dev/null); [ -n "$p" ] || exit 0; all=""; ` +
+  `walk() { all="$all $1"; for c in $(pgrep -P "$1"); do walk "$c"; done; }; walk "$p"; ` +
+  `kill -TERM $all 2>/dev/null; sleep 2; kill -KILL $all 2>/dev/null; rm -f ${pidFile}; exit 0`;
 
 /** Shell lines exporting `env` (sourced from a file inside a container). */
 export const exportLines = (env: Record<string, string>) =>
@@ -183,28 +230,45 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
       const worktree = (handle as unknown as { worktreePath: string }).worktreePath;
       const win = process.platform === "win32";
       runExec = async (cmd, o) => {
-        const { command, env: agentEnv } = takeAgentEnv(cmd);
-        const r = await runTree(win ? "cmd.exe" : "sh", win ? ["/d", "/s", "/c", command] : ["-c", command], {
+        const { command, env: agentEnv, token } = takeAgentEnv(cmd);
+        // An agent's command can also be stopped on its own (steering), not only with the whole run.
+        const turn = token ? new AbortController() : undefined;
+        const p = runTree(win ? "cmd.exe" : "sh", win ? ["/d", "/s", "/c", command] : ["-c", command], {
           cwd: o?.cwd ?? worktree,
           env: agentEnv ? { ...env, ...agentEnv } : env,
           stdin: o?.stdin,
-          signal,
+          signal: turn ? AbortSignal.any([signal, turn.signal]) : signal,
           onLine: o?.onLine,
           stdoutTail: o?.onLine ? STREAM_TAIL : undefined,
           windowsVerbatimArguments: win,
         });
+        if (token && turn) trackInFlight(token, () => turn.abort(), p);
+        const r = await p;
         return { stdout: r.stdout, stderr: r.stderr, exitCode: r.killed ? 137 : r.code };
       };
       kill = () => {}; // runTree kills its own trees on abort
     } else {
       runExec = async (cmd, o) => {
-        const { command, env: agentEnv } = takeAgentEnv(cmd);
-        if (!agentEnv || !Object.keys(agentEnv).length) return handle.exec(command, o);
-        // Readable only by the sandbox user, read and removed as the agent's command starts.
-        const file = `/tmp/.sandflow-env-${randomUUID()}`;
-        const w = await handle.exec(`umask 077 && cat > ${file}`, { stdin: exportLines(agentEnv) });
-        if (w.exitCode !== 0) return { stdout: "", stderr: `Couldn't hand the agent its environment: ${w.stderr}`, exitCode: w.exitCode || 1 };
-        return handle.exec(`. ${file}; rm -f ${file}; ${command}`, o);
+        const { command: bare, env: agentEnv, token } = takeAgentEnv(cmd);
+        // An agent's command records its shell's pid, so it can be killed on its own (steering) — killing the
+        // `docker exec` client wouldn't stop it.
+        const pidFile = token ? `/tmp/.sandflow-pid-${randomUUID()}` : undefined;
+        const command = pidFile ? `echo $$ > ${pidFile}; ${bare}` : bare;
+        const start = async () => {
+          if (!agentEnv || !Object.keys(agentEnv).length) return handle.exec(command, o);
+          // Readable only by the sandbox user, read and removed as the agent's command starts.
+          const file = `/tmp/.sandflow-env-${randomUUID()}`;
+          const w = await handle.exec(`umask 077 && cat > ${file}`, { stdin: exportLines(agentEnv) });
+          if (w.exitCode !== 0) return { stdout: "", stderr: `Couldn't hand the agent its environment: ${w.stderr}`, exitCode: w.exitCode || 1 };
+          return handle.exec(`. ${file}; rm -f ${file}; ${command}`, o);
+        };
+        const p = start();
+        if (token && pidFile) {
+          let killing: Promise<unknown> | undefined;
+          const ended = p.then(() => killing, () => killing);
+          trackInFlight(token, () => void (killing ??= handle.exec(containerKillScript(pidFile)).catch(() => {})), ended);
+        }
+        return p;
       };
       // The container's hostname is its (short) id. Read it now, before anything of the agent's runs in there: by
       // the time Stop comes, whatever is inside could have rewritten /etc/hostname (e.g. to another run's container).
