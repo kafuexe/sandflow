@@ -12,6 +12,7 @@
 //   pi                  → no MCP support: the "ops block" text protocol (see chats.ts)
 
 import path from "node:path";
+import { CLAUDE_AUX_MODEL_ENV } from "../shared/agents";
 import type { AgentProvider } from "../shared/types";
 
 export type AssistantEvent =
@@ -101,7 +102,7 @@ const claudeCode: AgentAdapter = {
   bins: ["claude"],
   tools: "mcp",
   systemPromptFlag: true,
-  authEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"],
+  authEnv: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL", ...CLAUDE_AUX_MODEL_ENV],
   build: (t) => ({
     args: [
       "-p",

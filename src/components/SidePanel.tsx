@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, Lock, Pencil, Radio, ShieldAlert, ShieldCheck, Trash2, Workflow } from "lucide-react";
+import { Copy, ExternalLink, Lock, Pencil, Radio, RotateCcw, ShieldAlert, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore, type SideTab } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { CORE_PACK } from "../../shared/packs";
-import { templateChain } from "../../shared/resolve";
+import { agentOrigin, resolveNode, templateChain, type AgentOrigin } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
 import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../shared/subflow";
 import type { BlockDef, Flow, FlowNode, ResolvedConfig, StackConfig } from "../../shared/types";
@@ -385,8 +385,77 @@ function StackEditor({ flow, node, cfg, readOnly }: { flow: Flow; node: FlowNode
           <Textarea id={`stack-${k}`} rows={3} value={own[k] ?? ""} placeholder={s[k]} onChange={(e) => set({ [k]: e.target.value || undefined })} />
         </div>
       ))}
-      <p className="text-[11px] text-muted-foreground">The orchestrator uses this block's agent settings (Edit block definition).</p>
+      <p className="text-[11px] text-muted-foreground">The orchestrator's agent and model are set under Agent below.</p>
     </fieldset>
+  );
+}
+
+/** Where a node's agent setting comes from, in words. */
+function originLabel(o: AgentOrigin): string {
+  if (o.layer === "node") return "set on this node";
+  if (o.layer === "block") return `from ${o.blockName}${o.template && !/template/i.test(o.blockName) ? " (template)" : ""}`;
+  return "Sandflow's default";
+}
+
+/**
+ * The node's agent model: the effective value, where it comes from (this node, the block, or a template it extends),
+ * and a per-node override with a reset. A node override always wins over the template — shown, never silent.
+ */
+function NodeAgent({ node, blocks, readOnly }: { node: FlowNode; blocks: BlockDef[]; readOnly: boolean }) {
+  const { updateNodeOverrides, openEditor } = useStore.getState();
+  let inherited: ResolvedConfig | undefined;
+  try {
+    inherited = resolveNode({ ...node, data: { ...node.data, overrides: { ...node.data.overrides, agent: undefined } } }, blocks);
+  } catch {
+    return null;
+  }
+  const own = node.data.overrides?.agent ?? {};
+  const origin = agentOrigin("model", node.data.blockId, blocks, node.data.overrides);
+  const blockOrigin = agentOrigin("model", node.data.blockId, blocks);
+  const overridden = origin.layer === "node";
+  const setModel = (model: string | undefined) => {
+    const next: Record<string, unknown> = { ...own, model };
+    if (model === undefined) delete next.model;
+    updateNodeOverrides(node.id, { agent: Object.keys(next).length ? (next as BlockDef["config"]["agent"]) : undefined });
+  };
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Label htmlFor="node-model">Model</Label>
+        {overridden ? (
+          <>
+            <Badge variant="outline" className="border-amber-500/60 text-[10px] text-amber-500" title={`Overrides ${inherited.agent.model} (${originLabel(blockOrigin)})`}>
+              overridden on this node
+            </Badge>
+            {!readOnly && (
+              <button type="button" onClick={() => updateNodeOverrides(node.id, { agent: undefined })} className="text-muted-foreground hover:text-foreground" title={`Reset to ${inherited.agent.model} (${originLabel(blockOrigin)})`}>
+                <RotateCcw className="size-3" />
+              </button>
+            )}
+          </>
+        ) : (
+          <span className="truncate text-[10px] text-muted-foreground">
+            {blockOrigin.layer === "block" ? (
+              <button type="button" className="hover:underline" onClick={() => openEditor({ id: blockOrigin.blockId })}>
+                {originLabel(blockOrigin)}
+              </button>
+            ) : (
+              originLabel(blockOrigin)
+            )}
+          </span>
+        )}
+      </div>
+      <Input
+        id="node-model"
+        className="h-8 font-mono"
+        value={own.model ?? ""}
+        placeholder={inherited.agent.model}
+        onChange={(e) => setModel(e.target.value.trim() ? e.target.value : undefined)}
+      />
+      {overridden && Object.keys(own).some((k) => k !== "model") && (
+        <p className="text-[11px] text-muted-foreground">This node also overrides: {Object.keys(own).filter((k) => k !== "model").join(", ")}.</p>
+      )}
+    </div>
   );
 }
 
@@ -505,6 +574,7 @@ function BlockPanel() {
             <ConditionEditor value={cfg.condition} onChange={(condition) => updateNodeOverrides(node.id, { condition })} />
           </div>
         )}
+        {cfg && (cfg.kind === "ai" || cfg.kind === "manager" || cfg.kind === "stack") && <NodeAgent node={node} blocks={blocks} readOnly={readOnly} />}
         {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && <NodeRunOn flow={flow} node={node} cfg={cfg} />}
         {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && (
           <label className="flex items-center justify-between text-sm">
