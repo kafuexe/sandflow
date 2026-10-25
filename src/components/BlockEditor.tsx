@@ -13,6 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { BlockIcon, ICONS } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { ENDPOINT_ENV } from "../../shared/agents";
+import { CORE_PACK } from "../../shared/packs";
 import { applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, resolveInherited, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
@@ -72,7 +73,7 @@ function Field({
 export function BlockEditor() {
   const target = useStore((s) => s.editor);
   const data = useStore((s) => s.data);
-  const { openEditor, upsertBlock, deleteBlock } = useStore.getState();
+  const { openEditor, upsertBlock, deleteBlock, revertBlock } = useStore.getState();
   const [draft, setDraft] = useState<BlockDef | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [envInput, setEnvInput] = useState("");
@@ -114,9 +115,12 @@ export function BlockEditor() {
 
   if (!draft || !data) return null;
   const isNew = !data.blocks.some((b) => b.id === draft.id);
-  // Blocks from packs (and Sandflow's built-ins) are read-only; duplicate one to make your own.
-  const readOnly = !!draft.pack;
+  // Sandflow's built-ins are read-only. A pack block can be edited in place: your version replaces the pack's
+  // (pack updates to it stop applying) until you revert it.
+  const readOnly = draft.pack === CORE_PACK;
+  const fromPack = !!draft.pack && !readOnly;
   const packInfo = draft.pack ? data.packs?.find((p) => p.id === draft.pack) : undefined;
+  const packLabel = packInfo ? `the ${packInfo.name} pack (${packInfo.version})` : `the ${draft.pack} pack`;
   const inherited = resolveInherited(draft, blocks);
   const cfg = applyConfig(inherited, draft.config);
   const c = draft.config;
@@ -171,13 +175,20 @@ export function BlockEditor() {
   };
 
   const save = () => {
-    const next = isNew ? [...data.blocks, draft] : data.blocks.map((b) => (b.id === draft.id ? draft : b));
+    // Saving a pack block unchanged doesn't turn it into an edit.
+    if (fromPack && !draft.modified && JSON.stringify(draft) === JSON.stringify(source)) return openEditor(null);
+    const block = fromPack ? { ...draft, modified: true } : draft;
+    const next = isNew ? [...data.blocks, block] : data.blocks.map((b) => (b.id === block.id ? block : b));
     const errs = validateBlocks(next, new Set([draft.id]));
     if (!draft.name.trim()) errs.unshift("Name is required");
     setErrors(errs);
     if (errs.length) return;
-    upsertBlock(draft);
+    upsertBlock(block);
     openEditor(null);
+  };
+  const revert = () => {
+    if (!confirm(`Revert "${draft.name}" to the original from ${packLabel}? Your changes to this block will be lost.`)) return;
+    void revertBlock(draft.id).then(() => openEditor(null));
   };
 
   return (
@@ -190,8 +201,12 @@ export function BlockEditor() {
           </DialogTitle>
           <DialogDescription>
             {readOnly
-              ? `From ${packInfo ? `the ${packInfo.name} pack (${packInfo.version})` : draft.pack === "sandflow" ? "Sandflow itself" : `the ${draft.pack} pack`} — view only. Duplicate it to make your own copy${draft.isTemplate ? ", or create a block that extends it" : ""}.`
-              : `Unset fields inherit from ${draft.extends ? `"${data.blocks.find((b) => b.id === draft.extends)?.name}"` : "the defaults"}.`}
+              ? `Built into Sandflow — view only. Duplicate it to make your own copy${draft.isTemplate ? ", or create a block that extends it" : ""}.`
+              : fromPack
+                ? source?.modified
+                  ? `From ${packLabel}, edited by you — updates to the pack won't change it until you revert to the original.`
+                  : `From ${packLabel}. Saving your changes replaces the pack's version (until you revert to the original).`
+                : `Unset fields inherit from ${draft.extends ? `"${data.blocks.find((b) => b.id === draft.extends)?.name}"` : "the defaults"}.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -524,7 +539,8 @@ export function BlockEditor() {
               {cfg.agent.endpoint && (
                 <p className="-mt-2 text-[11px] text-muted-foreground">
                   Inside a Docker/Podman sandbox, <code>localhost</code> is the container — use <code>host.docker.internal</code> for a
-                  service on this machine. For auth, add e.g. <code>ANTHROPIC_AUTH_TOKEN</code> to the block's env vars above.
+                  service on this machine. A gateway for every block (e.g. LiteLLM) can go in Inputs instead: <code>ANTHROPIC_BASE_URL</code> and{" "}
+                  <code>ANTHROPIC_AUTH_TOKEN</code> (or <code>OPENAI_*</code> for Codex) reach every agent of that provider.
                 </p>
               )}
               <Field label="Instructions" overridden={c.instructions !== undefined} onReset={() => setCfg({ instructions: undefined })} inheritable>
@@ -559,12 +575,19 @@ export function BlockEditor() {
         </ScrollArea>
 
         <DialogFooter className="items-center border-t p-4">
-          {readOnly && (
-            <Button variant="outline" size="sm" className="mr-auto" onClick={duplicate}>
-              <Copy /> Duplicate as my own
-            </Button>
+          {(readOnly || fromPack) && (
+            <div className="mr-auto flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={duplicate}>
+                <Copy /> Duplicate as my own
+              </Button>
+              {source?.modified && (
+                <Button variant="outline" size="sm" onClick={revert} title="Discard your changes and use the pack's version">
+                  <RotateCcw /> Revert to original
+                </Button>
+              )}
+            </div>
           )}
-          {!isNew && !readOnly && (
+          {!isNew && !readOnly && !fromPack && (
             <div className="mr-auto flex items-center gap-2">
               <Button
                 variant="destructive"

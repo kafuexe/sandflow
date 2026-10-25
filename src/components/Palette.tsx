@@ -38,7 +38,7 @@ function PaletteItem({ block, blocks }: { block: BlockDef; blocks: BlockDef[] })
         e.dataTransfer.effectAllowed = "move";
       }}
       onClick={() => openEditor({ id: block.id })}
-      title={`Drag onto the canvas · click to ${block.pack ? "view" : "edit"}`}
+      title={`Drag onto the canvas · click to ${block.pack === CORE_PACK ? "view" : "edit"}`}
       className="flex w-full cursor-grab items-center gap-2 rounded-md border bg-card px-2 py-1.5 text-left hover:bg-accent active:cursor-grabbing"
     >
       <span className="size-2 shrink-0 rounded-full" style={{ background: color }} />
@@ -53,6 +53,11 @@ function PaletteItem({ block, blocks }: { block: BlockDef; blocks: BlockDef[] })
       {block.isTemplate && (
         <Badge variant="outline" className="px-1 py-0 text-[9px]">
           tpl
+        </Badge>
+      )}
+      {block.modified && (
+        <Badge variant="outline" className="px-1 py-0 text-[9px]" title={`You've edited this ${block.pack} pack block`}>
+          edited
         </Badge>
       )}
     </button>

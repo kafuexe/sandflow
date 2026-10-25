@@ -123,6 +123,9 @@ export function edgeAllowed(
  * Human-readable list of inputs a flow still needs before it can run (empty = ready). `triggered`: for runs started
  * by a trigger — the event stands in for the starting prompt, so it isn't required.
  */
+/** Claude Code logs in with either: gateways such as LiteLLM usually hand out a bearer token (ANTHROPIC_AUTH_TOKEN). */
+const LOGIN_ALTERNATIVES: Record<string, string> = { ANTHROPIC_API_KEY: "ANTHROPIC_AUTH_TOKEN" };
+
 export function missingInputs(
   flow: Flow,
   blocks: BlockDef[],
@@ -134,6 +137,6 @@ export function missingInputs(
   const req = flowRequirements(flow, blocks, flows);
   const missing: string[] = [];
   if (!opts.triggered && req.startingPromptNodes.length && !startingPrompt.trim()) missing.push("Starting prompt");
-  for (const e of req.env) if (!e.optional && !env[e.name]?.trim()) missing.push(e.name);
+  for (const e of req.env) if (!e.optional && !env[e.name]?.trim() && !(e.name in LOGIN_ALTERNATIVES && env[LOGIN_ALTERNATIVES[e.name]]?.trim())) missing.push(e.name);
   return missing;
 }

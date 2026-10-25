@@ -4,12 +4,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { ENDPOINT_ENV } from "../../shared/agents";
+import { ENDPOINT_ENV, GATEWAY_ENV } from "../../shared/agents";
 import { CORE_PACK } from "../../shared/packs";
 import { nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
 import { hostAgentEnv, resolveRunOn } from "../../shared/runOn";
 import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
-import type { AgentProvider, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
+import type { AgentProvider, EnvValues, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
 import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider } from "../sandbox";
@@ -249,6 +249,15 @@ export function hostChoiceOwner(ctx: RunContext, node: FlowNode, cfg: ResolvedCo
   return undefined;
 }
 
+/** The provider's gateway settings from Inputs (see GATEWAY_ENV), under whatever the block passes itself. */
+export function withGatewayEnv(cfg: ResolvedConfig, env: EnvValues, blockEnv: Record<string, string>): Record<string, string> {
+  const keys = GATEWAY_ENV[cfg.agent.provider] ?? [];
+  const gateway = keys.filter((k) => env[k]?.trim()).map((k) => [k, env[k].trim()]);
+  // A blank login var (say, no API key next to a gateway token) is left out rather than passed empty.
+  const own = Object.entries(blockEnv).filter(([k, v]) => !keys.includes(k) || v.trim());
+  return { ...Object.fromEntries(gateway), ...Object.fromEntries(own) };
+}
+
 /** The block's env plus the custom endpoint (if any) under the provider's base-URL variable. */
 export function agentEnv(cfg: ResolvedConfig, blockEnv: Record<string, string>): Record<string, string> {
   const endpoint = cfg.agent.endpoint?.trim();
@@ -320,8 +329,11 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     ctx.log("warn", "Running on this computer with your own agent CLI and login — no container; the agent can access this machine", node.id);
   }
   const sandbox = await getSandbox(ctx, kind);
-  const blockEnv = ctx.blockEnv(cfg);
-  const env = explicitHost ? hostAgentEnv(blockEnv, !!cfg.agent.endpoint?.trim()) : blockEnv;
+  const blockEnv = withGatewayEnv(cfg, ctx.env, ctx.blockEnv(cfg));
+  const endpointVar = cfg.agent.endpointEnv?.trim() || ENDPOINT_ENV[cfg.agent.provider];
+  const endpoint = cfg.agent.endpoint?.trim() || (endpointVar ? blockEnv[endpointVar] : undefined);
+  // Talking to a custom endpoint or gateway needs its credentials, even with the local CLI's own login.
+  const env = explicitHost ? hostAgentEnv(blockEnv, !!endpoint) : blockEnv;
   const label = nodeLabel(node, ctx.blocks);
 
   for (const skill of cfg.skills) {
@@ -353,7 +365,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const pack = filesPack(ctx, node);
   const packDir = pack ? (onHost ? ctx.packs?.runtime(pack)?.dir : `${SANDBOX_PACKS_DIR}/${pack}`) : undefined;
   const agent = await makeAgent(cfg, { ...agentEnv(cfg, env), ...(packDir ? { PACK_DIR: packDir } : {}) });
-  if (cfg.agent.endpoint?.trim()) ctx.log("info", `Agent endpoint: ${cfg.agent.endpoint.trim()}`, node.id);
+  if (endpoint) ctx.log("info", `Agent endpoint: ${endpoint}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
   const qa: QaPair[] = [];
   const baseOptions = {

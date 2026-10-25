@@ -62,6 +62,8 @@ interface State {
   // blocks
   upsertBlock(block: BlockDef): void;
   deleteBlock(id: string): void;
+  /** Drop your edits of a pack block: it goes back to the pack's version. */
+  revertBlock(id: string): Promise<void>;
   // flows
   setCurrentFlow(id: string): void;
   /** New empty flow, or a copy of `fromFlowId` (any flow, including a pack's). */
@@ -303,6 +305,11 @@ export const useStore = create<State>((set, get) => {
     },
     deleteBlock(id) {
       patchData((d) => ({ ...d, blocks: d.blocks.filter((b) => b.id !== id) }), "blocks");
+    },
+    async revertBlock(id) {
+      // Sent without `modified`, the server keeps the pack's own version; reload to show it.
+      patchData((d) => ({ ...d, blocks: d.blocks.map((b) => (b.id === id ? (({ modified: _m, ...rest }) => rest)(b) : b)) }), "blocks");
+      if (await get().flushSaves()) await get().reload();
     },
 
     setCurrentFlow(id) {

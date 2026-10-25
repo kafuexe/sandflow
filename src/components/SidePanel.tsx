@@ -528,7 +528,7 @@ function BlockPanel() {
         </fieldset>
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="outline" onClick={() => block && openEditor({ id: block.id })} disabled={!block}>
-            <Pencil /> {block?.pack ? "View block definition" : "Edit block definition"}
+            <Pencil /> {block?.pack === CORE_PACK ? "View block definition" : "Edit block definition"}
           </Button>
           {!readOnly && (
             <>

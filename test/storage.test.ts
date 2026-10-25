@@ -45,6 +45,26 @@ describe("storage", () => {
     expect(again.flows.find((f) => f.id === "base/feature-pipeline")?.name).toBe("Feature pipeline");
   });
 
+  it("keeps your edits of a pack block over the pack's version, never edits of Sandflow's core blocks", () => {
+    const dir = tmp();
+    const s = createStorage(dir);
+    const data = s.load();
+    s.saveBlocks(
+      data.blocks.map((b) =>
+        b.id === "base/plan" ? { ...b, name: "My plan", modified: true } : b.id === "sandflow/subflow" ? { ...b, name: "Nope", modified: true } : b,
+      ),
+    );
+    const again = createStorage(dir).load();
+    expect(again.blocks.find((b) => b.id === "base/plan")).toMatchObject({ name: "My plan", pack: "base", modified: true });
+    expect(again.blocks.find((b) => b.id === "sandflow/subflow")?.name).toBe("Subflow");
+    expect(again.blocks.filter((b) => b.id === "base/plan")).toHaveLength(1);
+    expect(again.blocks.filter((b) => !b.pack)).toEqual([]);
+    // Reverting = saving it without `modified`: the pack's version is back.
+    s.saveBlocks(again.blocks.map((b) => (b.id === "base/plan" ? { ...b, modified: undefined } : b)));
+    expect(createStorage(dir).load().blocks.find((b) => b.id === "base/plan")).toMatchObject({ name: "Plan" });
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "library.json"), "utf8"))).toEqual([]);
+  });
+
   it("keeps a flow's colour across saves and tolerates files without one (or with a bad one)", () => {
     const dir = tmp();
     fs.writeFileSync(

@@ -28,8 +28,8 @@ function fakeSandbox(outputs: string[]) {
   };
 }
 
-function ctx(sandbox: unknown, answers: string[] = []): RunContext {
-  const env = { REPO_PATH: "/r", ANTHROPIC_API_KEY: "k" };
+function ctx(sandbox: unknown, answers: string[] = [], extraEnv: Record<string, string> = {}): RunContext {
+  const env = { REPO_PATH: "/r", ANTHROPIC_API_KEY: "k", ...extraEnv };
   return {
     settings: { startingPrompt: "Build it", sandbox: "docker", maxSteps: 10 },
     env,
@@ -168,6 +168,31 @@ describe("runAi", () => {
     expect(calls.run[0].promptArgs).toBeUndefined();
     await runAi(c, node("n-plan", "plan"), cfg, {});
     expect(calls.exec).toHaveLength(installs);
+  });
+
+  it("hands the agent the provider's gateway settings from Inputs (e.g. a LiteLLM proxy) even if the block doesn't list them", async () => {
+    const { sandbox, calls } = fakeSandbox(["<artifact>A</artifact>"]);
+    const gateway = { ANTHROPIC_BASE_URL: "http://litellm.corp:4000", ANTHROPIC_AUTH_TOKEN: "sk-litellm", OPENAI_BASE_URL: "http://other" };
+    await runAi(ctx(sandbox, [], gateway), node("n-plan", "plan"), resolveBlock("plan", BUILTIN_BLOCKS), {});
+    const env = calls.run[0].agent.env;
+    expect(env).toMatchObject({ ANTHROPIC_BASE_URL: "http://litellm.corp:4000", ANTHROPIC_AUTH_TOKEN: "sk-litellm", ANTHROPIC_API_KEY: "k" });
+    // Another provider's settings stay out.
+    expect(env.OPENAI_BASE_URL).toBeUndefined();
+  });
+
+  it("leaves out a blank API key when the gateway uses a token", async () => {
+    const { sandbox, calls } = fakeSandbox(["<artifact>A</artifact>"]);
+    await runAi(ctx(sandbox, [], { ANTHROPIC_API_KEY: "", ANTHROPIC_AUTH_TOKEN: "sk-litellm" }), node("n-plan", "plan"), resolveBlock("plan", BUILTIN_BLOCKS), {});
+    expect(calls.run[0].agent.env).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(calls.run[0].agent.env.ANTHROPIC_AUTH_TOKEN).toBe("sk-litellm");
+  });
+
+  it("a block's own endpoint wins over the gateway URL from Inputs", async () => {
+    const { sandbox, calls } = fakeSandbox(["<artifact>A</artifact>"]);
+    const cfg = resolveBlock("plan", BUILTIN_BLOCKS);
+    cfg.agent.endpoint = "http://block-endpoint";
+    await runAi(ctx(sandbox, [], { ANTHROPIC_BASE_URL: "http://litellm.corp:4000" }), node("n-plan", "plan"), cfg, {});
+    expect(calls.run[0].agent.env.ANTHROPIC_BASE_URL).toBe("http://block-endpoint");
   });
 
   it("falls back to stdout tail when no artifact tag", async () => {

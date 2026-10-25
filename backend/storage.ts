@@ -3,7 +3,7 @@ import path from "node:path";
 import { CORE_BLOCKS } from "../shared/core";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
 import { sanitizeFlowColor } from "../shared/flows";
-import { BASE_PACK } from "../shared/packs";
+import { BASE_PACK, CORE_PACK } from "../shared/packs";
 import { summarize } from "../shared/runs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
 import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
@@ -74,6 +74,22 @@ export function migrateLegacy(blocks: BlockDef[], flows: Flow[]): { blocks: Bloc
     flows: flows.map((f) => ({ ...f, nodes: f.nodes.map((n) => ({ ...n, data: { ...n.data, blockId: remap(n.data.blockId) } })) })),
     changed: true,
   };
+}
+
+/** A pack block you may edit (Sandflow's own engine blocks stay as they are). */
+export const editablePackBlock = (b: BlockDef): boolean => !!b.pack && b.pack !== CORE_PACK;
+
+/**
+ * Pack blocks with your edits applied. An edit is kept in library.json as the whole block with `pack` set; it
+ * keeps the pack's id and pack (so its files, runtime and trust still come from the pack). Edits of blocks the
+ * pack no longer has are ignored.
+ */
+export function applyPackEdits(packBlocks: BlockDef[], saved: BlockDef[]): BlockDef[] {
+  const edits = new Map(saved.filter(editablePackBlock).map((b) => [b.id, b]));
+  return packBlocks.map((b) => {
+    const e = editablePackBlock(b) ? edits.get(b.id) : undefined;
+    return e ? { ...e, id: b.id, pack: b.pack, modified: true } : b;
+  });
 }
 
 export type Storage = ReturnType<typeof createStorage>;
@@ -188,15 +204,19 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
       const env = readJson<EnvValues>(file("env.json")) ?? {};
       const p = packs.load();
       return {
-        blocks: [...CORE_BLOCKS, ...p.blocks, ...blocks.filter((b) => !b.pack)],
+        blocks: [...CORE_BLOCKS, ...applyPackEdits(p.blocks, blocks), ...blocks.filter((b) => !b.pack)],
         flows: [...flows.filter((f) => !f.pack), ...p.flows],
         settings: { ...DEFAULT_SETTINGS, ...settings },
         env,
         packs: p.infos,
       };
     },
-    /** Saves your own blocks; pack and core blocks in the list are ignored (they're read-only). */
-    saveBlocks: (blocks: BlockDef[]) => write("library.json", blocks.filter((b) => !b.pack)),
+    /** Saves your own blocks and your edits of pack blocks (`modified`); other pack and core blocks are ignored. */
+    saveBlocks: (blocks: BlockDef[]) =>
+      write(
+        "library.json",
+        blocks.filter((b) => !b.pack || (b.modified && editablePackBlock(b))).map(({ modified: _m, ...b }) => b),
+      ),
     /** Saves your own flows; pack flows in the list are ignored. */
     saveFlows: (flows: Flow[]) => write("flows.json", flows.filter((f) => !f.pack)),
     saveSettings: (settings: Settings) => write("settings.json", settings),
