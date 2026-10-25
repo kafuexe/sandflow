@@ -14,7 +14,7 @@ import { BlockIcon, ICONS } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { ENDPOINT_ENV } from "../../shared/agents";
 import { CORE_PACK } from "../../shared/packs";
-import { applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, resolveInherited, wouldCycle } from "../../shared/resolve";
+import { agentOrigin, applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, resolveInherited, templateChain, wouldCycle } from "../../shared/resolve";
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
 import { ConditionEditor } from "./ConditionEditor";
@@ -151,6 +151,30 @@ export function BlockEditor() {
     ...usedInFlows.map((n) => `flow "${n}"`),
     ...extendedBy.map((n) => `"${n}" extends it`),
   ];
+
+  // Who gets this block's model: blocks extending it (unless they, or a template between, set their own) and the flow
+  // nodes using any of them (unless the node overrides it). Shown so a template's model never changes "silently nothing".
+  const below = new Set(
+    data.blocks
+      .filter((b) => {
+        if (b.id === draft.id) return false;
+        try {
+          return templateChain(b.id, blocks).some((x) => x.id === draft.id);
+        } catch {
+          return false;
+        }
+      })
+      .map((b) => b.id),
+  );
+  const ownModelBelow = [...below]
+    .map((id) => ({ id, o: agentOrigin("model", id, blocks) }))
+    .filter(({ id, o }) => o.layer === "block" && o.blockId === id)
+    .map(({ id }) => blocks.find((b) => b.id === id)!.name);
+  const nodeModelOverrides = data.flows.flatMap((f) =>
+    f.nodes
+      .filter((n) => (n.data.blockId === draft.id || below.has(n.data.blockId)) && n.data.overrides?.agent?.model?.trim())
+      .map((n) => `${f.name} › ${n.data.label || blocks.find((b) => b.id === n.data.blockId)?.name || n.id}`),
+  );
 
   const ownSkills = c.skills ?? [];
   /** Trigger, If and the subflow plumbing have no agent, skills or configurable inputs/outputs. */
@@ -491,7 +515,7 @@ export function BlockEditor() {
                   <Input
                     value={c.agent?.model ?? ""}
                     placeholder={inherited.agent.model}
-                    onChange={(e) => setAgent("model", e.target.value || undefined)}
+                    onChange={(e) => setAgent("model", e.target.value.trim() ? e.target.value : undefined)}
                   />
                 </Field>
                 <Field label="Effort" overridden={c.agent?.effort !== undefined} onReset={() => setAgent("effort", undefined)} inheritable>
@@ -509,6 +533,22 @@ export function BlockEditor() {
                   </Select>
                 </Field>
               </div>
+              {(() => {
+                const from = c.agent?.model?.trim() ? undefined : draft.extends ? agentOrigin("model", draft.extends, blocks) : { layer: "default" as const };
+                const parts = [
+                  from && `Model ${inherited.agent.model} — ${from.layer === "block" ? `inherited from ${from.blockName}` : "Sandflow's default"}.`,
+                  below.size > 0 && `Used by ${below.size} block${below.size === 1 ? "" : "s"} that extend${below.size === 1 ? "s" : ""} this${ownModelBelow.length ? `; ${ownModelBelow.join(", ")} set${ownModelBelow.length === 1 ? "s" : ""} its own model` : ""}.`,
+                ].filter(Boolean);
+                if (!parts.length && !nodeModelOverrides.length) return null;
+                return (
+                  <p className="-mt-2 text-[11px] text-muted-foreground">
+                    {parts.join(" ")}
+                    {nodeModelOverrides.length > 0 && (
+                      <span className="text-amber-500"> Flow nodes that override the model: {nodeModelOverrides.join(", ")}.</span>
+                    )}
+                  </p>
+                );
+              })()}
               <Field label="Run on" overridden={c.runOn !== undefined} onReset={() => setCfg({ runOn: undefined })} inheritable>
                 <RunOnSelect value={cfg.runOn} onChange={(runOn) => setCfg({ runOn })} inheritLabel="Flow default (else Settings → Sandbox)" />
               </Field>
@@ -577,7 +617,12 @@ export function BlockEditor() {
         <DialogFooter className="items-center border-t p-4">
           {(readOnly || fromPack) && (
             <div className="mr-auto flex items-center gap-2">
-              <Button variant="outline" size="sm" onClick={duplicate}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={duplicate}
+                title={draft.isTemplate && below.size ? "The copy is a separate template: the blocks that extend this one keep using this one. To change them all, edit this template instead." : undefined}
+              >
                 <Copy /> Duplicate as my own
               </Button>
               {source?.modified && (

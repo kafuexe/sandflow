@@ -71,6 +71,7 @@ Every edit returns the change list, the whole flow, errors/warnings and the inpu
 AI step after an existing node, with a tweak:
 `{"op": "add_node", "id": "security", "block": "base/cr", "from": "impl", "to": "manager", "overrides": {"extraInstructions": "Focus only on security issues."}}`
 (`extraInstructions` is appended to the block's prompt; `instructions` replaces it. Also: `allowQuestions`, `agent: {"model": "…"}`, `maxIterations`.)
+Changing the model of every agent (e.g. "use my model"): set it once on the template with `save_block` (`{"id": "base/tpl-ai-agent", "config": {"agent": {"model": "…"}}}`) — every block extending it follows. A node's `agent.model` override is for that one node only and wins over the template.
 
 Shell command step:
 `{"op": "add_node", "id": "tests", "block": "base/shell", "from": "impl", "overrides": {"shellCommand": "npm test"}}`

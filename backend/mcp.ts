@@ -5,6 +5,7 @@ import { configProblems, describeBlock, findBlock } from "../shared/blockHelp";
 import { flowRequirements, resolveBlock, startsItself } from "../shared/resolve";
 import { applyOps, autoLayout, describeBlocks, describeFlow, validateFlow, type FlowOp } from "../shared/flowOps";
 import { validateBlocks } from "../shared/validate";
+import { editablePackBlock } from "./storage";
 import type { AppData, BlockConfig, BlockDef, Flow } from "../shared/types";
 
 export interface McpDeps {
@@ -383,7 +384,9 @@ export function createMcp(deps: McpDeps) {
     {
       name: "save_block",
       description:
-        "Create or update a custom (non-pack) block or template in the library — only when no block fits even with node overrides. " +
+        "Create or update a custom block or template in the library — only when no block fits even with node overrides. " +
+        "To change a pack block or template for every flow (e.g. the model of all agents: base/tpl-ai-agent's config.agent.model), pass its full id: " +
+        "only the config fields you give change, and the user's version replaces the pack's until they revert it. " +
         "Extend a template (base/tpl-ai-agent for agents, base/tpl-auto-git for host steps, base/tpl-reviewer, base/tpl-trigger) and set only what differs: " +
         "description, instructions, inputs/outputs, env, skills. get_block on the template shows its fields.",
       inputSchema: {
@@ -401,10 +404,13 @@ export function createMcp(deps: McpDeps) {
         const data = deps.load();
         const id = String(a.id ?? "").trim();
         const existing = data.blocks.find((b) => b.id === id);
-        if (existing?.pack || existing?.builtin) {
-          throw new ToolError(`"${id}" comes from a pack and can't be changed. Save a new block that extends a template instead`);
+        // A pack block is edited in place, like in the block editor: your version replaces the pack's (and every block
+        // extending it sees the change — e.g. the model of base/tpl-ai-agent). Sandflow's core blocks stay read-only.
+        const packEdit = !!existing && editablePackBlock(existing);
+        if ((existing?.pack && !packEdit) || existing?.builtin) {
+          throw new ToolError(`"${id}" is built into Sandflow and can't be changed. Save a new block that extends a template instead`);
         }
-        if (!/^[A-Za-z][\w-]{0,63}$/.test(id)) throw new ToolError(`Block id "${id}" is invalid: letters, digits, _ or -, starting with a letter`);
+        if (!packEdit && !/^[A-Za-z][\w-]{0,63}$/.test(id)) throw new ToolError(`Block id "${id}" is invalid: letters, digits, _ or -, starting with a letter`);
         let parent: string | null = null;
         if (typeof a.extends === "string" && a.extends.trim()) {
           try {
@@ -413,13 +419,23 @@ export function createMcp(deps: McpDeps) {
             throw new ToolError(`extends: ${(e as Error).message}`);
           }
         }
-        const block: BlockDef = {
-          id,
-          name: String(a.name ?? "").trim() || id,
-          isTemplate: !!a.isTemplate,
-          extends: parent,
-          config: (a.config as BlockConfig) ?? {},
-        };
+        const patch = (a.config as BlockConfig) ?? {};
+        const block: BlockDef = packEdit
+          ? {
+              ...existing!,
+              name: String(a.name ?? "").trim() || existing!.name,
+              extends: a.extends === undefined ? (existing!.extends ?? null) : parent,
+              // Only the fields given change; the agent settings merge field by field (so setting a model keeps the provider).
+              config: { ...existing!.config, ...patch, ...(patch.agent ? { agent: { ...existing!.config.agent, ...patch.agent } } : {}) },
+              modified: true,
+            }
+          : {
+              id,
+              name: String(a.name ?? "").trim() || id,
+              isTemplate: !!a.isTemplate,
+              extends: parent,
+              config: patch,
+            };
         const blocks = existing ? data.blocks.map((b) => (b.id === id ? block : b)) : [...data.blocks, block];
         const errors = validateBlocks(blocks, new Set([id]));
         if (!errors.length) {

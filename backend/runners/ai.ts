@@ -4,9 +4,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { ENDPOINT_ENV, GATEWAY_ENV } from "../../shared/agents";
+import { auxModelEnv, ENDPOINT_ENV, GATEWAY_ENV } from "../../shared/agents";
 import { CORE_PACK } from "../../shared/packs";
-import { nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
+import { agentOrigin, nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
 import { hostAgentEnv, resolveRunOn } from "../../shared/runOn";
 import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, EnvValues, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
@@ -275,8 +275,16 @@ async function makeAgent(cfg: ResolvedConfig, env: Record<string, string>) {
   if (typeof factory !== "function") {
     throw new Error(`Agent provider "${cfg.agent.provider}" is not exported by @ai-hero/sandcastle`);
   }
+  const model = cfg.agent.model?.trim();
+  if (!model) throw new Error(`No model set for ${cfg.agent.provider} — set one on the block (or the template it extends)`);
   // Env goes on the agent only — agent env and sandbox env must not overlap.
-  return factory(cfg.agent.model, { effort: cfg.agent.effort, env });
+  return factory(model, { effort: cfg.agent.effort, env });
+}
+
+/** Where the node's model was set, for the run log: this node, a block / template in its chain, or the default. */
+function modelSource(node: FlowNode, ctx: RunContext): string {
+  const o = agentOrigin("model", node.data.blockId, ctx.blocks, node.data.overrides);
+  return o.layer === "node" ? "set on this node" : o.layer === "block" ? `from ${o.blockName}` : "Sandflow's default";
 }
 
 function routesFor(ctx: RunContext, node: FlowNode): RouteOption[] {
@@ -364,7 +372,11 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   // Files of the pack this block comes from: mounted in the sandbox, or right where they are without one.
   const pack = filesPack(ctx, node);
   const packDir = pack ? (onHost ? ctx.packs?.runtime(pack)?.dir : `${SANDBOX_PACKS_DIR}/${pack}`) : undefined;
-  const agent = await makeAgent(cfg, { ...agentEnv(cfg, env), ...(packDir ? { PACK_DIR: packDir } : {}) });
+  const finalEnv = agentEnv(cfg, env);
+  const aux = auxModelEnv(cfg.agent.provider, cfg.agent.model, finalEnv, !!endpoint);
+  const agent = await makeAgent(cfg, { ...finalEnv, ...aux, ...(packDir ? { PACK_DIR: packDir } : {}) });
+  ctx.log("info", `Agent: ${cfg.agent.provider} · model ${cfg.agent.model} (${modelSource(node, ctx)})`, node.id);
+  if (Object.keys(aux).length) ctx.log("info", `Gateway with a non-Claude model: Claude Code's other models (${Object.keys(aux).join(", ")}) use ${cfg.agent.model} too`, node.id);
   if (endpoint) ctx.log("info", `Agent endpoint: ${endpoint}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
   const qa: QaPair[] = [];
