@@ -93,7 +93,7 @@ const STATUS_RING: Record<NodeRunStatus, string> = {
   failed: "ring-2 ring-red-500",
 };
 
-function StatusBadge({ status, executions }: { status: NodeRunStatus; executions: number }) {
+function StatusBadge({ status, executions, restored }: { status: NodeRunStatus; executions: number; restored?: boolean }) {
   if (status === "idle" && !executions) return null;
   const icon = {
     idle: null,
@@ -105,8 +105,10 @@ function StatusBadge({ status, executions }: { status: NodeRunStatus; executions
   }[status];
   return (
     <span
+      title={restored ? "Kept from the run this one resumed (not run again)" : undefined}
       className={cn(
         "absolute -top-2.5 -right-2.5 flex items-center gap-0.5 rounded-full border bg-card px-1.5 py-0.5 text-[10px] font-medium",
+        restored && "border-dashed opacity-70",
         status === "failed" && "border-red-500 text-red-400",
         status === "done" && "border-emerald-500 text-emerald-400",
         status === "waiting" && "border-amber-400 text-amber-300",
@@ -114,7 +116,7 @@ function StatusBadge({ status, executions }: { status: NodeRunStatus; executions
       )}
     >
       {icon}
-      {executions > 1 && `×${executions}`}
+      {restored ? "kept" : executions > 1 && `×${executions}`}
     </span>
   );
 }
@@ -216,10 +218,11 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
           "before:absolute before:inset-0 before:-z-10 before:translate-x-1.5 before:translate-y-1.5 before:rounded-lg before:border before:border-orange-400/40 before:bg-card after:absolute after:inset-0 after:-z-20 after:translate-x-3 after:translate-y-3 after:rounded-lg after:border after:border-orange-400/20 after:bg-card",
         selected && "outline-2 outline-offset-2 outline-primary/60",
         STATUS_RING[status],
+        runNode?.restored && "ring-1",
         touchedAt && "ai-touched",
       )}
     >
-      <StatusBadge status={status} executions={runNode?.executions ?? 0} />
+      <StatusBadge status={status} executions={runNode?.executions ?? 0} restored={runNode?.restored} />
       {cfg.kind !== "trigger" && <HandleRow cfg={cfg} side="in" />}
       {cfg.kind === "condition" ? (
         <BranchHandles taken={runNode?.branch} />

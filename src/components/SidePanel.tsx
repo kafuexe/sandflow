@@ -14,12 +14,13 @@ import { CORE_PACK } from "../../shared/packs";
 import { agentOrigin, resolveNode, templateChain, type AgentOrigin } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
 import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../shared/subflow";
-import type { BlockDef, Flow, FlowNode, ResolvedConfig, StackConfig } from "../../shared/types";
+import type { BlockDef, Flow, FlowNode, ResolvedConfig, RunState, StackConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
 import { NodeRunOn } from "./RunOnSelect";
 import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
+import { RerunFromHere } from "./ResumeControls";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
 
@@ -466,6 +467,9 @@ function BlockPanel() {
   const selectedId = useStore((s) => s.selectedNodeId);
   const { updateNodeData, updateNodeOverrides, removeNode, openEditor, upsertBlock, createFlow } = useStore.getState();
   const node = flow?.nodes.find((n) => n.id === selectedId);
+  // The run on the canvas, when it's a finished run of this flow (for "Re-run from here").
+  const run = useStore((s) => (s.run?.flowId === s.currentFlowId && s.run?.finishedAt ? s.run : undefined));
+  const resumeRun = useStore((s) => s.resumeRun);
 
   if (!node || !flow) return <div className="p-4 text-sm text-muted-foreground">Select a block on the canvas.</div>;
   const block = blocks.find((b) => b.id === node.data.blockId);
@@ -510,6 +514,7 @@ function BlockPanel() {
             </Button>
           </div>
         )}
+        {run && <RunStepCard run={run} nodeId={node.id} onResume={(from) => resumeRun(run.id, from)} />}
         {/* Opening the flow a subflow runs works even when this flow is view only. */}
         {cfg?.kind === "subflow" && <SubflowEditor flow={flow} node={node} cfg={cfg} readOnly={readOnly} />}
         <fieldset disabled={readOnly} className="min-w-0 space-y-4">
@@ -613,6 +618,22 @@ function BlockPanel() {
         </div>
       </div>
     </ScrollArea>
+  );
+}
+
+/** How the selected step did in the finished run on the canvas, and "Re-run from here". */
+function RunStepCard({ run, nodeId, onResume }: { run: RunState; nodeId: string; onResume: (from?: string[]) => Promise<unknown> }) {
+  const ns = run.nodes[nodeId];
+  const queued = run.unstarted?.some((u) => u.nodeId === nodeId);
+  if (!ns || run.parent || (ns.executions === 0 && !queued)) return null;
+  const state = ns.restored ? "kept from the original run" : ns.executions === 0 ? "queued, never started" : ns.status === "idle" && ns.error ? ns.error.toLowerCase() : ns.status;
+  return (
+    <section aria-label="This step in the run shown" className="space-y-1.5 rounded-lg border p-2">
+      <div className="text-xs text-muted-foreground">
+        In the run shown (<span className="capitalize">{run.status}</span>): {state}
+      </div>
+      <RerunFromHere run={run} nodeId={nodeId} onResume={onResume} />
+    </section>
   );
 }
 

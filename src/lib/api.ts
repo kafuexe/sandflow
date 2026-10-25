@@ -80,6 +80,9 @@ export const api = {
   /** `prompt` overrides the global starting prompt for this run only. */
   startRun: (flowId: string, prompt?: string) => request<{ runId: string; warning?: string }>("POST", "/runs", { flowId, prompt }),
   getRun: (id: string) => request<RunState>("GET", `/runs/${encodeURIComponent(id)}`),
+  /** Resume a finished run as a new run (default: from its failed steps). See shared/resume.ts. */
+  resumeRun: (id: string, fromNodeIds?: string[]) =>
+    request<{ runId: string; warning?: string }>("POST", `/runs/${encodeURIComponent(id)}/resume`, fromNodeIds ? { fromNodeIds } : {}),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   sandboxStatus: () =>
     request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean; bundled: boolean }>(

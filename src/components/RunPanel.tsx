@@ -10,6 +10,7 @@ import { runNodeLabel } from "../../shared/subflow";
 import type { NodeRunStatus, RunState, RunStatus, TriggerEvent } from "../../shared/types";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
+import { RerunFromHere, ResumedFrom, RetryBox } from "./ResumeControls";
 import { ActivityFeed, ActivityFilterBar, CollapsibleSection, JumpButton, useActivityFilter, useFollow } from "./AgentActivity";
 
 const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
@@ -65,6 +66,8 @@ export function RunPanel() {
   const runError = useStore((s) => s.runError);
   const runWarning = useStore((s) => s.runWarning);
   const cancelRun = useStore((s) => s.cancelRun);
+  const resumeRun = useStore((s) => s.resumeRun);
+  const watch = useStore((s) => s.watch);
   const flow = useCurrentFlow();
   const [picked, setPicked] = useState<string | null>(null);
   const activityFilter = useActivityFilter();
@@ -113,14 +116,17 @@ export function RunPanel() {
             </div>
           )}
           {run.branch && <div className="font-mono text-xs text-muted-foreground">branch: {run.branch}</div>}
+          <ResumedFrom run={run} onOpen={(id) => void watch(id)} />
           {runWarning?.runId === run.id && (
             <div role="status" className="flex gap-1.5 rounded border border-amber-400/40 bg-amber-500/10 p-2 text-xs text-amber-300">
               <TriangleAlert className="mt-0.5 size-3.5 shrink-0" aria-hidden /> {runWarning.message}
             </div>
           )}
           {run.error && <div className="text-xs text-red-400">{run.error}</div>}
-          {runError && <div className="text-xs text-red-400">{runError}</div>}
+          {runError && <div role="alert" className="text-xs text-red-400">{runError}</div>}
         </div>
+
+        <RetryBox run={run} onResume={(from) => resumeRun(run.id, from)} />
 
         {run.pendingQuestion && (
           <div className="space-y-2 rounded-lg border border-amber-400/60 bg-amber-500/10 p-3">
@@ -148,14 +154,21 @@ export function RunPanel() {
               <span className="flex-1 truncate">{label(id)}</span>
               {s.routedTo && <span className="truncate text-[10px] text-emerald-400">→ {label(prefixOf(id) + s.routedTo)}</span>}
               {s.exit && <span className="truncate text-[10px] text-violet-300">→ {s.exit}</span>}
-              {s.executions > 1 && <Badge variant="secondary" className="px-1 py-0 text-[10px]">×{s.executions}</Badge>}
+              {s.restored ? (
+                <span className="text-[10px] text-muted-foreground" title="Kept from the run this one resumed (not run again)">kept</span>
+              ) : (
+                s.executions > 1 && <Badge variant="secondary" className="px-1 py-0 text-[10px]">×{s.executions}</Badge>
+              )}
             </button>
           ))}
         </div>
 
         {detail && picked && (
           <div className="space-y-2 rounded-lg border p-2">
-            <div className="text-xs font-medium">{label(picked)} — latest execution</div>
+            <div className="text-xs font-medium">
+              {label(picked)} — {detail.restored ? "kept from the original run" : "latest execution"}
+            </div>
+            <RerunFromHere run={run} nodeId={picked} onResume={(from) => resumeRun(run.id, from)} />
             {detail.error && <div className="text-xs text-red-400">{detail.error}</div>}
             {(
               [

@@ -8,6 +8,8 @@ import type { RunState } from "../../../shared/types";
 import type { AgentActivity } from "../../../shared/activity";
 import { ActivityFilterBar, ActivityList, useActivityFilter } from "../AgentActivity";
 import { Disclosure } from "./Disclosure";
+import { RerunFromHere } from "../ResumeControls";
+import { useAgent } from "@/lib/agent";
 import { duration } from "./status";
 import type { RunFlow } from "./useRunFlow";
 
@@ -106,6 +108,9 @@ export function StepRow({
           />
         )}
         {output && <Disclosure title="Result" body={output} mono={false} open={expandResult} />}
+        {latest && run.finishedAt && !item.nodeId.includes("/") && (
+          <RerunFromHere run={run} nodeId={item.nodeId} compact onResume={(from) => useAgent.getState().resume(run.id, from)} />
+        )}
       </div>
     </li>
   );

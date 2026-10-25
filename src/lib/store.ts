@@ -99,6 +99,11 @@ interface State {
   startRun(): Promise<void>;
   /** Show this run in the Run tab (and on the canvas if it belongs to the current flow). */
   watch(runId: string): Promise<void>;
+  /**
+   * Resume a finished run as a new run (default: from its failed steps; see shared/resume.ts) and show the new run.
+   * Resolves to the new run's id, or undefined when it couldn't start (`runError` says why).
+   */
+  resumeRun(runId: string, fromNodeIds?: string[]): Promise<string | undefined>;
   /** Refresh the runs list + trigger status (polled while the app is open). */
   refreshActivity(): Promise<void>;
   /** Stop a run (default: the one shown). */
@@ -495,6 +500,26 @@ export const useStore = create<State>((set, get) => {
       } catch (e) {
         const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
         set({ runError: missing ? `Missing: ${missing.join(", ")}` : (e as Error).message });
+      }
+    },
+    async resumeRun(runId, fromNodeIds) {
+      // The resumed run uses the flow as saved: write pending edits (the config fix) first.
+      if (!(await get().flushSaves())) {
+        set({ runError: `Can't resume: ${get().saveError}` });
+        return undefined;
+      }
+      try {
+        set({ runError: undefined });
+        const { runId: id, warning } = await api.resumeRun(runId, fromNodeIds);
+        const run = await api.getRun(id);
+        if (run.flowId !== get().currentFlowId && get().data?.flows.some((f) => f.id === run.flowId)) set({ currentFlowId: run.flowId, selectedNodeId: null });
+        set({ run, runs: mergeRun(get().runs, run), sideTab: "run", runWarning: warning ? { runId: id, message: warning } : undefined });
+        watchRun(id);
+        return id;
+      } catch (e) {
+        const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
+        set({ runError: missing ? `Missing: ${missing.join(", ")}` : (e as Error).message });
+        return undefined;
       }
     },
     async cancelRun(runId) {

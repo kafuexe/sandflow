@@ -1,8 +1,10 @@
 // /api/* request handler, mounted inside the Vite dev/preview server (see vite.config.ts) — no separate server.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import { CORE_BLOCKS } from "../shared/core";
 import { eventMarkdown } from "../shared/events";
 import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
@@ -10,6 +12,7 @@ import { validateSettings } from "../shared/settings";
 import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
+import { planResume, type ResumePlan } from "../shared/resume";
 import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
@@ -40,6 +43,18 @@ class HttpError extends Error {
 }
 
 const MAX_BODY = 5 * 1024 * 1024;
+
+const execFileP = promisify(execFile);
+
+/** Whether `branch` exists in the git checkout at `repo` (false too when `repo` isn't one). */
+async function branchExists(repo: string, branch: string): Promise<boolean> {
+  try {
+    await execFileP("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: repo, windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Zips of packs come in as base64 JSON. */
 const MAX_PACK_BODY = 300 * 1024 * 1024;
@@ -174,12 +189,17 @@ export function createApi(
   function launch(
     flow: Flow,
     data: AppData,
-    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string } = {},
+    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan } } = {},
+    notes: string[] = [],
   ): RunHandle & { warning?: string } {
     // Runs are independent (own context, sandbox, branch and logs), so any number may run at once — the one thing
-    // they can share is an explicit BRANCH_NAME in the same REPO_PATH. Say so instead of refusing the run.
-    const branchKey = sharedBranchKey(data.env);
-    const warning = branchConflictWarning(data.env, activeRuns());
+    // they can share is an explicit BRANCH_NAME in the same REPO_PATH (or, resuming, the original run's branch).
+    // Say so instead of refusing the run.
+    const branchEnv = extra.branch ? { ...data.env, BRANCH_NAME: extra.branch } : data.env;
+    const branchKey = sharedBranchKey(branchEnv);
+    const conflict = branchConflictWarning(branchEnv, activeRuns());
+    const warnings = [...notes, ...(conflict ? [conflict] : [])];
+    const warning = warnings.length ? warnings.join("\n\n") : undefined;
     const handle = startRun({
       flow,
       blocks: data.blocks,
@@ -195,7 +215,7 @@ export function createApi(
       onFlag: announceFlag,
       // Stack children are runs of their own: answerable, cancellable and streamed like any other.
       onSpawn: track,
-      warnings: warning ? [warning] : undefined,
+      warnings: warnings.length ? warnings : undefined,
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
         if (s.finishedAt || Date.now() - (lastSave.get(s.id) ?? 0) > 2000) {
@@ -322,6 +342,42 @@ export function createApi(
         .then((msg) => console.log(`[packs] ${msg}`))
         .catch((e: Error) => console.warn(`[packs] couldn't fetch the base pack (keeping the shipped copy): ${e.message}`));
     }
+  }
+
+  /**
+   * Resume a finished run as a new run of its flow as it is now (see shared/resume.ts), from `fromNodeIds` (default:
+   * its failed / stopped / still-queued steps). The new run works on the original's branch, which must still exist.
+   */
+  async function resumeRun(id: string, fromNodeIds?: string[]) {
+    const orig = getRun(id);
+    if (runs.get(id) && !orig.finishedAt) throw new HttpError(409, "The run is still going — stop it first");
+    const already = [...runs.values()].find((h) => !h.state.finishedAt && h.state.resumedFrom?.runId === id);
+    if (already) throw new HttpError(409, `This run is already being resumed (run ${already.state.id})`, { runId: already.state.id });
+    const data = storage.load();
+    const flow = data.flows.find((f) => f.id === orig.flowId);
+    if (!flow) throw new HttpError(404, `Flow "${orig.flowName}" no longer exists`);
+    const planned = planResume(orig, flow, data.blocks, fromNodeIds);
+    if (!planned.ok) throw new HttpError(400, `Can't resume: ${planned.problems.join("; ")}`, { problems: planned.problems });
+    const plan = planned.plan;
+    const prompt = orig.prompt ?? "";
+    const missing = missingInputs(flow, data.blocks, data.env, prompt, data.flows, { triggered: !!orig.triggerNodeId });
+    if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
+    const notes = [...plan.warnings];
+    if (plan.repo) {
+      const repo = data.env.REPO_PATH?.trim();
+      if (!repo) {
+        throw new HttpError(400, `Can't resume: the original run worked in ${plan.repo} (REPO_PATH), which is no longer set — set it again to continue on branch ${plan.branch}`, {
+          problems: ["REPO_PATH is no longer set"],
+        });
+      }
+      if (repo !== plan.repo) notes.push(`REPO_PATH changed since the original run (${plan.repo} → ${repo}); continuing on branch ${plan.branch} in ${repo}.`);
+      // A branch the original run actually used must still be there: it holds the earlier steps' code changes.
+      if (orig.branch && plan.branch === orig.branch && !(await branchExists(repo, orig.branch))) {
+        const problem = `Branch ${orig.branch} no longer exists in ${repo}, so the code changes the earlier steps made are gone (was it deleted or merged?). Restore the branch, re-run from the first step, or start a new run.`;
+        throw new HttpError(409, `Can't resume: ${problem}`, { problems: [problem] });
+      }
+    }
+    return launch(flow, data, { prompt, branch: plan.branch, resume: { from: orig, plan } }, notes);
   }
 
   function getRun(id: string): RunState {
@@ -707,6 +763,16 @@ export function createApi(
         const { answer } = (await readJson<{ answer?: string }>(req)) ?? {};
         if (!h || !h.answer(String(answer ?? ""))) throw new HttpError(409, "No pending question");
         return send(res, 200, { ok: true });
+      }
+
+      case "POST /runs/:id/resume": {
+        const body = (await readJson<{ fromNodeIds?: unknown }>(req)) ?? {};
+        const from = body.fromNodeIds;
+        if (from !== undefined && (!Array.isArray(from) || from.some((x) => typeof x !== "string"))) {
+          throw new HttpError(400, "fromNodeIds must be a list of node ids");
+        }
+        const started = await resumeRun(parts[1], from as string[] | undefined);
+        return send(res, 200, { runId: started.state.id, ...(started.warning ? { warning: started.warning } : {}) });
       }
 
       case "POST /runs/:id/cancel": {

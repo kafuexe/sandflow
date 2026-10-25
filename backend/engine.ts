@@ -24,6 +24,7 @@ import type {
   StackRunInfo,
   SkillFileRef,
 } from "../shared/types";
+import type { ResumePlan } from "../shared/resume";
 import type { PackRuntimeInfo } from "./packs";
 import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
@@ -142,6 +143,12 @@ export interface StartRunOptions {
   cleanupTimeoutMs?: number;
   /** Logged as warnings when the run starts (e.g. it shares a branch with another run). */
   warnings?: string[];
+  /**
+   * Resume `from` (a finished run of this flow, see shared/resume.ts): start only at the plan's steps, with the inputs
+   * they had, after copying the other steps' states and outputs from it. Its trigger event is reused; pass its
+   * starting prompt as `prompt` and its branch as `branch`.
+   */
+  resume?: { from: RunState; plan: ResumePlan };
 }
 
 export interface RunHandle {
@@ -198,12 +205,27 @@ export function startRun(opts: StartRunOptions): RunHandle {
     logs: [],
     questions: [],
     prompt: settings.startingPrompt,
-    trigger: opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
-    triggerNodeId: opts.startNodeId,
+    trigger: opts.resume?.from.trigger ?? opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
+    triggerNodeId: opts.resume ? opts.resume.from.triggerNodeId : opts.startNodeId,
     ...(opts.parent ? { parent: opts.parent } : {}),
     ...(opts.stack ? { stack: opts.stack } : {}),
     ...(opts.entry ? { input: opts.entry } : {}),
   };
+  if (!opts.share) {
+    // What a resume needs to find this run's work again (see shared/resume.ts).
+    const repo = env.REPO_PATH?.trim();
+    run.workspace = { ...(repo ? { repo } : {}), branch: opts.branch || env.BRANCH_NAME?.trim() || `sandflow/${run.id}` };
+  }
+  const resume = opts.resume;
+  if (resume) {
+    const { from, plan } = resume;
+    run.resumedFrom = { runId: from.id, nodeIds: plan.nodeIds };
+    for (const [k, ns] of Object.entries(plan.restored)) run.nodes[k] = structuredClone(ns);
+    if (plan.questions.length) run.questions = structuredClone(plan.questions);
+    const activity = Object.entries(from.activity ?? {}).filter(([k]) => plan.restored[k]);
+    if (activity.length) run.activity = structuredClone(Object.fromEntries(activity));
+    if (from.branch && plan.branch === from.branch) run.branch = from.branch;
+  }
   const emit = () => opts.onChange?.(run);
 
   let pending: { resolve: (a: string) => void; reject: (e: Error) => void } | undefined;
@@ -304,8 +326,20 @@ export function startRun(opts: StartRunOptions): RunHandle {
     }
   }
   for (const w of opts.warnings ?? []) ctx.log("warn", w);
+  if (resume) {
+    const restoredCount = Object.keys(resume.plan.restored).filter((k) => !k.includes("/")).length;
+    ctx.log(
+      "info",
+      `↻ Resuming run ${resume.from.id}: re-running from ${resume.plan.nodeIds.map((id) => {
+        const n = flow.nodes.find((x) => x.id === id);
+        return n ? nodeLabel(n, blocks) : id;
+      }).join(", ")}${restoredCount ? `; ${restoredCount} other step${restoredCount === 1 ? " keeps its" : "s keep their"} outputs from that run` : ""}`,
+    );
+  }
 
   let steps = 0;
+  /** The top-level graph's queue: what's still waiting when the run ends is saved as `run.unstarted`. */
+  let topQueue: { nodeId: string; inputs: NodeIO }[] = [];
 
   /** Rejects as soon as the run is stopped: a node's runner is raced against it, so Stop never waits on a runner. */
   const stopped = new Promise<never>((_, reject) => {
@@ -348,6 +382,10 @@ export function startRun(opts: StartRunOptions): RunHandle {
       // No Flow input: start where a top-level run would (never at a trigger — they don't fire inside subflows).
       if (!starts.length) starts = g.nodes.filter((n) => !incoming.has(n.id) && kindOf(n) !== "trigger");
       if (!starts.length) throw new Error(`Subflow "${g.name}" has nothing to start from — add a Flow input`);
+    } else if (resume && !prefix) {
+      const missing = resume.plan.starts.filter((s) => !byId.has(s.nodeId));
+      if (missing.length) throw new Error(`Step ${missing.map((s) => s.nodeId).join(", ")} is no longer in the flow`);
+      starts = [];
     } else {
       starts = opts.startNodeId ? g.nodes.filter((n) => n.id === opts.startNodeId) : g.nodes.filter((n) => !incoming.has(n.id));
       if (!starts.length) {
@@ -357,7 +395,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
       }
     }
 
-    const queue: { nodeId: string; inputs: NodeIO }[] = starts.map((n) => ({ nodeId: n.id, inputs: {} }));
+    const queue: { nodeId: string; inputs: NodeIO }[] =
+      resume && !prefix && !entry ? resume.plan.starts.map((s) => ({ nodeId: s.nodeId, inputs: { ...s.inputs } })) : starts.map((n) => ({ nodeId: n.id, inputs: {} }));
+    if (!prefix && !entry) topQueue = queue;
     for (const q of queue) run.nodes[key(q.nodeId)].status = "queued";
     emit();
 
@@ -372,6 +412,11 @@ export function startRun(opts: StartRunOptions): RunHandle {
       const node = byId.get(nodeId)!;
       const cfg = resolveNode(node, blocks);
       const ns = run.nodes[k];
+      if (ns.restored) {
+        // A restored step reached again (e.g. a loop back to it): it runs for real now.
+        delete ns.restored;
+        ns.executions = 0;
+      }
       ns.status = "running";
       ns.executions++;
       ns.inputs = inputs;
@@ -580,6 +625,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
           clearTimeout(timer);
         }
       }
+      if (run.status !== "done" && topQueue.length) run.unstarted = topQueue.map((q) => ({ nodeId: q.nodeId, inputs: q.inputs }));
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
       flushActivity();

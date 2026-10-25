@@ -23,5 +23,6 @@ export function summarize(r: RunState): RunSummary {
     flags: flagCounts(r),
     parent: r.parent,
     stack: r.stack,
+    ...(r.resumedFrom ? { resumedFrom: r.resumedFrom } : {}),
   };
 }
