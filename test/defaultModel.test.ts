@@ -5,10 +5,8 @@ import { CLI_DEFAULT_MODEL, withoutModelFlag } from "../backend/runners/ai";
 import { BUILTIN_BLOCKS } from "../shared/library";
 import { resolveBlock } from "../shared/resolve";
 
-const factories = sc as unknown as Record<string, (model: string, opts?: object) => {
-  buildPrintCommand: (o: object) => { command: string };
-  buildInteractiveArgs?: (o: object) => string[];
-}>;
+type Built = { buildPrintCommand: (o: object) => { command: string }; buildInteractiveArgs?: (o: object) => string[] };
+const factories = sc as unknown as Record<string, (model: string, opts?: object) => Built>;
 const PROVIDERS = ["claudeCode", "codex", "pi", "opencode", "cursor", "copilot"];
 
 describe("no model set = the agent CLI's default model", () => {
@@ -21,7 +19,7 @@ describe("no model set = the agent CLI's default model", () => {
   });
 
   it.each(PROVIDERS)("%s: the model flag is left out, everything else kept", (p) => {
-    const agent = withoutModelFlag(factories[p](CLI_DEFAULT_MODEL, { effort: "high" }));
+    const agent = withoutModelFlag(factories[p](CLI_DEFAULT_MODEL, { effort: "high" }) as never) as Built;
     const cmd = agent.buildPrintCommand({ prompt: "hi", dangerouslySkipPermissions: true }).command;
     expect(cmd).not.toContain(CLI_DEFAULT_MODEL);
     expect(cmd).not.toMatch(/ (--model|-m)( |$)/);
