@@ -1,5 +1,7 @@
 // Shared domain types used by both the React UI and the flow-engine server.
 
+import type { AgentActivity } from "./activity";
+
 /** The two things a block can emit. */
 export type OutputKind = "artifact" | "steer";
 /** A named way out of a block (`exit:<name>`): a Script that picks a route, or a subflow's Flow output. */
@@ -580,6 +582,8 @@ export interface RunState {
   /** The starting prompt this run used (a per-run prompt, or the global one). */
   prompt?: string;
   logs: LogLine[];
+  /** What each agent node was thinking / doing, by node key (capped per node, see shared/activity.ts). */
+  activity?: Record<string, AgentActivity[]>;
   error?: string;
   /** The event that started the run (manual runs get `{ source: "manual" }`). */
   trigger?: TriggerEvent;

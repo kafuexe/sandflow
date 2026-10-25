@@ -14,6 +14,7 @@ import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
 import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
+import { agentStreamHandler } from "./activity";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
 
 /** Where installed packs are mounted (read-only) inside the run's sandbox. */
@@ -377,10 +378,7 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
           logging: {
             type: "file",
             path: path.join(ctx.logDir, `${node.id.replace(/[^\w-]/g, "_")}.log`),
-            onAgentStreamEvent: (ev: { type: string; message?: string; name?: string; formattedArgs?: string }) => {
-              if (ev.type === "text" && ev.message?.trim()) ctx.log("agent", ev.message.trim(), node.id);
-              else if (ev.type === "toolCall") ctx.log("agent", `🔧 ${ev.name} ${ev.formattedArgs ?? ""}`.trim(), node.id);
-            },
+            onAgentStreamEvent: agentStreamHandler(ctx, node.id, cfg.agent.provider),
           },
         }
       : {}),

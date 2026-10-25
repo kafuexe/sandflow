@@ -96,4 +96,5 @@ export const PANELS = {
   chat: { id: "chat", defaultSize: 380, min: 300, max: 800 },
   runList: { id: "runList", defaultSize: 288, min: 200, max: 520 },
   runLogs: { id: "runLogs", defaultSize: 320, min: 120, max: 1200 },
+  runActivity: { id: "runActivity", defaultSize: 360, min: 120, max: 1200 },
 } as const satisfies Record<string, PanelSizeSpec>;
