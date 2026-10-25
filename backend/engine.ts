@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { appendActivity, type ActivityDraft, type AgentActivity } from "../shared/activity";
 import { describeCondition, evaluateCondition } from "../shared/conditions";
 import { eventMarkdown } from "../shared/events";
 import { nodeLabel, resolveNode } from "../shared/resolve";
@@ -84,6 +85,8 @@ export interface RunContext {
   /** Only the env vars the block declares — never leak all globals. */
   blockEnv(cfg: ResolvedConfig): Record<string, string>;
   log(level: LogLine["level"], msg: string, nodeId?: string): void;
+  /** What an agent node is thinking / doing (batched: shown live within ACTIVITY_FLUSH_MS, saved with the run). */
+  activity?(nodeId: string, items: ActivityDraft[]): void;
   /** Pause the run until the user answers (rejects when the run is cancelled). */
   ask(nodeId: string, question: string): Promise<string>;
   /** Raise a flag on the run: saved with it, shown in the run list and as an alert. */
@@ -149,6 +152,8 @@ export interface RunHandle {
 }
 
 const MAX_LOGS = 2000;
+/** Agent activity is pushed to the UI at most this often per run. */
+export const ACTIVITY_FLUSH_MS = 300;
 const CLEANUP_TIMEOUT_MS = 20_000;
 
 /** Where a graph run ended up: a subflow reached one of its Flow outputs (or ran out of nodes). */
@@ -167,6 +172,7 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
     flow,
     outerFlows,
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
+    activity: (nodeId, items) => ctx.activity?.(prefix + nodeId, items),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
     flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
@@ -202,6 +208,19 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
   let pending: { resolve: (a: string) => void; reject: (e: Error) => void } | undefined;
 
+  // Agent activity arrives line by line; it's collected and pushed with the run state a few times a second.
+  const activityQueue = new Map<string, (AgentActivity & { chunk?: boolean })[]>();
+  let activityTimer: NodeJS.Timeout | undefined;
+  const flushActivity = () => {
+    clearTimeout(activityTimer);
+    activityTimer = undefined;
+    if (!activityQueue.size) return;
+    const all = (run.activity ??= {});
+    for (const [k, items] of activityQueue) all[k] = appendActivity(all[k] ?? [], items);
+    activityQueue.clear();
+    emit();
+  };
+
   const ctx: RunContext = {
     run,
     flow,
@@ -222,6 +241,18 @@ export function startRun(opts: StartRunOptions): RunHandle {
       run.logs.push({ ts: Date.now(), level, nodeId, msg });
       if (run.logs.length > MAX_LOGS) run.logs.splice(0, run.logs.length - MAX_LOGS);
       emit();
+    },
+    activity(nodeId, items) {
+      if (!items.length || run.finishedAt) return;
+      const exec = run.nodes[nodeId]?.executions;
+      const ts = Date.now();
+      let q = activityQueue.get(nodeId);
+      if (!q) activityQueue.set(nodeId, (q = []));
+      for (const it of items) q.push({ ...it, ts, ...(exec ? { exec } : {}) });
+      if (!activityTimer) {
+        activityTimer = setTimeout(flushActivity, ACTIVITY_FLUSH_MS);
+        activityTimer.unref?.();
+      }
     },
     flag(severity, message, o = {}) {
       const f: RunFlag = { id: randomUUID().slice(0, 8), severity, message, at: Date.now(), ...o };
@@ -506,6 +537,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         queue.push({ nodeId: t, inputs: tInputs });
         if (run.nodes[key(t)].status !== "running") run.nodes[key(t)].status = "queued";
       }
+      flushActivity();
       ctx.log("info", `✓ ${label(nodeId)}`, k);
     }
     return {};
@@ -549,6 +581,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
       }
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
+      flushActivity();
       run.finishedAt = Date.now();
       if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
       emit();

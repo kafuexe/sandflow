@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Check, CircleDashed, HelpCircle, Loader2, Send, Square, TriangleAlert, X, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,9 +7,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { runNodeLabel } from "../../shared/subflow";
-import type { NodeRunStatus, RunStatus, TriggerEvent } from "../../shared/types";
+import type { NodeRunStatus, RunState, RunStatus, TriggerEvent } from "../../shared/types";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
+import { ActivityFeed, ActivityFilterBar, CollapsibleSection, JumpButton, useActivityFilter, useFollow } from "./AgentActivity";
 
 const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
   idle: <CircleDashed className="size-3.5 text-muted-foreground" />,
@@ -66,12 +67,7 @@ export function RunPanel() {
   const cancelRun = useStore((s) => s.cancelRun);
   const flow = useCurrentFlow();
   const [picked, setPicked] = useState<string | null>(null);
-  const logBox = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const el = logBox.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [run?.logs.length]);
+  const activityFilter = useActivityFilter();
 
   if (!run) {
     return (
@@ -179,23 +175,51 @@ export function RunPanel() {
           </div>
         )}
 
-        <div className="space-y-1">
-          <div className="text-xs font-medium text-muted-foreground">Logs</div>
+        <CollapsibleSection id="runLogs" title="Logs" meta={run.logs.length}>
           <ResizablePanel as="div" panel={PANELS.runLogs} edge="bottom" label="Resize logs">
-            <div ref={logBox} className="h-full overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed">
-              {run.logs.map((l, i) => (
-                <div key={i} className={cn("whitespace-pre-wrap", LOG_COLOR[l.level])}>
-                  <span className="text-muted-foreground/60">{new Date(l.ts).toLocaleTimeString()} </span>
-                  {l.nodeId && <span className="text-sky-400/80">[{label(l.nodeId)}] </span>}
-                  {l.msg}
-                </div>
-              ))}
-            </div>
+            <LogBox run={run} label={label} />
           </ResizablePanel>
-        </div>
+        </CollapsibleSection>
+
+        <CollapsibleSection
+          id="runActivity"
+          title="AI activity"
+          meta={activityCount(run.activity) || undefined}
+          actions={<ActivityFilterBar {...activityFilter} />}
+        >
+          <ResizablePanel as="div" panel={PANELS.runActivity} edge="bottom" label="Resize AI activity">
+            <ActivityFeed
+              activity={run.activity}
+              label={label}
+              filter={activityFilter.filter}
+              running={(k) => !run.finishedAt && (run.nodes[k]?.status === "running" || run.nodes[k]?.status === "waiting")}
+            />
+          </ResizablePanel>
+        </CollapsibleSection>
         <RecentRuns />
       </div>
     </ScrollArea>
+  );
+}
+
+const activityCount = (a: RunState["activity"]) => Object.values(a ?? {}).reduce((n, l) => n + l.length, 0);
+
+/** The run's system log; follows new lines unless you scrolled up. */
+function LogBox({ run, label }: { run: RunState; label: (id: string) => string }) {
+  const { ref, onScroll, away, jump } = useFollow(`${run.id}:${run.logs.length}`);
+  return (
+    <div className="relative h-full">
+      <div ref={ref} onScroll={onScroll} className="h-full overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed">
+        {run.logs.map((l, i) => (
+          <div key={i} className={cn("whitespace-pre-wrap", LOG_COLOR[l.level])}>
+            <span className="text-muted-foreground/60">{new Date(l.ts).toLocaleTimeString()} </span>
+            {l.nodeId && <span className="text-sky-400/80">[{label(l.nodeId)}] </span>}
+            {l.msg}
+          </div>
+        ))}
+      </div>
+      {away && <JumpButton onClick={jump} />}
+    </div>
   );
 }
 

@@ -1,8 +1,12 @@
-import { Loader2 } from "lucide-react";
+import { useState } from "react";
+import { ChevronRight, Loader2 } from "lucide-react";
+import { activityOf } from "@/lib/activityView";
 import { BlockIcon } from "@/lib/icons";
 import type { StepItem } from "@/lib/timeline";
 import { cn } from "@/lib/utils";
 import type { RunState } from "../../../shared/types";
+import type { AgentActivity } from "../../../shared/activity";
+import { ActivityFilterBar, ActivityList, useActivityFilter } from "../AgentActivity";
 import { Disclosure } from "./Disclosure";
 import { duration } from "./status";
 import type { RunFlow } from "./useRunFlow";
@@ -28,6 +32,26 @@ function StatusText({ item, now }: { item: StepItem; now: number }) {
   }
 }
 
+/** What the agent thought and did during this step; open while it runs. */
+function StepActivity({ items, running }: { items: AgentActivity[]; running: boolean }) {
+  const [open, setOpen] = useState(running);
+  const activityFilter = useActivityFilter();
+  return (
+    <details open={open} onToggle={(e) => setOpen(e.currentTarget.open)} className="group/d">
+      <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded text-xs text-muted-foreground outline-none select-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/60 [&::-webkit-details-marker]:hidden">
+        <ChevronRight className="size-3.5 transition-transform group-open/d:rotate-90 motion-reduce:transition-none" />
+        AI activity ({items.length})
+      </summary>
+      {open && (
+        <div className="mt-1.5 space-y-1.5">
+          <ActivityFilterBar {...activityFilter} />
+          <ActivityList items={items} filter={activityFilter.filter} />
+        </div>
+      )}
+    </details>
+  );
+}
+
 /** One execution of one block, on the run's timeline. */
 export function StepRow({
   item,
@@ -50,6 +74,7 @@ export function StepRow({
   const color = cfg?.color ?? "#71717a";
   const lines = item.lines.slice(-MAX_LINES);
   const output = latest && item.status === "done" ? ns?.outputs?.artifact : undefined;
+  const activity = activityOf(run.activity, item.nodeId, item.execution);
 
   return (
     <li className="relative flex gap-3">
@@ -73,6 +98,7 @@ export function StepRow({
           </p>
         )}
         {item.status === "failed" && latest && ns?.error && <p className="text-xs text-red-300">{ns.error}</p>}
+        {activity.length > 0 && <StepActivity items={activity} running={item.status === "running"} />}
         {lines.length > 0 && (
           <Disclosure
             title={`Log (${item.lines.length} ${item.lines.length === 1 ? "line" : "lines"})`}
