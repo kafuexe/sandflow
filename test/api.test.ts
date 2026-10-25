@@ -187,6 +187,36 @@ describe("api", () => {
   });
 });
 
+describe("run stream and Stop", () => {
+  it("a run stopped while its stream is open ends the stream without writing after its end (server stays up)", async () => {
+    await start((ctx) => new Promise((_r, reject) => ctx.abort.signal.addEventListener("abort", () => reject(new Error("Run cancelled")))));
+    await fetch(`${base}/env`, json("PUT", env));
+    await fetch(`${base}/settings`, json("PUT", { startingPrompt: "Do it", sandbox: "none", maxSteps: 40 }));
+    const { runId } = (await (await fetch(`${base}/runs`, json("POST", { flowId: "feature-pipeline" }))).json()) as { runId: string };
+    const res = await fetch(`${base}/runs/${runId}/events`);
+    const reader = res.body!.getReader();
+    await reader.read();
+    const errors: unknown[] = [];
+    const onErr = (e: unknown) => errors.push(e);
+    process.on("uncaughtException", onErr);
+    try {
+      await fetch(`${base}/runs/${runId}/cancel`, json("POST", {}));
+      let text = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += new TextDecoder().decode(value);
+      }
+      expect(text).toContain('"status":"cancelled"');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(errors).toEqual([]);
+      expect((await fetch(`${base}/runs/${runId}`)).status).toBe(200);
+    } finally {
+      process.off("uncaughtException", onErr);
+    }
+  });
+});
+
 describe("concurrent runs", () => {
   it("runs the same flow twice at once, each with its own state, and warns about a shared BRANCH_NAME", async () => {
     // Nodes hold until the test opens the gate, so both runs are provably in progress at the same time.

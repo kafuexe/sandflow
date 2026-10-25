@@ -682,16 +682,23 @@ export function createApi(
         if (state.finishedAt) return res.end();
         let set = listeners.get(state.id);
         if (!set) listeners.set(state.id, (set = new Set()));
-        const fn = (s: RunState) => {
-          push(s);
-          if (s.finishedAt) res.end();
-        };
-        set.add(fn);
-        const beat = setInterval(() => res.write(": ping\n\n"), 15_000);
-        req.on("close", () => {
+        // A finished run can still change once more (e.g. "Run stopped" logged after it ended): the stream is closed
+        // by then, and writing to it would crash the server.
+        const stop = () => {
           clearInterval(beat);
           set!.delete(fn);
-        });
+        };
+        const fn = (s: RunState) => {
+          if (res.writableEnded) return stop();
+          push(s);
+          if (s.finishedAt) {
+            res.end();
+            stop();
+          }
+        };
+        set.add(fn);
+        const beat = setInterval(() => !res.writableEnded && res.write(": ping\n\n"), 15_000);
+        req.on("close", stop);
         return;
       }
 

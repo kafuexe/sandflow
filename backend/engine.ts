@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { appendActivity, type ActivityDraft, type AgentActivity } from "../shared/activity";
+import { appendActivity, capRunActivity, type ActivityDraft, type AgentActivity } from "../shared/activity";
 import { describeCondition, evaluateCondition } from "../shared/conditions";
 import { eventMarkdown } from "../shared/events";
 import { nodeLabel, resolveNode } from "../shared/resolve";
@@ -217,6 +217,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     if (!activityQueue.size) return;
     const all = (run.activity ??= {});
     for (const [k, items] of activityQueue) all[k] = appendActivity(all[k] ?? [], items);
+    capRunActivity(all);
     activityQueue.clear();
     emit();
   };

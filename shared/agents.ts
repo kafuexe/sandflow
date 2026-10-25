@@ -7,11 +7,6 @@ export const ENDPOINT_ENV: Partial<Record<AgentProvider, string>> = {
 };
 
 /**
- * How each provider reaches its API: base URL and credentials. Set in Inputs, these go to every agent of that
- * provider — whether or not the block lists them — so a gateway (e.g. a LiteLLM proxy) works for the whole app,
- * the same as it does for the assistant.
- */
-/**
  * Claude Code's other model settings: the models it uses besides the main one (background / small-fast calls,
  * subagents, and what the haiku / sonnet / opus aliases mean). Behind a gateway that only serves your own model, these
  * must point at it too.
@@ -24,6 +19,12 @@ export const CLAUDE_AUX_MODEL_ENV = [
   "CLAUDE_CODE_SUBAGENT_MODEL",
 ];
 
+/**
+ * How each provider reaches its API: base URL and credentials. Set in Inputs, these go to every agent of that
+ * provider — whether or not the block lists them — so a gateway (e.g. a LiteLLM proxy) works for the whole app,
+ * the same as it does for the assistant.
+ * Claude Code's side-model settings are passed the same way (optional: never required).
+ */
 export const GATEWAY_ENV: Partial<Record<AgentProvider, string[]>> = {
   claudeCode: ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS", ...CLAUDE_AUX_MODEL_ENV],
   codex: ["OPENAI_BASE_URL", "OPENAI_API_KEY"],
@@ -41,8 +42,12 @@ export const AGENT_LABELS: Record<AgentProvider, string> = {
 
 export const AGENT_PROVIDERS = Object.keys(AGENT_LABELS) as AgentProvider[];
 
-/** A Claude model name or alias (what Anthropic's API itself serves), as opposed to a gateway's own model (e.g. GLM). */
-export const isClaudeModel = (model: string): boolean => /^(claude-|anthropic[./:]|(opus|sonnet|haiku|default|best|opusplan)(\[|$))/i.test(model.trim());
+/**
+ * A bare Claude model name or alias, as Anthropic's API (and Claude Code's own defaults) name them — as opposed to a
+ * gateway's own model (e.g. GLM). Provider-prefixed names ("anthropic/claude-…", "bedrock/…", "openrouter/…") are
+ * the gateway's names: it won't know Claude Code's bare default side models either, so those get pinned too.
+ */
+export const isClaudeModel = (model: string): boolean => /^(claude-[\w.-]*|(opus|sonnet|haiku|default|best|opusplan))(\[\w+\])?$/i.test(model.trim());
 
 /**
  * For Claude Code talking to a gateway with a non-Claude model: point its other models (CLAUDE_AUX_MODEL_ENV) at that

@@ -12,7 +12,7 @@ import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, EnvValues, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
-import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider } from "../sandbox";
+import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider, withAgentEnv } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
 import { agentStreamHandler } from "./activity";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
@@ -324,6 +324,15 @@ function logUsage(ctx: RunContext, nodeId: string, res: RunResultLike) {
 }
 
 export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
+  const release: (() => void)[] = [];
+  try {
+    return await runAgentNode(ctx, node, cfg, inputs, release);
+  } finally {
+    for (const fn of release) fn();
+  }
+}
+
+async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO, release: (() => void)[]): Promise<NodeResult> {
   const kind = agentSandboxKind(ctx, cfg);
   const onHost = kind === "none";
   // Chosen on the block / node / flow (not just Settings → Sandbox: None): use the local CLI's own login.
@@ -375,7 +384,11 @@ export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const packDir = pack ? (onHost ? ctx.packs?.runtime(pack)?.dir : `${SANDBOX_PACKS_DIR}/${pack}`) : undefined;
   const finalEnv = agentEnv(cfg, env);
   const aux = auxModelEnv(cfg.agent.provider, cfg.agent.model, finalEnv, !!endpoint);
-  const agent = await makeAgent(cfg, { ...finalEnv, ...aux, ...(packDir ? { PACK_DIR: packDir } : {}) });
+  const fullEnv = { ...finalEnv, ...aux, ...(packDir ? { PACK_DIR: packDir } : {}) };
+  // sandcastle doesn't hand a sandbox's agent its provider env: the sandbox's exec does (see withAgentEnv).
+  const scoped = withAgentEnv(await makeAgent(cfg, fullEnv), fullEnv);
+  release.push(scoped.release);
+  const agent = scoped.agent;
   ctx.log("info", `Agent: ${cfg.agent.provider} · model ${cfg.agent.model} (${modelSource(node, ctx)})`, node.id);
   if (Object.keys(aux).length) ctx.log("info", `Gateway with a non-Claude model: Claude Code's other models (${Object.keys(aux).join(", ")}) use ${cfg.agent.model} too`, node.id);
   if (endpoint) ctx.log("info", `Agent endpoint: ${endpoint}`, node.id);

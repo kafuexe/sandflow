@@ -419,7 +419,10 @@ export function createMcp(deps: McpDeps) {
             throw new ToolError(`extends: ${(e as Error).message}`);
           }
         }
+        const isObj = (v: unknown) => !!v && typeof v === "object" && !Array.isArray(v);
+        if (a.config !== undefined && !isObj(a.config)) throw new ToolError("config must be an object");
         const patch = (a.config as BlockConfig) ?? {};
+        if (patch.agent !== undefined && !isObj(patch.agent)) throw new ToolError("config.agent must be an object, e.g. {\"model\": \"…\"}");
         const block: BlockDef = packEdit
           ? {
               ...existing!,

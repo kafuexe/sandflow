@@ -3,6 +3,7 @@
 // image is loaded from it automatically.
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { AGENT_TOOLS_MOUNT, DEFAULT_SANDBOX_IMAGE } from "../shared/settings";
 import type { Settings } from "../shared/types";
@@ -114,6 +115,49 @@ interface ProviderLike {
 
 const STREAM_TAIL = 64 * 1024;
 
+// An agent's own env (its block's Inputs, gateway settings, pinned models). sandcastle's `sandbox.run` only gives the
+// agent process the env the sandbox was created with — the agent provider's `env` is dropped — and one sandbox is
+// shared by every node of a run. So the agent's command carries a marker, and the sandbox's exec (below) swaps it
+// for that agent's env: in the process env on this computer; through a private file in a container. Values never go
+// on a command line.
+const execEnvs = new Map<string, Record<string, string>>();
+const EXEC_ENV_RE = /^: sandflow-env:([0-9a-f-]{36}); /;
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * The agent provider, with `env` given to the agent's process whenever it runs in a sandbox made by
+ * `stoppableProvider`. Call `release` once the agent is done.
+ */
+export function withAgentEnv<A extends object>(agent: A, env: Record<string, string>): { agent: A; release(): void } {
+  const token = randomUUID();
+  execEnvs.set(token, Object.fromEntries(Object.entries(env).filter(([k]) => ENV_KEY_RE.test(k))));
+  const wrapped = new Proxy(agent, {
+    get(target, key, receiver) {
+      const v = Reflect.get(target, key, receiver);
+      if (key !== "buildPrintCommand" || typeof v !== "function") return v;
+      return (...args: unknown[]) => {
+        const c = v.apply(target, args) as { command: string };
+        return { ...c, command: `: sandflow-env:${token}; ${c.command}` };
+      };
+    },
+  });
+  return { agent: wrapped, release: () => void execEnvs.delete(token) };
+}
+
+/** A command without its env marker, and the env it asks for (if any). */
+export function takeAgentEnv(command: string): { command: string; env?: Record<string, string> } {
+  const m = EXEC_ENV_RE.exec(command);
+  return m ? { command: command.slice(m[0].length), env: execEnvs.get(m[1]) } : { command };
+}
+
+/** Shell lines exporting `env` (sourced from a file inside a container). */
+export const exportLines = (env: Record<string, string>) =>
+  Object.entries(env)
+    .filter(([k]) => ENV_KEY_RE.test(k))
+    .map(([k, v]) => `export ${k}=${shq(v)}\n`)
+    .join("");
+
 /** A docker / podman container id as the container sees it in /etc/hostname (short 12 or full 64 hex). */
 export const CONTAINER_ID_RE = /^[0-9a-f]{12,64}$/;
 
@@ -138,10 +182,11 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
       const env = { ...process.env, ...(options.env ?? {}) };
       const worktree = (handle as unknown as { worktreePath: string }).worktreePath;
       const win = process.platform === "win32";
-      runExec = async (command, o) => {
+      runExec = async (cmd, o) => {
+        const { command, env: agentEnv } = takeAgentEnv(cmd);
         const r = await runTree(win ? "cmd.exe" : "sh", win ? ["/d", "/s", "/c", command] : ["-c", command], {
           cwd: o?.cwd ?? worktree,
-          env,
+          env: agentEnv ? { ...env, ...agentEnv } : env,
           stdin: o?.stdin,
           signal,
           onLine: o?.onLine,
@@ -152,7 +197,15 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
       };
       kill = () => {}; // runTree kills its own trees on abort
     } else {
-      runExec = (command, o) => handle.exec(command, o);
+      runExec = async (cmd, o) => {
+        const { command, env: agentEnv } = takeAgentEnv(cmd);
+        if (!agentEnv || !Object.keys(agentEnv).length) return handle.exec(command, o);
+        // Readable only by the sandbox user, read and removed as the agent's command starts.
+        const file = `/tmp/.sandflow-env-${randomUUID()}`;
+        const w = await handle.exec(`umask 077 && cat > ${file}`, { stdin: exportLines(agentEnv) });
+        if (w.exitCode !== 0) return { stdout: "", stderr: `Couldn't hand the agent its environment: ${w.stderr}`, exitCode: w.exitCode || 1 };
+        return handle.exec(`. ${file}; rm -f ${file}; ${command}`, o);
+      };
       // The container's hostname is its (short) id. Read it now, before anything of the agent's runs in there: by
       // the time Stop comes, whatever is inside could have rewritten /etc/hostname (e.g. to another run's container).
       const id = signal.aborted ? "" : await handle.exec("cat /etc/hostname").then((r) => r.stdout.trim(), () => "");

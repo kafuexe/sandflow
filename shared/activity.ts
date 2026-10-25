@@ -153,3 +153,26 @@ export function appendActivity(list: AgentActivity[], items: (AgentActivity & { 
   if (drop) list.splice(0, drop);
   return list;
 }
+
+/** Per run: the whole activity (every node) is pushed with each live update and saved with the run, so it's capped too. */
+export const MAX_RUN_CHARS = 240_000;
+
+/**
+ * Drops the oldest items across all nodes (in place) until the run's activity holds at most `maxChars` of text.
+ * Each node keeps at least its latest item.
+ */
+export function capRunActivity(all: Record<string, AgentActivity[]>, maxChars = MAX_RUN_CHARS): void {
+  let total = 0;
+  for (const list of Object.values(all)) for (const a of list) total += size(a);
+  if (total <= maxChars) return;
+  const candidates: { key: string; i: number; ts: number; n: number }[] = [];
+  for (const [key, list] of Object.entries(all)) list.slice(0, -1).forEach((a, i) => candidates.push({ key, i, ts: a.ts, n: size(a) }));
+  candidates.sort((a, b) => a.ts - b.ts || a.i - b.i);
+  const drop = new Map<string, number>();
+  for (const c of candidates) {
+    if (total <= maxChars) break;
+    total -= c.n;
+    drop.set(c.key, (drop.get(c.key) ?? 0) + 1);
+  }
+  for (const [key, n] of drop) all[key].splice(0, n);
+}

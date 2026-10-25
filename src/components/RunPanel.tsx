@@ -204,9 +204,9 @@ export function RunPanel() {
 
 const activityCount = (a: RunState["activity"]) => Object.values(a ?? {}).reduce((n, l) => n + l.length, 0);
 
-/** The run's system log; follows new lines unless you scrolled up. */
+/** The run's system log; follows new lines unless you scrolled up (also once the log is capped and its length stays put). */
 function LogBox({ run, label }: { run: RunState; label: (id: string) => string }) {
-  const { ref, onScroll, away, jump } = useFollow(`${run.id}:${run.logs.length}`);
+  const { ref, onScroll, away, jump } = useFollow(`${run.id}:${run.logs.length}:${run.logs.at(-1)?.ts}:${run.logs.at(-1)?.msg.length}`);
   return (
     <div className="relative h-full">
       <div ref={ref} onScroll={onScroll} className="h-full overflow-auto rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed">

@@ -428,7 +428,7 @@ function NodeAgent({ node, blocks, readOnly }: { node: FlowNode; blocks: BlockDe
               overridden on this node
             </Badge>
             {!readOnly && (
-              <button type="button" onClick={() => updateNodeOverrides(node.id, { agent: undefined })} className="text-muted-foreground hover:text-foreground" title={`Reset to ${inherited.agent.model} (${originLabel(blockOrigin)})`}>
+              <button type="button" onClick={() => setModel(undefined)} className="text-muted-foreground hover:text-foreground" title={`Reset to ${inherited.agent.model} (${originLabel(blockOrigin)})`} aria-label="Reset the model to the inherited one">
                 <RotateCcw className="size-3" />
               </button>
             )}

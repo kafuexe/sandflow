@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { createServer, type Server } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApi } from "../backend/api";
 import { ADAPTERS, MCP_BRIDGE } from "../backend/assistantAgents";
 import { extractOps, resolveCli, type AssistantRunner, type AssistantTurn } from "../backend/chats";
@@ -278,6 +278,25 @@ describe("chats", () => {
     expect(turns[0].env).toMatchObject({ ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL || "http://gw:4000" });
     if (!process.env.ANTHROPIC_SMALL_FAST_MODEL) expect(turns[0].env.ANTHROPIC_SMALL_FAST_MODEL).toBe("glm-4.5-air");
     if (!process.env.CLAUDE_CODE_SUBAGENT_MODEL) expect(turns[0].env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("glm-4.6");
+  });
+
+  it("without a gateway the assistant's env is left alone (no side models pinned, nothing added)", async () => {
+    for (const k of ["ANTHROPIC_BASE_URL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"]) {
+      vi.stubEnv(k, undefined);
+    }
+    try {
+      await start(scripted);
+      const chat = (await (await post(`${base}/chats`, { flowId: "feature-pipeline", agent: { provider: "claudeCode", model: "glm-4.6" } })).json()) as Chat;
+      await post(`${base}/chats/${chat.id}/messages`, { text: "Hi" });
+      await finished(chat.id);
+      expect(turns[0].model).toBe("glm-4.6");
+      const added = Object.keys(turns[0].env ?? {}).filter((k) => !(k in process.env));
+      expect(added).toEqual([]);
+      expect(turns[0].env?.ANTHROPIC_SMALL_FAST_MODEL).toBeUndefined();
+      expect(turns[0].env?.CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("switches agents mid-chat: the new agent gets the instructions and the conversation so far", async () => {
