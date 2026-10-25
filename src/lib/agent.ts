@@ -29,6 +29,8 @@ interface AgentState {
   setDraftFlow(id: string): void;
   start(): Promise<void>;
   stop(id: string): Promise<void>;
+  /** Resume a finished run as a new run (default: from its failed steps) and select the new run. */
+  resume(id: string, fromNodeIds?: string[]): Promise<void>;
   answer(id: string, text: string): Promise<boolean>;
   /** Close a popup (the flag stays on the run). */
   closeAlert(flagId: string): void;
@@ -132,6 +134,22 @@ export const useAgent = create<AgentState>((set, get) => {
         set({ error: missing ? `Missing inputs: ${missing.join(", ")}` : (e as Error).message });
       } finally {
         set({ starting: false });
+      }
+    },
+    async resume(id, fromNodeIds) {
+      set({ error: undefined });
+      try {
+        // The resumed run uses the flow as saved: write pending edits (the config fix) first.
+        if (!(await useStore.getState().flushSaves())) {
+          throw new Error(`Couldn't save your latest edits: ${useStore.getState().saveError}`);
+        }
+        const { runId } = await api.resumeRun(id, fromNodeIds);
+        apply(await api.getRun(runId));
+        set({ selectedId: runId });
+        watch(runId);
+      } catch (e) {
+        const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
+        set({ error: missing ? `Missing inputs: ${missing.join(", ")}` : (e as Error).message });
       }
     },
     async stop(id) {

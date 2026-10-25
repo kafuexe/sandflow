@@ -502,6 +502,16 @@ export interface NodeRunState {
   branch?: BranchHandle;
   /** script / subflow: the exit it left through. */
   exit?: string;
+  /** Resumed run: this step didn't run again — its state and outputs were copied from the original run. */
+  restored?: boolean;
+}
+
+/** Where a run's agents worked — recorded so the run can be resumed on the same branch. */
+export interface RunWorkspace {
+  /** REPO_PATH when the run started (absent: a scratch workspace, removed when the run ended). */
+  repo?: string;
+  /** The branch the run's sandbox uses (Create task may switch to its own; that one is `RunState.branch`). */
+  branch: string;
 }
 
 export interface QaPair {
@@ -597,6 +607,12 @@ export interface RunState {
   input?: NodeIO;
   /** A run started with an input (stack children): the Flow output it reached and what it handed back. */
   result?: { exit?: string; outputs?: NodeIO };
+  /** Where its agents worked (absent on runs from before resuming existed — those can't be resumed). */
+  workspace?: RunWorkspace;
+  /** Top-level steps still queued when the run failed or was stopped, with their inputs ("Retry" starts them too). */
+  unstarted?: { nodeId: string; inputs: NodeIO }[];
+  /** This run resumes another one: started from these steps, with the other steps' outputs copied from it. */
+  resumedFrom?: { runId: string; nodeIds: string[] };
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -677,4 +693,5 @@ export interface RunSummary {
   flags?: { warning: number; error: number };
   parent?: { runId: string; nodeKey: string };
   stack?: StackRunInfo;
+  resumedFrom?: { runId: string; nodeIds: string[] };
 }

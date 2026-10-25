@@ -12,6 +12,7 @@ import { FlagsBanner, StackCrumb } from "./RunFlags";
 import { StepRail } from "./StepRail";
 import { StepRow } from "./StepRow";
 import { RUN_TONE, RunStatusIcon, ago, duration, useNow } from "./status";
+import { ResumedFrom, RetryBox } from "../ResumeControls";
 import { useRunFlow } from "./useRunFlow";
 
 function Header({ run, rf }: { run: RunState; rf: ReturnType<typeof useRunFlow> }) {
@@ -36,6 +37,7 @@ function Header({ run, rf }: { run: RunState; rf: ReturnType<typeof useRunFlow> 
             </span>
             {run.branch && <span className="font-mono">{run.branch}</span>}
           </p>
+          <ResumedFrom run={run} onOpen={(id) => useAgent.getState().select(id)} />
         </div>
         {rf.flow && (
           <Button
@@ -85,18 +87,36 @@ function Opening({ run }: { run: RunState }) {
   );
 }
 
+/** A resumed run: the steps that didn't run again (their outputs came from the original run). */
+function KeptSteps({ run, label }: { run: RunState; label: (id: string) => string }) {
+  const kept = Object.entries(run.nodes).filter(([k, ns]) => ns.restored && !k.includes("/")).map(([k]) => label(k));
+  if (!kept.length) return null;
+  return (
+    <p className="text-xs text-muted-foreground">
+      Kept from the earlier run (not run again): <span className="text-foreground">{kept.join(", ")}</span>
+    </p>
+  );
+}
+
 function Ending({ run }: { run: RunState }) {
   if (!run.finishedAt) return null;
+  const retry = <RetryBox run={run} onResume={(from) => useAgent.getState().resume(run.id, from)} />;
   if (run.status === "failed")
     return (
-      <p className="flex items-start gap-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
-        <TriangleAlert className="mt-0.5 size-4 shrink-0" /> {run.error ?? "The run failed."}
-      </p>
+      <div className="space-y-3">
+        <p className="flex items-start gap-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" /> {run.error ?? "The run failed."}
+        </p>
+        {retry}
+      </div>
     );
   return (
-    <p className="text-center text-xs text-muted-foreground">
-      {run.status === "done" ? "Finished" : run.error ?? "Stopped"} {new Date(run.finishedAt).toLocaleTimeString()}
-    </p>
+    <div className="space-y-3">
+      <p className="text-center text-xs text-muted-foreground">
+        {run.status === "done" ? "Finished" : run.error ?? "Stopped"} {new Date(run.finishedAt).toLocaleTimeString()}
+      </p>
+      {retry}
+    </div>
   );
 }
 
@@ -139,6 +159,7 @@ export function Conversation({ run }: { run: RunState }) {
         <div className="mx-auto max-w-3xl space-y-6 px-6 py-6">
           <FlagsBanner run={run} />
           <Opening run={run} />
+          {run.resumedFrom && <KeptSteps run={run} label={rf.label} />}
           {items.length > 0 && (
             <ol className="relative space-y-4 before:absolute before:top-3 before:bottom-3 before:left-[13.5px] before:w-px before:bg-border">
               {items.map((it) =>
