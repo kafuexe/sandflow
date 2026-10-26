@@ -27,7 +27,11 @@ describe("agent env reaches the agent process", () => {
     expect(stdin).toBe("hi");
     expect(command).not.toContain("glm-4.6'; ");
     expect(command).not.toContain("it's");
-    const echo = command.replace(/claude .*$/, 'printf "%s|%s|%s" "$ANTHROPIC_SMALL_FAST_MODEL" "$SECRET" "$FROM_SANDBOX"');
+    // Read the env with node rather than `$VAR`: on Windows the host shell is cmd.exe, which doesn't expand it.
+    const echo = command.replace(
+      /claude .*$/,
+      `node -e "process.stdout.write(['ANTHROPIC_SMALL_FAST_MODEL','SECRET','FROM_SANDBOX'].map((k) => process.env[k] ?? '').join('|'))"`,
+    );
     const r = await handle.exec(echo);
     expect(r.stdout).toBe("glm-4.6|it's $HOME|s");
     release();
