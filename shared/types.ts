@@ -16,8 +16,9 @@ export type EdgeInputKind = "artifact" | "steer";
  * script  – runs a pack's code (any language / executable) in a container, or on this machine when trusted.
  * subflow – runs another flow inside this one; its exits are the child flow's Flow output blocks.
  * flow-input / flow-output – where a flow used as a subflow receives its input / hands its result back.
+ * integration – runs an action of another harness's CLI on this machine (e.g. `meow run`), see shared/integrations.ts.
  */
-export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "stack" | "flow-input" | "flow-output";
+export type BlockKind = "auto" | "ai" | "manager" | "trigger" | "condition" | "script" | "subflow" | "stack" | "flow-input" | "flow-output" | "integration";
 
 /** A Box Stack: an orchestrator splits the input, runs `flowId` once per task (several at once) and combines the results. */
 export interface StackConfig {
@@ -207,6 +208,20 @@ export interface ScriptConfig {
   timeoutSeconds?: number;
 }
 
+/** A value set for an integration option on a block or node. */
+export type IntegrationValue = string | number | boolean;
+
+/** Integration blocks: which harness action to run, and the option values set on the block / node. */
+export interface IntegrationBlockConfig {
+  /** Qualified integration id: `<pack>/<id>`, or `local/<id>` for your own. */
+  ref?: string;
+  action?: string;
+  /** Named exits (from the action's exit codes); empty = plain artifact/steer outputs. */
+  exits?: string[];
+  /** Option values by option id; merged key by key through the template chain and node overrides. */
+  options?: Record<string, IntegrationValue>;
+}
+
 /**
  * Every field is optional so templates can define a partial base configuration.
  * Resolution order: DEFAULT_CONFIG ← template ancestors (root first) ← block ← node overrides.
@@ -248,6 +263,8 @@ export interface BlockConfig {
   flowOutput?: { name?: string };
   /** stack blocks. */
   stack?: Partial<StackConfig>;
+  /** integration blocks. */
+  integration?: IntegrationBlockConfig;
 }
 
 export interface BlockDef {
@@ -289,6 +306,7 @@ export interface ResolvedConfig {
   subflow: { flowId: string };
   flowOutput: { name: string };
   stack: StackConfig;
+  integration: { ref: string; action: string; exits: string[]; options: Record<string, IntegrationValue> };
 }
 
 export interface FlowNodeData {
@@ -379,6 +397,110 @@ export interface AppData {
   env: EnvValues;
   /** Installed packs (their blocks and flows are already merged into `blocks` / `flows`). */
   packs?: PackInfo[];
+  /** Every integration — from packs and your own (their actions are already blocks in `blocks`). */
+  integrations?: IntegrationInfo[];
+}
+
+// ---------- Integrations (other harnesses) ----------
+
+export type IntegrationOptionType = "string" | "text" | "boolean" | "number" | "select";
+
+export interface IntegrationChoice {
+  value: string;
+  label?: string;
+}
+
+/** Something a user can set on an integration block, and how it becomes command-line arguments. */
+export interface IntegrationOption {
+  id: string;
+  label: string;
+  type: IntegrationOptionType;
+  description?: string;
+  default?: IntegrationValue;
+  required?: boolean;
+  placeholder?: string;
+  /** Arguments added when the option is set (`["--workflow", "{{value}}"]`); a boolean adds them when it's on. */
+  args?: string[];
+  /** select: the fixed choices. */
+  choices?: (string | IntegrationChoice)[];
+  /**
+   * select: load the choices by running the harness (e.g. `["workflows", "list"]`). Each output line matching
+   * `pattern` is a choice — group 1 is the value, group 2 (optional) its label. Without a pattern every line is one.
+   */
+  choicesFrom?: { args: string[]; pattern?: string };
+  /** select: a value that isn't in the list may be typed in. */
+  allowCustom?: boolean;
+}
+
+/** One thing a harness can do — each becomes a block. */
+export interface IntegrationAction {
+  id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  /** Arguments after the command, as templates (`{{input}}`, `{{env.REPO_PATH}}`, `{{option.name}}`, …). */
+  args: string[];
+  options?: IntegrationOption[];
+  inputs?: BlockInputs;
+  outputs?: BlockOutputs;
+  /** Env vars the action needs (added to the integration's own `env`). */
+  env?: string[];
+  /** Working directory template. Default: the run's worktree, else REPO_PATH, else a scratch folder. */
+  cwd?: string;
+  /** Exit code → named exit, e.g. `{"0": "delivered", "3": "no-mr"}`. */
+  exitCodes?: Record<string, string>;
+  /** Exit taken by every other exit code. Without it, an unmapped non-zero code fails the block. */
+  failExit?: string;
+  /** Output artifact template. Default `{{stdout}}`; also `{{stderr}}`, `{{code}}`, `{{match.<name>}}`. */
+  artifact?: string;
+  /** Regexes run over the output; group 1 (or the whole match) becomes `{{match.<name>}}`. */
+  matches?: Record<string, string>;
+  timeoutSeconds?: number;
+}
+
+/** `integrations/<id>.json` in a pack (or one of your own): how to drive another harness's CLI. */
+export interface IntegrationDef {
+  id: string;
+  name: string;
+  description?: string;
+  homepage?: string;
+  icon?: string;
+  color?: string;
+  /** The executable (found on PATH; `SANDFLOW_<COMMAND>_PATH` points at a specific one). */
+  command: string;
+  /** How to tell it's installed, e.g. `{"args": ["--version"]}`; the first version-like text is its version. */
+  detect?: { args: string[]; pattern?: string };
+  /** How to install it — shown to the user, never run by Sandflow. Commands by platform (`win32`, `linux`, `darwin`, `default`). */
+  install?: { url?: string; notes?: string; commands?: Record<string, string> };
+  /** Env vars every action needs. */
+  env?: string[];
+  /** Options every action has (listed before the action's own). */
+  options?: IntegrationOption[];
+  actions: IntegrationAction[];
+}
+
+/** An integration as the UI sees it. */
+export interface IntegrationInfo {
+  /** Qualified id: `<pack>/<id>`, or `local/<id>` for your own. */
+  id: string;
+  /** `local` for your own. */
+  pack: string;
+  def: IntegrationDef;
+  /** May run on this machine: your own always may; a pack's when that pack is trusted. */
+  trusted: boolean;
+  problems: string[];
+}
+
+/** Is the harness installed here? */
+export interface IntegrationStatus {
+  id: string;
+  installed: boolean;
+  version?: string;
+  /** Executable that was found. */
+  path?: string;
+  /** Why it couldn't be checked / found. */
+  error?: string;
+  checkedAt: number;
 }
 
 // ---------- Packs ----------
@@ -440,13 +562,14 @@ export interface PackInfo {
   blockCount: number;
   flowCount: number;
   skillCount: number;
+  integrationCount?: number;
   /** Problems found while loading (bad JSON, unmet requirements, …). */
   problems: string[];
 }
 
 /** Something a pack does that runs code — listed before installing. */
 export interface PackRisk {
-  kind: "script" | "host-script" | "shell" | "setup" | "bin" | "dockerfile" | "image";
+  kind: "script" | "host-script" | "shell" | "setup" | "bin" | "dockerfile" | "image" | "integration";
   /** Block or file it comes from. */
   where: string;
   detail: string;
@@ -462,6 +585,8 @@ export interface PackPreview {
   blocks: { id: string; name: string; kind?: string; isTemplate: boolean }[];
   flows: { id: string; name: string }[];
   skills: string[];
+  /** Harnesses this pack integrates (each action is one of `blocks`). */
+  integrations?: { id: string; name: string; command: string; actions: string[] }[];
   fileCount: number;
   totalBytes: number;
   risks: PackRisk[];

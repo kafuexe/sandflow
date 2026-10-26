@@ -7,6 +7,7 @@ import { DEFAULT_EXIT, MAX_SUBFLOW_DEPTH, exitHandle, isExitHandle } from "../sh
 import type {
   BlockDef,
   BranchHandle,
+  IntegrationInfo,
   TriggerEvent,
   EnvValues,
   Flow,
@@ -43,6 +44,11 @@ export type NodeRunner = (
   cfg: ResolvedConfig,
   inputs: NodeIO,
 ) => Promise<NodeResult>;
+
+/** What the integration runner needs: the definitions of every integration (from packs and your own). */
+export interface RunIntegrations {
+  get(id: string): IntegrationInfo | undefined;
+}
 
 /** What runners need to know about installed packs. */
 export interface RunPacks {
@@ -95,6 +101,7 @@ export interface RunContext {
   /** Reads the files of a file skill (bundled, uploaded or from a pack). */
   loadSkill?: (ref: SkillFileRef) => Promise<SkillFile[]>;
   packs?: RunPacks;
+  integrations?: RunIntegrations;
   /** Packs whose runtime copy is already prepared in this run's sandbox. */
   preparedPacks: Set<string>;
 }
@@ -106,13 +113,14 @@ export interface StartRunOptions {
   flows?: Flow[];
   env: EnvValues;
   settings: Settings;
-  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner };
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner };
   onChange?: (state: RunState) => void;
   saveArtifact?: (runId: string, nodeId: string, n: number, text: string) => void;
   /** Base directory for per-run agent logs (`<logRoot>/<runId>/<nodeId>.log`). */
   logRoot?: string;
   loadSkill?: (ref: SkillFileRef) => Promise<SkillFile[]>;
   packs?: RunPacks;
+  integrations?: RunIntegrations;
   /** The event that started the run (default: a manual event). */
   trigger?: TriggerEvent;
   /** Start only from this (trigger) node — used for triggered runs. Default: every node without inputs. */
@@ -216,6 +224,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     logDir: opts.logRoot ? path.join(opts.logRoot, run.id) : undefined,
     loadSkill: opts.loadSkill,
     packs: opts.packs,
+    integrations: opts.integrations,
     blockEnv: (cfg) =>
       Object.fromEntries(cfg.env.filter((k) => env[k] !== undefined).map((k) => [k, env[k]])),
     log(level, msg, nodeId) {
@@ -422,6 +431,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
         } else if (cfg.kind === "script") {
           if (!runners.script) throw new Error("Script blocks aren't supported here");
           result = await untilStopped(runners.script(gctx, node, cfg, inputs));
+        } else if (cfg.kind === "integration") {
+          if (!runners.integration) throw new Error("Integration blocks aren't supported here");
+          result = await untilStopped(runners.integration(gctx, node, cfg, inputs));
         } else {
           result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs));
         }
@@ -438,8 +450,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
       for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
 
-      // Named exits (Script / subflow): the result leaves through one exit and keeps both artifact and steer.
-      const exits = cfg.kind === "script" ? cfg.script.exits.filter(Boolean) : cfg.kind === "subflow" ? null : [];
+      // Named exits (Script / integration / subflow): the result leaves through one exit and keeps both artifact and steer.
+      const exits =
+        cfg.kind === "script" ? cfg.script.exits.filter(Boolean)
+        : cfg.kind === "integration" ? cfg.integration.exits.filter(Boolean)
+        : cfg.kind === "subflow" ? null
+        : [];
       let exit: string | undefined;
       if (cfg.kind === "subflow" || cfg.kind === "stack") exit = result.exit;
       else if (exits?.length) {

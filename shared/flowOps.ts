@@ -533,6 +533,7 @@ export function describeBlocks(blocks: BlockDef[], only?: BlockDef[]): string {
         : cfg.kind === "subflow" ? "exit:<name> per Flow output of the flow it runs (set overrides.subflow.flowId)"
         : cfg.kind === "stack" ? "exit:done, exit:failed (set overrides.stack.flowId: the flow run once per task)"
         : cfg.kind === "script" && cfg.script.exits.length ? cfg.script.exits.map((x) => `exit:${x}`).join(", ")
+        : cfg.kind === "integration" && cfg.integration.exits.length ? cfg.integration.exits.map((x) => `exit:${x}`).join(", ")
         : ioList(cfg.outputs) || "-";
       const env = cfg.env.length ? `; env: ${cfg.env.join(", ")}` : "";
       const tpl = `${b.isTemplate ? " (template)" : ""}${b.pack ? ` (pack ${b.pack})` : ""}`;

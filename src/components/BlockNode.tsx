@@ -12,7 +12,7 @@ import { describeCondition } from "../../shared/conditions";
 import { describeSchedule } from "../../shared/schedule";
 import { skillKey } from "../../shared/skills";
 import { exitHandle, resolveNodeIn } from "../../shared/subflow";
-import type { Flow, FlowNodeData, NodeRunStatus, ResolvedConfig } from "../../shared/types";
+import type { Flow, FlowNodeData, IntegrationInfo, NodeRunStatus, ResolvedConfig } from "../../shared/types";
 
 type BlockNodeType = Node<FlowNodeData, "block">;
 
@@ -27,13 +27,22 @@ const KIND_LABEL: Record<ResolvedConfig["kind"], string> = {
   stack: "STACK",
   "flow-input": "INPUT",
   "flow-output": "OUTPUT",
+  integration: "HARNESS",
 };
 
 const TRIGGER_WHAT: Record<string, string> = { manual: "Run button", schedule: "", github: "GitHub", gitlab: "GitLab" };
 
-/** One-line summary of what starts a trigger node / what an If checks / what a script or subflow runs. */
-function summary(cfg: ResolvedConfig, flows: Flow[]): string | undefined {
+/** One-line summary of what starts a trigger node / what an If checks / what a script, subflow or harness runs. */
+function summary(cfg: ResolvedConfig, flows: Flow[], integrations: IntegrationInfo[]): string | undefined {
   if (cfg.kind === "condition") return describeCondition(cfg.condition);
+  if (cfg.kind === "integration") {
+    const info = integrations.find((i) => i.id === cfg.integration.ref);
+    if (!info) return `${cfg.integration.ref || "Integration"} isn't installed`;
+    const set = Object.entries(cfg.integration.options)
+      .filter(([, v]) => v !== "" && v !== false)
+      .map(([k, v]) => (v === true ? k : `${k}=${v}`));
+    return `${info.def.command} ${cfg.integration.action}${set.length ? ` · ${set.join(", ")}` : ""}${info.trusted ? "" : " · not allowed on this machine"}`;
+  }
   if (cfg.kind === "script") return cfg.script.run ? `$ ${cfg.script.run}${cfg.script.where === "host" ? "  (this machine)" : ""}` : "Set the command to run";
   if (cfg.kind === "subflow") {
     const child = flows.find((f) => f.id === cfg.subflow.flowId);
@@ -178,6 +187,7 @@ function StackProgress({ nodeKey }: { nodeKey: string }) {
 function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const blocks = useStore((s) => s.data?.blocks ?? []);
   const flows = useStore((s) => s.data?.flows ?? []);
+  const integrations = useStore((s) => s.data?.integrations ?? []);
   // Only the shown run's states, and only when it is a run of the flow on the canvas.
   const runNode = useStore((s) => (s.run?.flowId === s.currentFlowId ? s.run?.nodes[id] : undefined));
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
@@ -250,7 +260,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
       </div>
 
       <div className="space-y-1.5 px-7 py-2 text-[10px]">
-        {summary(cfg, flows) && <div className="line-clamp-3 font-mono text-muted-foreground" title={summary(cfg, flows)}>{summary(cfg, flows)}</div>}
+        {summary(cfg, flows, integrations) && <div className="line-clamp-3 font-mono text-muted-foreground" title={summary(cfg, flows, integrations)}>{summary(cfg, flows, integrations)}</div>}
         {cfg.kind === "trigger" && flowActive && cfg.trigger.type !== "manual" && (
           <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-400">● listening</span>
         )}

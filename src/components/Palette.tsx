@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { ChevronRight, Copy, Package, Plus, Search, Trash2, Workflow, X } from "lucide-react";
+import { ChevronRight, Copy, Package, Plug, Plus, Search, Trash2, Workflow, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BlockIcon } from "@/lib/icons";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
+import { isLocalIntegrationPack } from "../../shared/integrations";
 import { CORE_PACK } from "../../shared/packs";
 import { nodeLabel, resolveBlock } from "../../shared/resolve";
 import { flowInterface } from "../../shared/subflow";
@@ -145,7 +146,7 @@ function blockSearchText(block: BlockDef, blocks: BlockDef[]): string {
     /* cycle — search the raw fields */
   }
   const parent = block.extends ? blocks.find((b) => b.id === block.extends)?.name : "";
-  return [block.name, block.id, block.pack, cfg?.kind, cfg?.description, cfg?.kind === "auto" ? cfg.autoAction : "", parent]
+  return [block.name, block.id, block.pack, cfg?.kind, cfg?.description, cfg?.kind === "auto" ? cfg.autoAction : "", cfg?.kind === "integration" ? "harness" : "", parent]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
@@ -160,6 +161,7 @@ function flowSearchText(flow: Flow, blocks: BlockDef[]): string {
 function groupOf(pack: string | undefined, packs: PackInfo[]): { key: string; label: string; order: number } {
   if (!pack) return { key: "", label: "Mine", order: 0 };
   if (pack === CORE_PACK) return { key: pack, label: "Sandflow (built in)", order: 1 };
+  if (isLocalIntegrationPack(pack)) return { key: pack, label: "My integrations", order: 1.5 };
   const info = packs.find((p) => p.id === pack);
   return { key: pack, label: info ? `${info.name} · ${info.version}` : pack, order: 2 };
 }
@@ -223,7 +225,7 @@ export function Palette() {
   const flows = useStore((s) => s.data?.flows ?? []);
   const packs = useStore((s) => s.data?.packs ?? []);
   const currentFlowId = useStore((s) => s.currentFlowId);
-  const { openEditor, setPacksOpen, createFlow } = useStore.getState();
+  const { openEditor, setPacksOpen, setIntegrationsOpen, createFlow } = useStore.getState();
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<PaletteTab>("blocks");
   const input = useRef<HTMLInputElement>(null);
@@ -374,6 +376,9 @@ export function Palette() {
         )}
         <Button size="sm" variant="outline" onClick={() => setPacksOpen(true)} title="Add, update and share packs of blocks and flows">
           <Package /> Packs
+        </Button>
+        <Button size="sm" variant="outline" className="col-span-2" onClick={() => setIntegrationsOpen(true)} title="Drive other harnesses (e.g. MEOW) from your flows">
+          <Plug /> Integrations
         </Button>
       </div>
     </ResizablePanel>

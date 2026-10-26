@@ -34,8 +34,11 @@ interface State {
   selectedNodeId: string | null;
   editor: EditorTarget;
   settingsOpen: boolean;
-  /** Packs dialog open. */
+  /** Packs dialog open, and the tab it was asked to open on. */
   packsOpen: boolean;
+  packsTab?: "installed" | "add" | "share";
+  /** Integrations dialog open. */
+  integrationsOpen: boolean;
   sideTab: SideTab;
   /** The run shown on the canvas and in the Run tab (several may be going; see `runs`). */
   run?: RunState;
@@ -92,7 +95,8 @@ interface State {
   selectNode(id: string | null): void;
   openEditor(target: EditorTarget): void;
   setSettingsOpen(open: boolean): void;
-  setPacksOpen(open: boolean): void;
+  setPacksOpen(open: boolean, tab?: "installed" | "add" | "share"): void;
+  setIntegrationsOpen(open: boolean): void;
   setSideTab(tab: SideTab): void;
   // runs
   /** Start a run of the current flow — also while other runs (of this or other flows) are going. */
@@ -250,6 +254,7 @@ export const useStore = create<State>((set, get) => {
     editor: null,
     settingsOpen: false,
     packsOpen: false,
+    integrationsOpen: false,
     sideTab: "inputs",
     saveStatus: "saved",
     highlight: {},
@@ -471,8 +476,11 @@ export const useStore = create<State>((set, get) => {
     setSettingsOpen(settingsOpen) {
       set({ settingsOpen });
     },
-    setPacksOpen(packsOpen) {
-      set({ packsOpen });
+    setPacksOpen(packsOpen, packsTab) {
+      set({ packsOpen, packsTab });
+    },
+    setIntegrationsOpen(integrationsOpen) {
+      set({ integrationsOpen });
     },
     setSideTab(sideTab) {
       set({ sideTab });

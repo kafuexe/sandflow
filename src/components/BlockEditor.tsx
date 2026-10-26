@@ -153,8 +153,9 @@ export function BlockEditor() {
   ];
 
   const ownSkills = c.skills ?? [];
-  /** Trigger, If and the subflow plumbing have no agent, skills or configurable inputs/outputs. */
-  const simple = cfg.kind === "trigger" || cfg.kind === "condition" || cfg.kind === "subflow" || cfg.kind === "flow-input" || cfg.kind === "flow-output";
+  /** Trigger, If, the subflow plumbing and harness actions have no agent, skills or configurable inputs/outputs. */
+  const simple =
+    cfg.kind === "trigger" || cfg.kind === "condition" || cfg.kind === "subflow" || cfg.kind === "flow-input" || cfg.kind === "flow-output" || cfg.kind === "integration";
   const setScript = (patch: Partial<NonNullable<BlockConfig["script"]>>) => {
     const next = { ...c.script, ...patch };
     for (const k of Object.keys(next) as (keyof typeof next)[]) if (next[k] === undefined) delete next[k];
@@ -260,6 +261,7 @@ export function BlockEditor() {
                   <SelectItem value="condition">if — deterministic true / false</SelectItem>
                   <SelectItem value="script">script — run code from a pack (container or this machine)</SelectItem>
                   {cfg.kind === "stack" && <SelectItem value="stack">Box Stack (built in)</SelectItem>}
+                  {cfg.kind === "integration" && <SelectItem value="integration">integration — runs another harness ({cfg.integration.ref})</SelectItem>}
                   {simple && (cfg.kind === "subflow" || cfg.kind === "flow-input" || cfg.kind === "flow-output") && (
                     <SelectItem value={cfg.kind}>{cfg.kind} (built in)</SelectItem>
                   )}

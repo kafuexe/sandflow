@@ -3,6 +3,7 @@ import type {
   BlockDef,
   Flow,
   FlowNode,
+  IntegrationValue,
   ResolvedConfig,
   RunOnChoice,
   SkillRef,
@@ -43,6 +44,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
     splitInstructions: DEFAULT_SPLIT,
     combineInstructions: DEFAULT_COMBINE,
   },
+  integration: { ref: "", action: "", exits: [], options: {} },
 };
 
 const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
@@ -87,6 +89,14 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
     subflow: { ...base.subflow, ...stripUndef(patch.subflow) },
     flowOutput: { ...base.flowOutput, ...stripUndef(patch.flowOutput) },
     stack: { ...base.stack, ...stripUndef(patch.stack) },
+    // Option values merge one by one, so a node can set one option and keep the block's others.
+    integration: patch.integration
+      ? {
+          ...base.integration,
+          ...stripUndef({ ...patch.integration, options: undefined }),
+          options: { ...base.integration.options, ...(stripUndef(patch.integration.options) as Record<string, IntegrationValue>) },
+        }
+      : base.integration,
   };
 }
 

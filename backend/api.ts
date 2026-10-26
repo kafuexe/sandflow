@@ -10,10 +10,10 @@ import { validateSettings } from "../shared/settings";
 import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
-import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
+import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, IntegrationDef, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
-import { startRun, type NodeRunner, type RunHandle, type RunPacks } from "./engine";
+import { startRun, type NodeRunner, type RunHandle, type RunIntegrations, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import {
@@ -79,7 +79,7 @@ export interface ApiOptions {
 
 export function createApi(
   storage: Storage,
-  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner },
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner },
   opts: ApiOptions = {},
 ): Api {
   const skills = createSkillStore(storage.dir, opts.bundledSkillsDir, storage.packs);
@@ -88,6 +88,7 @@ export function createApi(
     dirs: () => storage.packs.dirs(),
     runtimeRoot: path.join(storage.dir, "packs-runtime"),
   };
+  const runIntegrations: RunIntegrations = { get: (id) => storage.integrations.get(id) };
   const exec = opts.exec ?? execCli;
   setBundledSandboxImage(opts.bundledSandboxImage);
   if (opts.bundledSandboxImage) {
@@ -191,6 +192,7 @@ export function createApi(
       saveArtifact: storage.saveArtifact,
       loadSkill: skills.read,
       packs: runPacks,
+      integrations: runIntegrations,
       ...extra,
       onFlag: announceFlag,
       // Stack children are runs of their own: answerable, cancellable and streamed like any other.
@@ -396,7 +398,7 @@ export function createApi(
         // A pack block comes from the server unless the client sent your edit of it (`modified`); one sent
         // without `modified` is the pack's own version — that's how an edit is reverted.
         const edits = blocks.filter((b) => b.pack && b.modified);
-        const packBlocks = [...CORE_BLOCKS, ...applyPackEdits(storage.packs.load().blocks, edits)];
+        const packBlocks = [...CORE_BLOCKS, ...applyPackEdits(storage.packBlocks(), edits)];
         const before = new Map(current.map((b) => [b.id, JSON.stringify(b)]));
         const next = [...packBlocks, ...own];
         const touched = new Set(next.filter((b) => before.get(b.id) !== JSON.stringify(b)).map((b) => b.id));
@@ -656,6 +658,55 @@ export function createApi(
       case "POST /packs/:id/reload":
         storage.packs.reload();
         return send(res, 200, { ok: true });
+
+      // ---------- integrations (other harnesses) ----------
+      // Integration ids contain "/" (`base/meow`, `local/meow`), so they travel in the body.
+
+      case "GET /integrations":
+        return send(res, 200, storage.integrations.list());
+
+      case "POST /integrations": {
+        // Add or replace one of your own: { def, previousId? }.
+        const b = (await readJson<{ def?: IntegrationDef; previousId?: string }>(req)) ?? {};
+        try {
+          const info = storage.integrations.save(b.def as IntegrationDef, b.previousId);
+          changed({ source: "ui" });
+          return send(res, 200, info);
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+      }
+
+      case "POST /integrations/delete": {
+        const { id } = (await readJson<{ id?: string }>(req)) ?? {};
+        try {
+          storage.integrations.remove(String(id ?? ""));
+        } catch (e) {
+          throw new HttpError(404, (e as Error).message);
+        }
+        changed({ source: "ui" });
+        return send(res, 200, { ok: true });
+      }
+
+      case "POST /integrations/status": {
+        // { id, force? } for one, or { all: true, force? } for every integration.
+        const b = (await readJson<{ id?: string; all?: boolean; force?: boolean }>(req)) ?? {};
+        try {
+          if (b.all) return send(res, 200, await Promise.all(storage.integrations.list().map((i) => storage.integrations.status(i.id, !!b.force))));
+          return send(res, 200, await storage.integrations.status(String(b.id ?? ""), !!b.force));
+        } catch (e) {
+          throw new HttpError(404, (e as Error).message);
+        }
+      }
+
+      case "POST /integrations/choices": {
+        const b = (await readJson<{ id?: string; action?: string; option?: string }>(req)) ?? {};
+        try {
+          return send(res, 200, await storage.integrations.choices(String(b.id ?? ""), String(b.action ?? ""), String(b.option ?? ""), storage.load().env));
+        } catch (e) {
+          throw new HttpError(400, (e as Error).message);
+        }
+      }
 
       case "POST /skills": {
         const body = await readJson<{ name?: string; files?: SkillFile[] }>(req);

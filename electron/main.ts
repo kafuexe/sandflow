@@ -7,6 +7,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import electronUpdater from "electron-updater";
 import { runAi } from "../backend/runners/ai";
 import { runAuto } from "../backend/runners/auto";
+import { runIntegration } from "../backend/runners/integration";
 import { runScript } from "../backend/runners/script";
 import { startAppServer, type AppServer } from "../backend/server";
 import type { UpdateSettings } from "../shared/types";
@@ -125,7 +126,7 @@ async function start() {
     bundledSandboxImage: app.isPackaged
       ? path.join(process.resourcesPath, "sandbox", "sandflow-agent.tar.gz")
       : path.join(appRoot, "build", "sandbox", "sandflow-agent.tar.gz"),
-    runners: { auto: runAuto, ai: runAi, script: runScript },
+    runners: { auto: runAuto, ai: runAi, script: runScript, integration: runIntegration },
   });
   console.log(`Sandflow backend listening on ${server.url}`);
   createWindow(server.url);

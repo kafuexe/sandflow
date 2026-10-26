@@ -24,9 +24,12 @@ import {
   satisfies,
 } from "../shared/packs";
 import { isFlowColor } from "../shared/flows";
+import { integrationBlocks, integrationInfo, integrationProblems } from "../shared/integrations";
 import type {
   BlockDef,
   Flow,
+  IntegrationDef,
+  IntegrationInfo,
   PackInfo,
   PackManifest,
   PackPreview,
@@ -93,6 +96,8 @@ export interface LoadedPack {
   flows: Flow[];
   /** Skill directories (relative to `skills/`) that have a SKILL.md. */
   skills: string[];
+  /** Harnesses it integrates (`integrations/*.json`); their actions are already in `blocks`. */
+  integrations: IntegrationDef[];
   risks: PackRisk[];
   problems: string[];
 }
@@ -171,6 +176,25 @@ export function readPack(reader: PackReader): LoadedPack {
       problems.push(`${rel}: ${(e as Error).message}`);
     }
   }
+  const integrations: IntegrationDef[] = [];
+  for (const rel of reader.list("integrations").filter((p) => p.endsWith(".json")).sort()) {
+    try {
+      for (const raw of asList(parseJson(reader, rel))) {
+        const bad = integrationProblems(raw);
+        if (bad.length) throw new Error(bad.join("; "));
+        const def = raw as IntegrationDef;
+        if (integrations.some((x) => x.id === def.id)) throw new Error(`duplicate integration id "${def.id}"`);
+        // Trust doesn't matter for the blocks it adds; the runner checks it.
+        const generated = integrationBlocks(integrationInfo(def, pack, false));
+        const clash = generated.find((g) => blocks.some((b) => b.id === g.id));
+        if (clash) throw new Error(`action block "${clash.id}" has the same id as a block in boxes/`);
+        integrations.push(def);
+        blocks.push(...generated);
+      }
+    } catch (e) {
+      problems.push(`${rel}: ${(e as Error).message}`);
+    }
+  }
   const skills = reader
     .list("skills")
     .filter((p) => p.endsWith("/SKILL.md"))
@@ -185,11 +209,11 @@ export function readPack(reader: PackReader): LoadedPack {
       if (s.file?.store === "pack" && s.file.pack === pack && !skills.includes(s.file.dir)) problems.push(`block "${b.name}" uses missing skill folder skills/${s.file.dir}`);
     }
   }
-  return { manifest, blocks, flows, skills, risks: packRisks(manifest, blocks), problems };
+  return { manifest, blocks, flows, skills, integrations, risks: packRisks(manifest, blocks, integrations), problems };
 }
 
 /** Everything in a pack that runs code. */
-export function packRisks(m: PackManifest, blocks: BlockDef[]): PackRisk[] {
+export function packRisks(m: PackManifest, blocks: BlockDef[], integrations: IntegrationDef[] = []): PackRisk[] {
   const risks: PackRisk[] = [];
   if (m.setup?.trim()) risks.push({ kind: "setup", where: "manifest.json", detail: m.setup.trim() });
   if (m.sandbox?.dockerfile) risks.push({ kind: "dockerfile", where: "manifest.json", detail: `Builds a container image from ${m.sandbox.dockerfile}` });
@@ -200,6 +224,16 @@ export function packRisks(m: PackManifest, blocks: BlockDef[]): PackRisk[] {
     if (run) risks.push({ kind: b.config.script?.where === "host" ? "host-script" : "script", where: b.name, detail: run });
     const sh = b.config.shellCommand?.trim();
     if (sh && (b.config.autoAction === "shell" || !b.config.autoAction)) risks.push({ kind: "shell", where: b.name, detail: sh });
+  }
+  // An integration runs its harness on this machine: every command line it can build.
+  for (const d of integrations) {
+    if (d.detect) risks.push({ kind: "integration", where: `${d.name} (check)`, detail: [d.command, ...d.detect.args].join(" ") });
+    for (const a of d.actions) {
+      risks.push({ kind: "integration", where: `${d.name} → ${a.name}`, detail: [d.command, ...a.args].join(" ") });
+      for (const o of [...(d.options ?? []), ...(a.options ?? [])]) {
+        if (o.choicesFrom) risks.push({ kind: "integration", where: `${d.name} → ${o.label} (choices)`, detail: [d.command, ...o.choicesFrom.args].join(" ") });
+      }
+    }
   }
   return risks;
 }
@@ -416,6 +450,7 @@ export interface LoadedPacks {
   blocks: BlockDef[];
   flows: Flow[];
   infos: PackInfo[];
+  integrations: IntegrationInfo[];
 }
 
 /** What install-time callers need about a pack at run time (script runner, AI runner). */
@@ -538,6 +573,7 @@ export function createPackStore(dataDir: string, opts: PackStoreOptions = {}) {
         blockCount: pack?.blocks.length ?? 0,
         flowCount: pack?.flows.length ?? 0,
         skillCount: pack?.skills.length ?? 0,
+        integrationCount: pack?.integrations.length ?? 0,
         problems,
       };
     });
@@ -546,6 +582,7 @@ export function createPackStore(dataDir: string, opts: PackStoreOptions = {}) {
       blocks: loaded.flatMap((l) => l.pack?.blocks ?? []),
       flows: loaded.flatMap((l) => l.pack?.flows ?? []),
       infos,
+      integrations: loaded.flatMap((l) => (l.pack?.integrations ?? []).map((d) => integrationInfo(d, l.entry.id, l.entry.trustHost))),
     };
     return cache;
   }
@@ -615,10 +652,11 @@ export function createPackStore(dataDir: string, opts: PackStoreOptions = {}) {
       blocks: pack.blocks.map((b) => ({ id: b.id, name: b.name, kind: b.config.kind, isTemplate: b.isTemplate })),
       flows: pack.flows.map((fl) => ({ id: fl.id, name: fl.name })),
       skills: pack.skills,
+      integrations: pack.integrations.map((d) => ({ id: d.id, name: d.name, command: d.command, actions: d.actions.map((a) => a.name) })),
       fileCount: files.size,
       totalBytes,
       risks: pack.risks,
-      needsHost: pack.risks.some((r) => r.kind === "host-script" || r.kind === "shell"),
+      needsHost: pack.risks.some((r) => r.kind === "host-script" || r.kind === "shell" || r.kind === "integration"),
       existing: existing && { version: existing.version, source: existing.source, hash: existing.hash, trustHost: existing.trustHost },
       changes: existing ? diff(files, dirOf(existing)) : undefined,
       missing,

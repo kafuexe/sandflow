@@ -58,11 +58,12 @@ export function flowInterface(flow: Flow, blocks: BlockDef[]): FlowInterface {
 
 /**
  * A node's config as placed in a flow: like `resolveNode`, but a subflow node takes its inputs from the child
- * flow's interface. `exits` = the node's named exits (Script exits, or the child flow's outputs).
+ * flow's interface. `exits` = the node's named exits (Script / integration exits, or the child flow's outputs).
  */
 export function resolveNodeIn(node: FlowNode, blocks: BlockDef[], flows: Flow[]): ResolvedConfig & { exits: string[] } {
   const cfg = resolveNode(node, blocks);
   if (cfg.kind === "script") return { ...cfg, exits: cfg.script.exits.filter(Boolean) };
+  if (cfg.kind === "integration") return { ...cfg, exits: cfg.integration.exits.filter(Boolean) };
   if (cfg.kind === "stack") return { ...cfg, inputs: { ...cfg.inputs, artifact: true, steer: true }, exits: [...STACK_EXITS] };
   if (cfg.kind !== "subflow") return { ...cfg, exits: [] };
   const child = flows.find((f) => f.id === cfg.subflow.flowId);

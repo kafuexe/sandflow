@@ -84,6 +84,12 @@ export const CONFIG_FIELDS: Record<keyof BlockConfig, FieldDoc> = {
     example: { flowId: "fix-one-issue", successExits: ["done"], workspace: "isolated", maxConcurrent: 3, maxChildren: 10, maxRetries: 1 },
   },
   flowOutput: { type: "object", kinds: ["flow-output"], doc: "{name}: the exit this output becomes on the parent's subflow node", example: { name: "approved" } },
+  integration: {
+    type: "object",
+    kinds: ["integration"],
+    doc: "{options: {<option id>: value}}: values for the harness action's options (merged into the block's); ref/action/exits come with the block",
+    example: { options: { workflow: "quick" } },
+  },
 };
 
 const FIELD_NAMES = Object.keys(CONFIG_FIELDS) as (keyof BlockConfig)[];
@@ -217,7 +223,7 @@ export function configProblems(cfg: unknown, kind: BlockKind, forNode = true): s
 function valueProblem(key: keyof BlockConfig, v: unknown): string | undefined {
   switch (key) {
     case "kind": {
-      const kinds: BlockKind[] = ["auto", "ai", "manager", "trigger", "condition", "script", "subflow", "stack", "flow-input", "flow-output"];
+      const kinds: BlockKind[] = ["auto", "ai", "manager", "trigger", "condition", "script", "subflow", "stack", "flow-input", "flow-output", "integration"];
       return kinds.includes(v as BlockKind) ? undefined : `unknown kind "${v}". Use one of: ${kinds.join(", ")}`;
     }
     case "inputs":
@@ -266,6 +272,17 @@ function valueProblem(key: keyof BlockConfig, v: unknown): string | undefined {
         return "script.exits must be names (letters, digits, _ and -)";
       }
       if (s.timeoutSeconds !== undefined && !((s.timeoutSeconds as number) > 0)) return "script.timeoutSeconds must be a positive number";
+      return undefined;
+    }
+    case "integration": {
+      const x = v as Record<string, unknown>;
+      for (const k of ["ref", "action"]) if (x[k] !== undefined && typeof x[k] !== "string") return `integration.${k} must be a string`;
+      if (x.exits !== undefined && (!Array.isArray(x.exits) || x.exits.some((e) => typeof e !== "string" || !EXIT_NAME_RE.test(e)))) return "integration.exits must be names (letters, digits, _ and -)";
+      if (x.options !== undefined) {
+        if (!isObj(x.options)) return `integration.options must be an object, e.g. ${JSON.stringify(CONFIG_FIELDS.integration.example)}`;
+        const bad = Object.entries(x.options).find(([, o]) => !["string", "number", "boolean"].includes(typeof o));
+        if (bad) return `integration.options.${bad[0]} must be a string, number or boolean`;
+      }
       return undefined;
     }
     case "subflow":
@@ -348,7 +365,8 @@ export function describeBlock(b: BlockDef, blocks: BlockDef[]): string {
   const lines = [`${b.id} — ${b.name}${b.isTemplate ? " (template: can be placed or extended with save_block)" : ""}${b.pack ? ` [pack ${b.pack}]` : " [your block]"}`];
   lines.push(`Kind: ${cfg.kind}${cfg.kind === "auto" ? ` (action ${cfg.autoAction})` : ""}${chain.length > 1 ? `. Inherits: ${chain.join(" → ")}` : ""}`);
   if (cfg.description) lines.push(cfg.description);
-  const outs = cfg.kind === "condition" ? "true, false" : cfg.kind === "script" && cfg.script.exits.length ? cfg.script.exits.map((x) => `exit:${x}`).join(", ") : cfg.kind === "subflow" ? "exit:<name> per Flow output of the flow it runs" : ioList(cfg.outputs);
+  const named = cfg.kind === "script" ? cfg.script.exits : cfg.kind === "integration" ? cfg.integration.exits : [];
+  const outs = cfg.kind === "condition" ? "true, false" : named.length ? named.map((x) => `exit:${x}`).join(", ") : cfg.kind === "subflow" ? "exit:<name> per Flow output of the flow it runs" : ioList(cfg.outputs);
   lines.push(`In: ${ioList(cfg.inputs)}. Out: ${outs}.`);
   lines.push(`Env vars (names the user fills in): ${cfg.env.join(", ") || "none"}`);
 
@@ -364,6 +382,7 @@ export function describeBlock(b: BlockDef, blocks: BlockDef[]): string {
   if (cfg.kind === "condition") current.push(`condition: ${JSON.stringify(cfg.condition)}`);
   if (cfg.kind === "script") current.push(`script: ${JSON.stringify(cfg.script)}`);
   if (cfg.kind === "flow-output") current.push(`flowOutput: ${JSON.stringify(cfg.flowOutput)}`);
+  if (cfg.kind === "integration") current.push(`integration: ${JSON.stringify(cfg.integration)}`);
   if (current.length) lines.push("", "Defaults:", ...current.map((c) => `- ${c}`));
 
   const gaps = configGaps(cfg);

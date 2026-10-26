@@ -17,6 +17,7 @@ import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../
 import type { BlockDef, Flow, FlowNode, ResolvedConfig, StackConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
+import { IntegrationEditor } from "./IntegrationEditor";
 import { NodeRunOn } from "./RunOnSelect";
 import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
@@ -460,6 +461,7 @@ function BlockPanel() {
           </div>
         </div>
         {cfg?.kind === "script" && <ScriptEditor node={node} cfg={cfg} pack={filesPack} />}
+        {cfg?.kind === "integration" && <IntegrationEditor node={node} cfg={cfg} />}
         {cfg?.kind === "stack" && <StackEditor flow={flow} node={node} cfg={cfg} readOnly={readOnly} />}
         {cfg?.kind === "flow-input" && (
           <div className="space-y-2">

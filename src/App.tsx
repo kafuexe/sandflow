@@ -12,6 +12,7 @@ import { FlowCanvas } from "@/components/FlowCanvas";
 import { FlowSwitcher } from "@/components/FlowSwitcher";
 import { useMissingInputs, useTriggerMissingInputs } from "@/components/InputsPanel";
 import { NewFlowDialog } from "@/components/NewFlowDialog";
+import { IntegrationsDialog } from "@/components/IntegrationsDialog";
 import { PacksDialog } from "@/components/PacksDialog";
 import { Palette } from "@/components/Palette";
 import { RunsIndicator } from "@/components/RunsIndicator";
@@ -296,6 +297,7 @@ export default function App() {
       {editor && <BlockEditor />}
       <SettingsDialog />
       <PacksDialog />
+      <IntegrationsDialog />
       {view === "builder" && <QuestionDialog />}
       <FlagAlerts />
     </ReactFlowProvider>

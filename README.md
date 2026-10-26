@@ -147,6 +147,49 @@ first start, from GitHub when it can and from the copy shipped in [`packs/base`]
   other packs become `requires`. Download a zip or write a folder, push it to a repo and share the link. The
   [base pack repo](https://github.com/kafuexe/sandflow-base-boxes) is a GitHub template with the full format.
 
+### Integrations: other harnesses
+
+Some tools already take a task all the way to an MR on their own — e.g. [MEOW](https://github.com/maya8237/MEOW).
+An **integration** turns such a harness's CLI into blocks: each of its actions (`meow run`, `meow review`, …) is a block
+whose options (workflow, target branch, …) are fields on the node, and whose exit codes pick the block's exits
+(`delivered` / `mr-not-opened` / `failed`). It runs **on this machine** with your own login, so a pack's integration
+only runs once you allow that pack to run code here.
+
+- **Add one** (palette → **Integrations**): *Import* takes the same GitHub / GitLab links, folders and zips as packs —
+  an integration is `integrations/<id>.json` in a pack, next to `boxes/` and `flows/`. *New integration* writes one of
+  your own as JSON (its blocks show up under *My integrations*).
+- **Integrations** shows whether each harness is installed (and its version), how to install it, and its blocks.
+  `SANDFLOW_<COMMAND>_PATH` (e.g. `SANDFLOW_MEOW_PATH`) points at an executable that isn't on `PATH`.
+- **Dynamic options**: a select option can list its choices by asking the harness (`choicesFrom`, e.g.
+  `meow workflows list`) — press the reload button next to it on the node.
+
+The format (`integrations/<id>.json`):
+
+```jsonc
+{
+  "id": "meow", "name": "MEOW", "command": "meow",       // the executable — arguments are passed without a shell
+  "detect": { "args": ["--version"] },                   // "installed" check; first version-like text = version
+  "install": { "url": "…", "commands": { "win32": "…", "default": "…" } },  // shown, never run
+  "env": ["REPO_PATH"],
+  "actions": [{
+    "id": "run", "name": "MEOW: feature → MR",
+    "args": ["run", "{{input}}", "--work-dir", "{{env.REPO_PATH}}"],
+    "options": [
+      { "id": "workflow", "label": "Workflow", "type": "select", "args": ["--workflow", "{{value}}"],
+        "choicesFrom": { "args": ["workflows", "list"], "pattern": "^(\\S+) \\([^)]*\\): (.*)$" } },
+      { "id": "test", "label": "Run the tester", "type": "boolean", "args": ["--test"] }
+    ],
+    "exitCodes": { "0": "delivered", "3": "mr-not-opened" }, "failExit": "failed",
+    "matches": { "mr": "(https?://\\S+/(?:pull|merge_requests)/\\d+)" }, "artifact": "{{match.mr}}\n{{stdout}}"
+  }]
+}
+```
+
+Templates: `{{input}}` (the incoming artifact, else the starting prompt), `{{artifact}}`, `{{steer}}`, `{{prompt}}`,
+`{{env.NAME}}`, `{{option.id}}`, `{{worktree}}`, `{{run.id}}`, `{{trigger.url}}` / `title` / `body` / `number` / …
+An option's `args` are added when it's set; an argument that's only an empty placeholder is dropped. Option types:
+`string`, `text`, `number`, `boolean`, `select`. Without `failExit`, an unmapped non-zero exit code fails the block.
+
 ### Flows inside flows
 
 Drag a flow from the **Flows** tab onto the canvas to run it as one step (a **Subflow** block). The inner flow decides

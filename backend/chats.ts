@@ -70,7 +70,7 @@ export function resolveCli(
 }
 
 /** cmd.exe command line for a .cmd shim we couldn't see through. */
-function cmdLine(cmd: string, args: string[]): string {
+export function cmdLine(cmd: string, args: string[]): string {
   const bad = [cmd, ...args].find((a) => /["%\r\n]/.test(a));
   if (bad !== undefined) throw new Error(`Can't pass this argument through ${path.basename(cmd)} safely. Set SANDFLOW_<NAME>_PATH to the agent's executable instead.`);
   return `"${[cmd, ...args].map((a) => `"${a}"`).join(" ")}"`;

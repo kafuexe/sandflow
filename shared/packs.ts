@@ -12,6 +12,8 @@ export const PACK_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const PACK_ITEM_ID_RE = /^[\w-]{1,96}$/;
 /** Pack id used by the blocks built into Sandflow itself (subflows, script, flow input/output). */
 export const CORE_PACK = "sandflow";
+/** Pack id your own integrations' blocks live under (`local/meow-run`), see integrations.ts. */
+export const LOCAL_PACK = "local";
 export const BASE_PACK = "base";
 export const BASE_PACK_URL = "https://github.com/kafuexe/sandflow-base-boxes";
 
@@ -40,6 +42,7 @@ export function manifestProblems(m: unknown): string[] {
   const errors: string[] = [];
   if (typeof x.id !== "string" || !PACK_ID_RE.test(x.id)) errors.push(`"id" must be lowercase letters, digits and dashes (got ${JSON.stringify(x.id)})`);
   if (x.id === CORE_PACK) errors.push(`"${CORE_PACK}" is reserved for Sandflow's built-in blocks`);
+  if (x.id === LOCAL_PACK) errors.push(`"${LOCAL_PACK}" is reserved for your own integrations`);
   if (typeof x.name !== "string" || !x.name.trim()) errors.push(`"name" is required`);
   if (typeof x.version !== "string" || !semver.valid(x.version)) errors.push(`"version" must be a semver version like 1.0.0 (got ${JSON.stringify(x.version)})`);
   if (x.requires !== undefined) {

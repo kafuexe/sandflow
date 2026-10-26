@@ -11,6 +11,7 @@ import {
   Link2,
   Loader2,
   Package,
+  Plug,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -44,6 +45,7 @@ const RISK_LABEL: Record<PackRisk["kind"], string> = {
   bin: "Executable",
   dockerfile: "Builds an image",
   image: "Container image",
+  integration: "Runs a harness on this machine",
 };
 
 function readAsBase64(file: File): Promise<string> {
@@ -116,6 +118,7 @@ function PackCard({ pack, onUpdate, busy }: { pack: PackInfo; onUpdate: (id: str
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
             <span>
               {pack.blockCount} blocks · {pack.flowCount} flows · {pack.skillCount} skills
+              {pack.integrationCount ? ` · ${pack.integrationCount} integration${pack.integrationCount === 1 ? "" : "s"}` : ""}
             </span>
             {url ? (
               <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-foreground hover:underline">
@@ -312,6 +315,22 @@ function Review({
         </div>
       </div>
 
+      {!!p.integrations?.length && (
+        <div className="space-y-1 rounded-lg border p-2 text-xs">
+          <div className="flex items-center gap-1.5 font-medium">
+            <Plug className="size-3.5 text-sky-400" /> Integrates {p.integrations.length === 1 ? "a harness" : `${p.integrations.length} harnesses`}
+          </div>
+          {p.integrations.map((x) => (
+            <div key={x.id} className="text-muted-foreground">
+              <span className="text-foreground">{x.name}</span> (<code>{x.command}</code>) — {x.actions.join(", ")}
+            </div>
+          ))}
+          <p className="text-[11px] text-muted-foreground">
+            Runs <code>{p.integrations.map((x) => x.command).join(", ")}</code> on this machine with your login, so it needs <b>Allow running on this machine</b>.
+          </p>
+        </div>
+      )}
+
       <div className="space-y-2 rounded-lg border p-2 text-xs">
         <div className="flex items-center gap-1.5 font-medium">
           {p.risks.length ? <ShieldAlert className="size-3.5 text-amber-400" /> : <ShieldCheck className="size-3.5 text-emerald-400" />}
@@ -321,7 +340,7 @@ function Review({
           <ul className="max-h-40 space-y-1 overflow-y-auto">
             {p.risks.map((r, i) => (
               <li key={i} className="grid grid-cols-[150px_1fr] gap-2">
-                <span className={cn(r.kind === "host-script" || r.kind === "shell" ? "text-amber-300" : "text-muted-foreground")}>
+                <span className={cn(r.kind === "host-script" || r.kind === "shell" || r.kind === "integration" ? "text-amber-300" : "text-muted-foreground")}>
                   {RISK_LABEL[r.kind]} · {r.where}
                 </span>
                 <code className="truncate font-mono text-[10px]" title={r.detail}>
@@ -704,6 +723,7 @@ function Share() {
 
 export function PacksDialog() {
   const open = useStore((s) => s.packsOpen);
+  const openTab = useStore((s) => s.packsTab);
   const packs = useStore((s) => s.data?.packs ?? []);
   const setOpen = useStore((s) => s.setPacksOpen);
   const [tab, setTab] = useState<Tab>("installed");
@@ -713,6 +733,11 @@ export function PacksDialog() {
   const [lastFrom, setLastFrom] = useState<PackFrom | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+
+  // Opened on a given tab (e.g. Integrations → Import opens "Add pack").
+  useEffect(() => {
+    if (open && openTab) setTab(openTab);
+  }, [open, openTab]);
 
   useEffect(() => {
     if (!open) {

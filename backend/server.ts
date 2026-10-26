@@ -14,7 +14,7 @@ export interface AppServerOptions {
   dataDir: string;
   /** Built UI (vite `dist/`). */
   webRoot: string;
-  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner };
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner };
   bundledSkillsDir?: string;
   /** Packs shipped with the app (`<dir>/base/manifest.json`); installed on first start. */
   bundledPacksDir?: string;

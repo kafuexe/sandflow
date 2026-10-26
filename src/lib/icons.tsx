@@ -30,6 +30,8 @@ import {
   FileCode,
   GitMerge,
   Layers,
+  Plug,
+  Cat,
   type LucideIcon,
 } from "lucide-react";
 
@@ -65,6 +67,8 @@ export const ICONS: Record<string, LucideIcon> = {
   "file-code": FileCode,
   layers: Layers,
   "git-merge": GitMerge,
+  plug: Plug,
+  cat: Cat,
 };
 
 export function BlockIcon({ name, className }: { name: string; className?: string }) {

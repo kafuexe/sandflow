@@ -6,6 +6,7 @@ import { sanitizeFlowColor } from "../shared/flows";
 import { BASE_PACK, CORE_PACK } from "../shared/packs";
 import { summarize } from "../shared/runs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
+import { createIntegrationStore } from "./integrations";
 import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
 
 export const DEFAULT_SETTINGS: Settings = { startingPrompt: "", sandbox: "docker", maxSteps: 40 };
@@ -157,6 +158,7 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
     };
   };
   const packs = opts.packs ?? createPackStore(dir, { tokens, ...opts });
+  const integrations = createIntegrationStore(dir, packs);
   let baseChecked = false;
   const write = (name: string, value: unknown) => writeAtomic(file(name), JSON.stringify(value, null, 2));
   /** Run summaries by file name, with the file's mtime/size when it was read. */
@@ -166,9 +168,14 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
     return path.join(dir, "runs", `${id}.json`);
   };
 
+  /** Blocks you don't own: every pack's, plus your own integrations' actions. */
+  const packBlocks = () => [...packs.load().blocks, ...integrations.ownBlocks()];
+
   return {
     dir,
     packs,
+    integrations,
+    packBlocks,
     /** Your own blocks/flows merged with Sandflow's core blocks and every installed pack's blocks/flows. */
     load(): AppData {
       if (!baseChecked) {
@@ -204,11 +211,12 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
       const env = readJson<EnvValues>(file("env.json")) ?? {};
       const p = packs.load();
       return {
-        blocks: [...CORE_BLOCKS, ...applyPackEdits(p.blocks, blocks), ...blocks.filter((b) => !b.pack)],
+        blocks: [...CORE_BLOCKS, ...applyPackEdits(packBlocks(), blocks), ...blocks.filter((b) => !b.pack)],
         flows: [...flows.filter((f) => !f.pack), ...p.flows],
         settings: { ...DEFAULT_SETTINGS, ...settings },
         env,
         packs: p.infos,
+        integrations: integrations.list(),
       };
     },
     /** Saves your own blocks and your edits of pack blocks (`modified`); other pack and core blocks are ignored. */
