@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { AGENT_LABELS } from "../shared/agents";
+import { AGENT_LABELS, auxModelEnv } from "../shared/agents";
 import { describeBlocks, describeFlow } from "../shared/flowOps";
 import { FLOW_GUIDE } from "../shared/flowGuide";
 import { validateAssistantAgent } from "../shared/settings";
@@ -235,11 +235,14 @@ export function createChatService(opts: { dir: string; load(): AppData; mcp: Mcp
   const summary = (c: Chat): ChatSummary => ({ id: c.id, flowId: c.flowId, title: c.title, updatedAt: c.updatedAt, running: active.has(c.id) });
   const flowBusy = (flowId: string) => [...active.keys()].some((id) => get(id)?.flowId === flowId);
 
-  function agentEnv(provider: AssistantAgent["provider"]): NodeJS.ProcessEnv {
+  function agentEnv(agent: AssistantAgent): NodeJS.ProcessEnv {
     const base = opts.env ?? process.env;
     const stored = opts.load().env;
-    const extra = Object.fromEntries(ADAPTERS[provider].authEnv.filter((k) => !base[k] && stored[k]?.trim()).map((k) => [k, stored[k]]));
-    return { ...base, ...extra };
+    const extra = Object.fromEntries(ADAPTERS[agent.provider].authEnv.filter((k) => !base[k] && stored[k]?.trim()).map((k) => [k, stored[k]]));
+    const env = { ...base, ...extra };
+    // Behind a gateway with a non-Claude model, Claude Code's other models must be that model too (see auxModelEnv).
+    const model = agent.model?.trim() || env.ANTHROPIC_MODEL?.trim();
+    return { ...env, ...auxModelEnv(agent.provider, model, env, !!env.ANTHROPIC_BASE_URL?.trim()) };
   }
 
   async function runTurn(chat: Chat, text: string, mcpBase: string, ctrl: AbortController, reply: ChatMessage) {
@@ -288,7 +291,7 @@ export function createChatService(opts: { dir: string; load(): AppData; mcp: Mcp
           model: agent.model,
           resumeId,
           workDir,
-          env: agentEnv(agent.provider),
+          env: agentEnv(agent),
           signal: ctrl.signal,
           mcp: { url, command: process.execPath, args: [bridge, url], env: { ELECTRON_RUN_AS_NODE: "1" } },
         })) {

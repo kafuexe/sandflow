@@ -22,7 +22,6 @@
     ],
     "agent": {
       "provider": "claudeCode",
-      "model": "claude-opus-4-8",
       "effort": "high"
     }
   }

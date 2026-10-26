@@ -1,5 +1,7 @@
 // Shared domain types used by both the React UI and the flow-engine server.
 
+import type { AgentActivity } from "./activity";
+
 /** The two things a block can emit. */
 export type OutputKind = "artifact" | "steer";
 /** A named way out of a block (`exit:<name>`): a Script that picks a route, or a subflow's Flow output. */
@@ -626,6 +628,16 @@ export interface NodeRunState {
   branch?: BranchHandle;
   /** script / subflow: the exit it left through. */
   exit?: string;
+  /** Resumed run: this step didn't run again — its state and outputs were copied from the original run. */
+  restored?: boolean;
+}
+
+/** Where a run's agents worked — recorded so the run can be resumed on the same branch. */
+export interface RunWorkspace {
+  /** REPO_PATH when the run started (absent: a scratch workspace, removed when the run ended). */
+  repo?: string;
+  /** The branch the run's sandbox uses (Create task may switch to its own; that one is `RunState.branch`). */
+  branch: string;
 }
 
 export interface QaPair {
@@ -647,6 +659,27 @@ export interface QuestionRecord {
   answer?: string;
   answeredAt?: number;
 }
+
+/**
+ * A message the user sent to a working agent node mid-run ("focus on X", "stop and summarize"). It reaches the agent
+ * by interrupting its current turn and resuming the same session with it (`interrupt`), or — for agents that can't
+ * resume a session — at the agent's next turn (`next-turn`).
+ */
+export interface SteerRecord {
+  id: string;
+  nodeId: string;
+  message: string;
+  sentAt: number;
+  /** pending: not handed to the agent yet; dropped: the step ended first. */
+  status: "pending" | "applied" | "dropped";
+  appliedAt?: number;
+  how?: "interrupt" | "next-turn";
+  /** Why it was dropped, or how it was delivered when that's worth saying. */
+  note?: string;
+}
+
+/** Longest steering message accepted. */
+export const MAX_STEER_CHARS = 4000;
 
 export interface LogLine {
   ts: number;
@@ -703,9 +736,13 @@ export interface RunState {
   pendingQuestion?: PendingQuestion;
   /** Every question asked so far, in order. */
   questions?: QuestionRecord[];
+  /** Steering messages sent to agent nodes while they worked, in the order sent. */
+  steers?: SteerRecord[];
   /** The starting prompt this run used (a per-run prompt, or the global one). */
   prompt?: string;
   logs: LogLine[];
+  /** What each agent node was thinking / doing, by node key (capped per node, see shared/activity.ts). */
+  activity?: Record<string, AgentActivity[]>;
   error?: string;
   /** The event that started the run (manual runs get `{ source: "manual" }`). */
   trigger?: TriggerEvent;
@@ -719,6 +756,12 @@ export interface RunState {
   input?: NodeIO;
   /** A run started with an input (stack children): the Flow output it reached and what it handed back. */
   result?: { exit?: string; outputs?: NodeIO };
+  /** Where its agents worked (absent on runs from before resuming existed — those can't be resumed). */
+  workspace?: RunWorkspace;
+  /** Top-level steps still queued when the run failed or was stopped, with their inputs ("Retry" starts them too). */
+  unstarted?: { nodeId: string; inputs: NodeIO }[];
+  /** This run resumes another one: started from these steps, with the other steps' outputs copied from it. */
+  resumedFrom?: { runId: string; nodeIds: string[] };
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -799,4 +842,5 @@ export interface RunSummary {
   flags?: { warning: number; error: number };
   parent?: { runId: string; nodeKey: string };
   stack?: StackRunInfo;
+  resumedFrom?: { runId: string; nodeIds: string[] };
 }

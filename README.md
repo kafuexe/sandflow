@@ -200,6 +200,25 @@ its interface: its **Flow input** block says what it takes (artifact / steer), a
 a named exit on the subflow node (e.g. `approved` / `rejected`). Its env vars and starting prompt show up in the
 parent's Inputs tab, its steps show in the Run tab as `Subflow › Step`, and a flow can't contain itself.
 
+### Resuming a failed run
+
+A run that failed or was stopped can continue where it stopped once you've fixed the configuration: **Retry from
+failed step** (Run tab, or under the run on the Agent screen) re-runs the failed / stopped steps — and steps still
+queued when it ended — plus everything after them. To go further back, click any step that ran (canvas → Block tab,
+Run tab, or a step on the Agent screen) and pick **Re-run from here**.
+
+- It starts a **new run** linked to the original (`Resumed from …`); the original run is never changed.
+- The new run uses the flow, blocks, settings and inputs **as they are now**, and the original's trigger event and
+  starting prompt. Steps that aren't re-run keep their outputs from the original (marked *kept*), so the restart step
+  gets exactly the inputs it had in its last execution — inside a loop too.
+- It works on the original run's branch (`sandflow/<run id>`, `BRANCH_NAME` or Create task's), so code changes made
+  by the earlier steps are there. If that branch was deleted, resuming is refused with an explanation. A run without
+  `REPO_PATH` used a scratch workspace that was removed when it ended: outputs are restored, its files are not.
+- It's refused (with the reason) when the restart step is no longer in the flow, never ran, or a step feeding it was
+  added after the original run. A step inside a subflow can't be a restart point — re-run the subflow step (it runs its
+  whole flow again). Runs from before this feature, and Box Stack tasks, can't be resumed.
+- API: `POST /api/runs/<id>/resume` with `{ "fromNodeIds"?: [...] }` (default: the failed steps).
+
 ## Triggers & logic
 
 Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar) — no

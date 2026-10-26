@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { appendActivity, capRunActivity, type ActivityDraft, type AgentActivity } from "../shared/activity";
 import { describeCondition, evaluateCondition } from "../shared/conditions";
 import { eventMarkdown } from "../shared/events";
 import { nodeLabel, resolveNode } from "../shared/resolve";
@@ -20,13 +21,20 @@ import type {
   FlagSeverity,
   RunState,
   SandboxKind,
+  SteerRecord,
   Settings,
   StackRunInfo,
   SkillFileRef,
 } from "../shared/types";
+import type { ResumePlan } from "../shared/resume";
+import { MAX_STEER_CHARS } from "../shared/types";
 import type { PackRuntimeInfo } from "./packs";
 import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
+
+/** Steering messages one agent may have waiting, and a run may get in all. */
+const MAX_PENDING_STEERS = 20;
+const MAX_RUN_STEERS = 500;
 
 export interface NodeResult {
   outputs: NodeIO;
@@ -90,8 +98,15 @@ export interface RunContext {
   /** Only the env vars the block declares — never leak all globals. */
   blockEnv(cfg: ResolvedConfig): Record<string, string>;
   log(level: LogLine["level"], msg: string, nodeId?: string): void;
+  /** What an agent node is thinking / doing (batched: shown live within ACTIVITY_FLUSH_MS, saved with the run). */
+  activity?(nodeId: string, items: ActivityDraft[]): void;
   /** Pause the run until the user answers (rejects when the run is cancelled). */
   ask(nodeId: string, question: string): Promise<string>;
+  /**
+   * An agent node accepts steering messages while it runs: `onSteer` is called for each message the user sends it
+   * (see `RunHandle.steer`). Close the inbox when the node is done.
+   */
+  steerable?(nodeId: string, onSteer: () => void): SteerInbox;
   /** Raise a flag on the run: saved with it, shown in the run list and as an alert. */
   flag(severity: FlagSeverity, message: string, o?: { nodeKey?: string; details?: string; fromRunId?: string }): RunFlag;
   /** Teardown callbacks run when the run ends (e.g. sandbox.close()). */
@@ -105,6 +120,20 @@ export interface RunContext {
   /** Packs whose runtime copy is already prepared in this run's sandbox. */
   preparedPacks: Set<string>;
 }
+
+/** Steering messages for one running agent node. */
+export interface SteerInbox {
+  /** Messages not handed to the agent yet, oldest first. */
+  pending(): SteerRecord[];
+  /** The agent got these (logged, and shown in its activity). */
+  applied(records: SteerRecord[], how: NonNullable<SteerRecord["how"]>): void;
+  /** Note for the user on still-pending messages (e.g. "queued until the agent's next turn"). */
+  note(records: SteerRecord[], note: string): void;
+  /** The node is done: anything still pending is dropped with `why`. */
+  close(why?: string): void;
+}
+
+export type SteerResult = { ok: true; steer: SteerRecord } | { ok: false; status: 400 | 404 | 409; error: string };
 
 export interface StartRunOptions {
   flow: Flow;
@@ -147,16 +176,26 @@ export interface StartRunOptions {
   cleanupTimeoutMs?: number;
   /** Logged as warnings when the run starts (e.g. it shares a branch with another run). */
   warnings?: string[];
+  /**
+   * Resume `from` (a finished run of this flow, see shared/resume.ts): start only at the plan's steps, with the inputs
+   * they had, after copying the other steps' states and outputs from it. Its trigger event is reused; pass its
+   * starting prompt as `prompt` and its branch as `branch`.
+   */
+  resume?: { from: RunState; plan: ResumePlan };
 }
 
 export interface RunHandle {
   state: RunState;
   done: Promise<RunState>;
   answer(answer: string): boolean;
+  /** Send a steering message to a running agent node (by node key). */
+  steer(nodeKey: string, message: string): SteerResult;
   cancel(): void;
 }
 
 const MAX_LOGS = 2000;
+/** Agent activity is pushed to the UI at most this often per run. */
+export const ACTIVITY_FLUSH_MS = 300;
 const CLEANUP_TIMEOUT_MS = 20_000;
 
 /** Where a graph run ended up: a subflow reached one of its Flow outputs (or ran out of nodes). */
@@ -175,7 +214,9 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
     flow,
     outerFlows,
     log: (level, msg, nodeId) => ctx.log(level, msg, nodeId === undefined ? undefined : prefix + nodeId),
+    activity: (nodeId, items) => ctx.activity?.(prefix + nodeId, items),
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
+    steerable: (nodeId, onSteer) => ctx.steerable!(prefix + nodeId, onSteer),
     flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
   };
@@ -200,15 +241,48 @@ export function startRun(opts: StartRunOptions): RunHandle {
     logs: [],
     questions: [],
     prompt: settings.startingPrompt,
-    trigger: opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
-    triggerNodeId: opts.startNodeId,
+    trigger: opts.resume?.from.trigger ?? opts.trigger ?? { source: "manual", type: "manual", firedAt: Date.now() },
+    triggerNodeId: opts.resume ? opts.resume.from.triggerNodeId : opts.startNodeId,
     ...(opts.parent ? { parent: opts.parent } : {}),
     ...(opts.stack ? { stack: opts.stack } : {}),
     ...(opts.entry ? { input: opts.entry } : {}),
   };
+  if (!opts.share) {
+    // What a resume needs to find this run's work again (see shared/resume.ts).
+    const repo = env.REPO_PATH?.trim();
+    run.workspace = { ...(repo ? { repo } : {}), branch: opts.branch || env.BRANCH_NAME?.trim() || `sandflow/${run.id}` };
+  }
+  const resume = opts.resume;
+  if (resume) {
+    const { from, plan } = resume;
+    run.resumedFrom = { runId: from.id, nodeIds: plan.nodeIds };
+    for (const [k, ns] of Object.entries(plan.restored)) run.nodes[k] = structuredClone(ns);
+    if (plan.questions.length) run.questions = structuredClone(plan.questions);
+    const activity = Object.entries(from.activity ?? {}).filter(([k]) => plan.restored[k]);
+    if (activity.length) run.activity = structuredClone(Object.fromEntries(activity));
+    if (from.branch && plan.branch === from.branch) run.branch = from.branch;
+  }
   const emit = () => opts.onChange?.(run);
 
   let pending: { resolve: (a: string) => void; reject: (e: Error) => void } | undefined;
+  /** Running agent nodes that take steering messages, by node key. */
+  const steerTargets = new Map<string, () => void>();
+  /** Node keys that ever took steering messages. */
+  const steerSeen = new Set<string>();
+
+  // Agent activity arrives line by line; it's collected and pushed with the run state a few times a second.
+  const activityQueue = new Map<string, (AgentActivity & { chunk?: boolean })[]>();
+  let activityTimer: NodeJS.Timeout | undefined;
+  const flushActivity = () => {
+    clearTimeout(activityTimer);
+    activityTimer = undefined;
+    if (!activityQueue.size) return;
+    const all = (run.activity ??= {});
+    for (const [k, items] of activityQueue) all[k] = appendActivity(all[k] ?? [], items);
+    capRunActivity(all);
+    activityQueue.clear();
+    emit();
+  };
 
   const ctx: RunContext = {
     run,
@@ -232,12 +306,60 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (run.logs.length > MAX_LOGS) run.logs.splice(0, run.logs.length - MAX_LOGS);
       emit();
     },
+    activity(nodeId, items) {
+      if (!items.length || run.finishedAt) return;
+      const exec = run.nodes[nodeId]?.executions;
+      const ts = Date.now();
+      let q = activityQueue.get(nodeId);
+      if (!q) activityQueue.set(nodeId, (q = []));
+      for (const it of items) q.push({ ...it, ts, ...(exec ? { exec } : {}) });
+      if (!activityTimer) {
+        activityTimer = setTimeout(flushActivity, ACTIVITY_FLUSH_MS);
+        activityTimer.unref?.();
+      }
+    },
     flag(severity, message, o = {}) {
       const f: RunFlag = { id: randomUUID().slice(0, 8), severity, message, at: Date.now(), ...o };
       (run.flags ??= []).push(f);
       ctx.log(severity === "error" ? "error" : "warn", `⚑ ${message}`, o.nodeKey);
       opts.onFlag?.(run, f);
       return f;
+    },
+    steerable(nodeId, onSteer) {
+      steerTargets.set(nodeId, onSteer);
+      steerSeen.add(nodeId);
+      const mine = () => (run.steers ?? []).filter((s) => s.nodeId === nodeId && s.status === "pending");
+      return {
+        pending: mine,
+        applied(records, how) {
+          if (!records.length) return;
+          const at = Date.now();
+          for (const r of records) {
+            r.status = "applied";
+            r.appliedAt = at;
+            r.how = how;
+            r.note = undefined;
+            ctx.log("info", `Steered by user: ${r.message}`, nodeId);
+          }
+          ctx.activity?.(nodeId, records.map((r) => ({ kind: "steer" as const, text: r.message })));
+          emit();
+        },
+        note(records, note) {
+          for (const r of records) r.note = note;
+          if (records.length) emit();
+        },
+        close(why = "The step ended before the agent got this message") {
+          if (steerTargets.get(nodeId) === onSteer) steerTargets.delete(nodeId);
+          const left = mine();
+          for (const r of left) {
+            r.status = "dropped";
+            r.note = why;
+          }
+          if (left.length) {
+            ctx.log("warn", `${left.length} steering message${left.length === 1 ? "" : "s"} not delivered: ${why}`, nodeId);
+          }
+        },
+      };
     },
     ask(nodeId, question) {
       if (ctx.abort.signal.aborted) return Promise.reject(new Error("Run cancelled"));
@@ -281,8 +403,20 @@ export function startRun(opts: StartRunOptions): RunHandle {
     }
   }
   for (const w of opts.warnings ?? []) ctx.log("warn", w);
+  if (resume) {
+    const restoredCount = Object.keys(resume.plan.restored).filter((k) => !k.includes("/")).length;
+    ctx.log(
+      "info",
+      `↻ Resuming run ${resume.from.id}: re-running from ${resume.plan.nodeIds.map((id) => {
+        const n = flow.nodes.find((x) => x.id === id);
+        return n ? nodeLabel(n, blocks) : id;
+      }).join(", ")}${restoredCount ? `; ${restoredCount} other step${restoredCount === 1 ? " keeps its" : "s keep their"} outputs from that run` : ""}`,
+    );
+  }
 
   let steps = 0;
+  /** The top-level graph's queue: what's still waiting when the run ends is saved as `run.unstarted`. */
+  let topQueue: { nodeId: string; inputs: NodeIO }[] = [];
 
   /** Rejects as soon as the run is stopped: a node's runner is raced against it, so Stop never waits on a runner. */
   const stopped = new Promise<never>((_, reject) => {
@@ -325,6 +459,10 @@ export function startRun(opts: StartRunOptions): RunHandle {
       // No Flow input: start where a top-level run would (never at a trigger — they don't fire inside subflows).
       if (!starts.length) starts = g.nodes.filter((n) => !incoming.has(n.id) && kindOf(n) !== "trigger");
       if (!starts.length) throw new Error(`Subflow "${g.name}" has nothing to start from — add a Flow input`);
+    } else if (resume && !prefix) {
+      const missing = resume.plan.starts.filter((s) => !byId.has(s.nodeId));
+      if (missing.length) throw new Error(`Step ${missing.map((s) => s.nodeId).join(", ")} is no longer in the flow`);
+      starts = [];
     } else {
       starts = opts.startNodeId ? g.nodes.filter((n) => n.id === opts.startNodeId) : g.nodes.filter((n) => !incoming.has(n.id));
       if (!starts.length) {
@@ -334,7 +472,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
       }
     }
 
-    const queue: { nodeId: string; inputs: NodeIO }[] = starts.map((n) => ({ nodeId: n.id, inputs: {} }));
+    const queue: { nodeId: string; inputs: NodeIO }[] =
+      resume && !prefix && !entry ? resume.plan.starts.map((s) => ({ nodeId: s.nodeId, inputs: { ...s.inputs } })) : starts.map((n) => ({ nodeId: n.id, inputs: {} }));
+    if (!prefix && !entry) topQueue = queue;
     for (const q of queue) run.nodes[key(q.nodeId)].status = "queued";
     emit();
 
@@ -349,6 +489,11 @@ export function startRun(opts: StartRunOptions): RunHandle {
       const node = byId.get(nodeId)!;
       const cfg = resolveNode(node, blocks);
       const ns = run.nodes[k];
+      if (ns.restored) {
+        // A restored step reached again (e.g. a loop back to it): it runs for real now.
+        delete ns.restored;
+        ns.executions = 0;
+      }
       ns.status = "running";
       ns.executions++;
       ns.inputs = inputs;
@@ -522,6 +667,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         queue.push({ nodeId: t, inputs: tInputs });
         if (run.nodes[key(t)].status !== "running") run.nodes[key(t)].status = "queued";
       }
+      flushActivity();
       ctx.log("info", `✓ ${label(nodeId)}`, k);
     }
     return {};
@@ -563,8 +709,14 @@ export function startRun(opts: StartRunOptions): RunHandle {
           clearTimeout(timer);
         }
       }
+      if (run.status !== "done" && topQueue.length) run.unstarted = topQueue.map((q) => ({ nodeId: q.nodeId, inputs: q.inputs }));
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
+      steerTargets.clear();
+      for (const st of run.steers ?? []) {
+        if (st.status === "pending") Object.assign(st, { status: "dropped", note: "The run ended before the agent got this message" });
+      }
+      flushActivity();
       run.finishedAt = Date.now();
       if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
       emit();
@@ -579,6 +731,35 @@ export function startRun(opts: StartRunOptions): RunHandle {
       if (!pending) return false;
       pending.resolve(a);
       return true;
+    },
+    steer(nodeKey, message) {
+      const text = message.trim();
+      if (!text) return { ok: false, status: 400, error: "The steering message is empty" };
+      if (text.length > MAX_STEER_CHARS) return { ok: false, status: 400, error: `The steering message is too long (max ${MAX_STEER_CHARS} characters)` };
+      if (run.finishedAt || settled || ctx.abort.signal.aborted) return { ok: false, status: 409, error: "This run has ended — there's no agent left to steer" };
+      const ns = run.nodes[nodeKey];
+      if (!ns) return { ok: false, status: 404, error: `No step "${nodeKey}" in this run` };
+      const onSteer = steerTargets.get(nodeKey);
+      if (ns.status !== "running" && ns.status !== "waiting") {
+        return { ok: false, status: 409, error: `This step isn't running (it's ${ns.status}) — only an agent that is working can be steered` };
+      }
+      if (!onSteer) {
+        // An agent that took messages a moment ago is wrapping up its step (its status changes right after).
+        if (steerSeen.has(nodeKey)) return { ok: false, status: 409, error: "This agent is finishing its step — it can't take messages any more" };
+        return { ok: false, status: 409, error: "Only AI agent and manager blocks can be steered" };
+      }
+      // Steers are saved with the run: keep a runaway client from growing it without bound.
+      const steers = run.steers ?? [];
+      if (steers.filter((s) => s.nodeId === nodeKey && s.status === "pending").length >= MAX_PENDING_STEERS) {
+        return { ok: false, status: 409, error: `${MAX_PENDING_STEERS} messages are already waiting for this agent — wait until it has read them` };
+      }
+      if (steers.length >= MAX_RUN_STEERS) return { ok: false, status: 409, error: `This run already got ${MAX_RUN_STEERS} steering messages — that's the limit` };
+      const steer: SteerRecord = { id: randomUUID().slice(0, 8), nodeId: nodeKey, message: text, sentAt: Date.now(), status: "pending" };
+      (run.steers ??= []).push(steer);
+      ctx.log("info", `Steering message received: ${text}`, nodeKey);
+      onSteer();
+      emit();
+      return { ok: true, steer };
     },
     cancel() {
       // Idempotent: a second Stop (or one after the run ended) does nothing.

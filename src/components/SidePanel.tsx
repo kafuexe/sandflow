@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, Lock, Pencil, Radio, ShieldAlert, ShieldCheck, Trash2, Workflow } from "lucide-react";
+import { Copy, ExternalLink, Lock, Pencil, Radio, RotateCcw, ShieldAlert, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,16 +11,21 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore, type SideTab } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { CORE_PACK } from "../../shared/packs";
-import { templateChain } from "../../shared/resolve";
+import { agentOrigin, resolveNode, templateChain, type AgentOrigin } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
 import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../shared/subflow";
-import type { BlockDef, Flow, FlowNode, ResolvedConfig, StackConfig } from "../../shared/types";
+import type { BlockDef, Flow, FlowNode, ResolvedConfig, RunState, StackConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
 import { InputsPanel } from "./InputsPanel";
 import { IntegrationEditor } from "./IntegrationEditor";
 import { NodeRunOn } from "./RunOnSelect";
 import { TriggerEditor } from "./TriggerEditor";
 import { RunPanel } from "./RunPanel";
+import { RerunFromHere } from "./ResumeControls";
+import { ActivityFilterBar, ActivityList, useActivityFilter } from "./AgentActivity";
+import { SteerBox } from "./SteerBox";
+import { activityOf } from "@/lib/activityView";
+import { steerability } from "@/lib/steer";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
 
@@ -72,13 +77,13 @@ function Summary({ cfg }: { cfg: ResolvedConfig }) {
       </Row>
       {cfg.kind === "stack" && (
         <Row k="Orchestrator">
-          {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
+          {cfg.agent.provider} · {cfg.agent.model || "default model"} · {cfg.agent.effort}
         </Row>
       )}
       {(cfg.kind === "ai" || cfg.kind === "manager") && (
         <>
           <Row k="Agent">
-            {cfg.agent.provider} · {cfg.agent.model} · {cfg.agent.effort}
+            {cfg.agent.provider} · {cfg.agent.model || "default model"} · {cfg.agent.effort}
             {cfg.maxIterations > 1 && ` · ≤${cfg.maxIterations} iterations`}
             {cfg.agent.endpoint && <div className="truncate font-mono text-muted-foreground" title={cfg.agent.endpoint}>→ {cfg.agent.endpoint}</div>}
           </Row>
@@ -386,8 +391,129 @@ function StackEditor({ flow, node, cfg, readOnly }: { flow: Flow; node: FlowNode
           <Textarea id={`stack-${k}`} rows={3} value={own[k] ?? ""} placeholder={s[k]} onChange={(e) => set({ [k]: e.target.value || undefined })} />
         </div>
       ))}
-      <p className="text-[11px] text-muted-foreground">The orchestrator uses this block's agent settings (Edit block definition).</p>
+      <p className="text-[11px] text-muted-foreground">The orchestrator's agent and model are set under Agent below.</p>
     </fieldset>
+  );
+}
+
+/** Where a node's agent setting comes from, in words. */
+function originLabel(o: AgentOrigin): string {
+  if (o.layer === "node") return "set on this node";
+  if (o.layer === "block") return `from ${o.blockName}${o.template && !/template/i.test(o.blockName) ? " (template)" : ""}`;
+  return "no model set: the CLI's default";
+}
+
+/**
+ * The node's agent model: the effective value, where it comes from (this node, the block, or a template it extends),
+ * and a per-node override with a reset. A node override always wins over the template — shown, never silent.
+ */
+function NodeAgent({ node, blocks, readOnly }: { node: FlowNode; blocks: BlockDef[]; readOnly: boolean }) {
+  const { updateNodeOverrides, openEditor } = useStore.getState();
+  let inherited: ResolvedConfig | undefined;
+  try {
+    inherited = resolveNode({ ...node, data: { ...node.data, overrides: { ...node.data.overrides, agent: undefined } } }, blocks);
+  } catch {
+    return null;
+  }
+  const own = node.data.overrides?.agent ?? {};
+  const origin = agentOrigin("model", node.data.blockId, blocks, node.data.overrides);
+  const blockOrigin = agentOrigin("model", node.data.blockId, blocks);
+  const overridden = origin.layer === "node";
+  const setModel = (model: string | undefined) => {
+    const next: Record<string, unknown> = { ...own, model };
+    if (model === undefined) delete next.model;
+    updateNodeOverrides(node.id, { agent: Object.keys(next).length ? (next as BlockDef["config"]["agent"]) : undefined });
+  };
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Label htmlFor="node-model">Model</Label>
+        {overridden ? (
+          <>
+            <Badge variant="outline" className="border-amber-500/60 text-[10px] text-amber-500" title={`Overrides ${inherited.agent.model || "the CLI default"} (${originLabel(blockOrigin)})`}>
+              overridden on this node
+            </Badge>
+            {!readOnly && (
+              <button type="button" onClick={() => setModel(undefined)} className="text-muted-foreground hover:text-foreground" title={`Reset to ${inherited.agent.model || "the CLI default"} (${originLabel(blockOrigin)})`} aria-label="Reset the model to the inherited one">
+                <RotateCcw className="size-3" />
+              </button>
+            )}
+          </>
+        ) : (
+          <span className="truncate text-[10px] text-muted-foreground">
+            {blockOrigin.layer === "block" ? (
+              <button type="button" className="hover:underline" onClick={() => openEditor({ id: blockOrigin.blockId })}>
+                {originLabel(blockOrigin)}
+              </button>
+            ) : (
+              originLabel(blockOrigin)
+            )}
+          </span>
+        )}
+      </div>
+      <Input
+        id="node-model"
+        className="h-8 font-mono"
+        value={own.model ?? ""}
+        placeholder={inherited.agent.model || "CLI default"}
+        onChange={(e) => setModel(e.target.value.trim() ? e.target.value : undefined)}
+      />
+      {overridden && Object.keys(own).some((k) => k !== "model") && (
+        <p className="text-[11px] text-muted-foreground">This node also overrides: {Object.keys(own).filter((k) => k !== "model").join(", ")}.</p>
+      )}
+    </div>
+  );
+}
+
+const LIVE_STATUS: Record<string, string> = {
+  idle: "Not started yet",
+  queued: "Queued",
+  running: "Working",
+  waiting: "Waiting for your answer",
+  done: "Finished",
+  failed: "Failed",
+};
+
+/** While the run on the canvas is going: this node's state, the "Steer this agent" box and its live AI activity. */
+function LiveNode({ node, cfg }: { node: FlowNode; cfg: ResolvedConfig | undefined }) {
+  const run = useStore((s) => s.run);
+  const flowId = useStore((s) => s.currentFlowId);
+  const activityFilter = useActivityFilter();
+  const ns = run?.nodes[node.id];
+  if (!run || run.finishedAt || run.flowId !== flowId || !ns) return null;
+  const st = steerability(run, node.id, cfg);
+  const items = activityOf(run.activity, node.id, ns.executions);
+  return (
+    <section aria-label="This block in the current run" className="space-y-2">
+      <div className="flex items-center gap-2 text-xs">
+        <Radio className={cn("size-3.5", ns.status === "running" ? "animate-pulse text-sky-300 motion-reduce:animate-none" : "text-muted-foreground")} aria-hidden />
+        <span className="font-medium">Current run</span>
+        <span className="text-muted-foreground">
+          {LIVE_STATUS[ns.status]}
+          {ns.executions > 1 && ` · execution ${ns.executions}`}
+        </span>
+      </div>
+      {st.agent ? (
+        <SteerBox run={run} nodeKey={node.id} cfg={cfg} />
+      ) : (
+        <p className="rounded-lg border bg-card/40 p-2 text-[11px] text-muted-foreground">{st.hint}</p>
+      )}
+      {st.agent && (ns.status !== "idle" || items.length > 0) && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-medium text-muted-foreground">AI activity</span>
+            <div className="ml-auto">
+              <ActivityFilterBar {...activityFilter} />
+            </div>
+          </div>
+          {items.length ? (
+            <ActivityList items={items} filter={activityFilter.filter} />
+          ) : (
+            <p className="rounded-md bg-black/30 p-3 text-xs text-muted-foreground">Nothing yet — its thinking, replies and tool calls show up here.</p>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -398,6 +524,9 @@ function BlockPanel() {
   const selectedId = useStore((s) => s.selectedNodeId);
   const { updateNodeData, updateNodeOverrides, removeNode, openEditor, upsertBlock, createFlow } = useStore.getState();
   const node = flow?.nodes.find((n) => n.id === selectedId);
+  // The run on the canvas, when it's a finished run of this flow (for "Re-run from here").
+  const run = useStore((s) => (s.run?.flowId === s.currentFlowId && s.run?.finishedAt ? s.run : undefined));
+  const resumeRun = useStore((s) => s.resumeRun);
 
   if (!node || !flow) return <div className="p-4 text-sm text-muted-foreground">Select a block on the canvas.</div>;
   const block = blocks.find((b) => b.id === node.data.blockId);
@@ -433,6 +562,7 @@ function BlockPanel() {
   return (
     <ScrollArea className="h-full">
       <div className="space-y-4 p-3">
+        <LiveNode node={node} cfg={cfg} />
         {readOnly && (
           <div className="flex items-center gap-2 rounded-lg border p-2 text-xs text-muted-foreground">
             <Lock className="size-3.5 shrink-0" />
@@ -442,6 +572,7 @@ function BlockPanel() {
             </Button>
           </div>
         )}
+        {run && <RunStepCard run={run} nodeId={node.id} onResume={(from) => resumeRun(run.id, from)} />}
         {/* Opening the flow a subflow runs works even when this flow is view only. */}
         {cfg?.kind === "subflow" && <SubflowEditor flow={flow} node={node} cfg={cfg} readOnly={readOnly} />}
         <fieldset disabled={readOnly} className="min-w-0 space-y-4">
@@ -507,6 +638,7 @@ function BlockPanel() {
             <ConditionEditor value={cfg.condition} onChange={(condition) => updateNodeOverrides(node.id, { condition })} />
           </div>
         )}
+        {cfg && (cfg.kind === "ai" || cfg.kind === "manager" || cfg.kind === "stack") && <NodeAgent node={node} blocks={blocks} readOnly={readOnly} />}
         {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && <NodeRunOn flow={flow} node={node} cfg={cfg} />}
         {cfg && (cfg.kind === "ai" || cfg.kind === "manager") && (
           <label className="flex items-center justify-between text-sm">
@@ -545,6 +677,22 @@ function BlockPanel() {
         </div>
       </div>
     </ScrollArea>
+  );
+}
+
+/** How the selected step did in the finished run on the canvas, and "Re-run from here". */
+function RunStepCard({ run, nodeId, onResume }: { run: RunState; nodeId: string; onResume: (from?: string[]) => Promise<unknown> }) {
+  const ns = run.nodes[nodeId];
+  const queued = run.unstarted?.some((u) => u.nodeId === nodeId);
+  if (!ns || run.parent || (ns.executions === 0 && !queued)) return null;
+  const state = ns.restored ? "kept from the original run" : ns.executions === 0 ? "queued, never started" : ns.status === "idle" && ns.error ? ns.error.toLowerCase() : ns.status;
+  return (
+    <section aria-label="This step in the run shown" className="space-y-1.5 rounded-lg border p-2">
+      <div className="text-xs text-muted-foreground">
+        In the run shown (<span className="capitalize">{run.status}</span>): {state}
+      </div>
+      <RerunFromHere run={run} nodeId={nodeId} onResume={onResume} />
+    </section>
   );
 }
 

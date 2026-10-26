@@ -26,7 +26,8 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   extraInstructions: "",
   autoAction: "shell",
   shellCommand: "",
-  agent: { provider: "claudeCode", model: "claude-opus-4-8", effort: "high" },
+  // No model = the agent CLI's own default model (no --model flag), like the Edit-with-AI chat.
+  agent: { provider: "claudeCode", model: "", effort: "high" },
   runOn: "inherit",
   maxIterations: 1,
   trigger: { type: "manual", overlap: "queue" },
@@ -79,7 +80,7 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
       .join("\n\n"),
     autoAction: def(patch.autoAction, base.autoAction),
     shellCommand: def(patch.shellCommand, base.shellCommand),
-    agent: { ...base.agent, ...stripUndef(patch.agent) },
+    agent: { ...base.agent, ...agentPatch(patch.agent) },
     runOn: def(patch.runOn, base.runOn),
     maxIterations: def(patch.maxIterations, base.maxIterations),
     // Trigger settings merge field by field; a condition's rule list is replaced as a whole.
@@ -98,6 +99,16 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
         }
       : base.integration,
   };
+}
+
+/** An agent patch without unset or blank values (a blank model / endpoint means "inherit", never "pass an empty name"), trimmed. */
+function agentPatch(a: BlockConfig["agent"]): Partial<ResolvedConfig["agent"]> {
+  if (!a) return {};
+  return Object.fromEntries(
+    Object.entries(a)
+      .filter(([, v]) => v !== undefined && !(typeof v === "string" && !v.trim()))
+      .map(([k, v]) => [k, typeof v === "string" ? v.trim() : v]),
+  ) as Partial<ResolvedConfig["agent"]>;
 }
 
 function stripUndef<T extends object>(o: T | undefined): Partial<T> {
@@ -138,6 +149,37 @@ export function resolveInherited(block: BlockDef, blocks: BlockDef[]): ResolvedC
 
 export function resolveNode(node: FlowNode, blocks: BlockDef[]): ResolvedConfig {
   return resolveBlock(node.data.blockId, blocks, node.data.overrides);
+}
+
+/** Where an agent setting comes from: the node's own override, a block in its template chain, or Sandflow's default. */
+export type AgentOrigin =
+  | { layer: "node" }
+  | { layer: "block"; blockId: string; blockName: string; template: boolean }
+  | { layer: "default" };
+
+/**
+ * Which layer decides `agent[key]` for a block (plus node overrides): the most specific one that sets it. Used to
+ * show where a node's model comes from — e.g. "from AI Agent (template)" or "node override".
+ */
+export function agentOrigin(
+  key: keyof ResolvedConfig["agent"],
+  blockId: string,
+  blocks: BlockDef[],
+  overrides?: BlockConfig,
+): AgentOrigin {
+  const set = (c: BlockConfig | undefined) => {
+    const v = c?.agent?.[key];
+    return v !== undefined && !(typeof v === "string" && !v.trim());
+  };
+  if (set(overrides)) return { layer: "node" };
+  let chain: BlockDef[];
+  try {
+    chain = templateChain(blockId, blocks);
+  } catch {
+    return { layer: "default" };
+  }
+  const b = [...chain].reverse().find((x) => set(x.config));
+  return b ? { layer: "block", blockId: b.id, blockName: b.name, template: b.isTemplate } : { layer: "default" };
 }
 
 /** Would setting `candidateParent` as parent of `blockId` create a cycle? */
