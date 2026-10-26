@@ -115,13 +115,14 @@ function OptionField({
         <Input
           id={id}
           type={option.type === "number" ? "number" : "text"}
-          className="h-8"
+          className={option.type === "args" ? "h-8 font-mono text-xs" : "h-8"}
           value={value === undefined ? "" : String(value)}
           placeholder={placeholder}
           onChange={(e) => onChange(e.target.value === "" ? undefined : option.type === "number" ? Number(e.target.value) : e.target.value)}
         />
       )}
       {hint}
+      {option.type === "args" && <p className="text-[11px] text-muted-foreground">Passed as-is, split on spaces ("quote" to keep spaces) — nothing is expanded.</p>}
     </div>
   );
 }

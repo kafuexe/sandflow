@@ -20,6 +20,7 @@ import {
   outputMatches,
   parseChoices,
   parseVersion,
+  splitArgs,
 } from "../shared/integrations";
 import { manifestProblems } from "../shared/packs";
 import { resolveNode } from "../shared/resolve";
@@ -99,7 +100,7 @@ describe("arguments from options", () => {
   it("adds each set option's args; unset placeholders drop out; defaults apply", () => {
     expect(buildArgs(def, run, {}, vars)).toEqual(["run", "Add dark mode", "--work-dir", "/repo", "--max", "3"]);
     expect(buildArgs(def, run, { workflow: "quick", test: true, from: "dev", extra: "-v", max: 5 }, vars)).toEqual([
-      "run", "Add dark mode", "--work-dir", "/repo", "-v", "--from", "dev", "--workflow", "quick", "--test", "--max", "5",
+      "run", "Add dark mode", "--work-dir", "/repo", "-v", "--workflow", "quick", "--test", "--max", "5", "--from", "dev",
     ]);
     expect(buildArgs(def, run, { test: false }, vars)).not.toContain("--test");
   });
@@ -107,6 +108,33 @@ describe("arguments from options", () => {
   it("passes a prompt as one argument, however it's written", () => {
     const tricky = 'Fix "quotes" && rm -rf / ; $(whoami) %PATH%\nsecond line';
     expect(buildArgs(def, run, {}, { ...vars, input: tricky })[1]).toBe(tricky);
+  });
+
+  it("splits free-form args options into arguments without expanding anything", () => {
+    expect(splitArgs(`--label "two words" -v 'it''s' C:\\repo\\x "a\\"b" $HOME`)).toEqual(["--label", "two words", "-v", "its", "C:\\repo\\x", 'a"b', "$HOME"]);
+    expect(splitArgs("  ")).toEqual([]);
+    expect(() => splitArgs('--x "open')).toThrow(/Unclosed/);
+
+    const open: IntegrationDef = {
+      ...def,
+      actions: [
+        {
+          id: "any",
+          name: "Any",
+          args: ["{{option.command}}", "--work-dir", "{{env.REPO_PATH}}"],
+          options: [
+            { id: "command", label: "Command", type: "args", required: true },
+            { id: "extra", label: "Extra", type: "args" },
+            { id: "wrapped", label: "Wrapped", type: "args", args: ["--pass", "{{value}}"] },
+          ],
+        },
+      ],
+    };
+    expect(integrationProblems(open)).toEqual([]);
+    expect(buildArgs(open, open.actions[0], { command: 'workflows show "my flow"', extra: "--new-flag 2", wrapped: "-a -b" }, vars)).toEqual([
+      "workflows", "show", "my flow", "--work-dir", "/repo", "--new-flag", "2", "--pass", "-a", "-b",
+    ]);
+    expect(integrationProblems({ ...open, actions: [{ ...open.actions[0], options: [{ id: "x", label: "X", type: "args", args: ["--x"] }] }] }).join()).toMatch(/must use \{\{value\}\}/);
   });
 
   it("refuses a missing required option and a non-number", () => {

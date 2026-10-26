@@ -22,7 +22,7 @@ import type {
 export const LOCAL_INTEGRATIONS = LOCAL_PACK;
 export const INTEGRATION_COLOR = "#0ea5e9";
 export const DEFAULT_INTEGRATION_TIMEOUT_S = 4 * 60 * 60;
-const OPTION_TYPES = ["string", "text", "boolean", "number", "select"] as const;
+const OPTION_TYPES = ["string", "text", "boolean", "number", "select", "args"] as const;
 const COMMAND_RE = /^[\w.+-]{1,64}$/;
 
 /** `base/meow` → `meow`. */
@@ -34,10 +34,10 @@ export const integrationBlockId = (integrationId: string, actionId: string) => `
 /** Env var that points at a specific executable: `meow` → `SANDFLOW_MEOW_PATH`. */
 export const commandPathEnv = (command: string) => `SANDFLOW_${command.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_PATH`;
 
-/** Options an action shows: the integration's shared ones, then the action's own (an action's option wins on the same id). */
+/** Options an action shows: its own, then the integration's shared ones (an action's option wins on the same id). */
 export function actionOptions(def: IntegrationDef, action: IntegrationAction): IntegrationOption[] {
   const own = action.options ?? [];
-  return [...(def.options ?? []).filter((o) => !own.some((x) => x.id === o.id)), ...own];
+  return [...own, ...(def.options ?? []).filter((o) => !own.some((x) => x.id === o.id))];
 }
 
 /** Named exits of an action (exit-code exits, then the fail exit). Empty = plain outputs. */
@@ -78,6 +78,7 @@ function optionProblems(o: IntegrationOption | undefined, where: string): string
       if (bad) errors.push(bad);
     }
   }
+  if (o.type === "args" && o.args !== undefined && !o.args.some((a) => /\{\{\s*value\s*\}\}/.test(a))) errors.push(`${at}: an "args" option's args must use {{value}}`);
   if ((o.choices || o.choicesFrom) && o.type !== "select") errors.push(`${at}: choices only apply to type "select"`);
   if (o.default !== undefined && !["string", "number", "boolean"].includes(typeof o.default)) errors.push(`${at}: default must be a string, number or boolean`);
   return errors;
@@ -193,11 +194,52 @@ export function renderTemplate(t: string, vars: TemplateVars): string {
   return t.replace(PLACEHOLDER, (_, name: string) => vars[name] ?? "");
 }
 
-/** An argument that's nothing but one placeholder which came out empty is dropped (an unset optional value). */
-function renderArg(t: string, vars: TemplateVars): string | undefined {
-  const out = renderTemplate(t, vars);
-  if (out === "" && /^\s*\{\{\s*[\w.-]+\s*\}\}\s*$/.test(t)) return undefined;
+/**
+ * Split a command line into arguments — whitespace separates, '…' and "…" quote, \ escapes a quote — without
+ * expanding anything (no variables, globs or commands). `--label "two words" -v` → `["--label", "two words", "-v"]`.
+ */
+export function splitArgs(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let started = false;
+  let quote: "'" | '"' | undefined;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote === "'") {
+      if (c === "'") quote = undefined;
+      else cur += c;
+    } else if (quote === '"') {
+      if (c === '"') quote = undefined;
+      else if (c === "\\" && (line[i + 1] === '"' || line[i + 1] === "\\")) cur += line[++i];
+      else cur += c;
+    } else if (/\s/.test(c)) {
+      if (started) out.push(cur);
+      cur = "";
+      started = false;
+    } else {
+      started = true;
+      if (c === "'" || c === '"') quote = c;
+      // Only a quote is escaped, so Windows paths (`C:\repo`) pass through as typed.
+      else if (c === "\\" && (line[i + 1] === '"' || line[i + 1] === "'")) cur += line[++i];
+      else cur += c;
+    }
+  }
+  if (quote) throw new Error(`Unclosed ${quote} in "${line}"`);
+  if (started) out.push(cur);
   return out;
+}
+
+const SOLE_PLACEHOLDER = /^\s*\{\{\s*([\w.-]+)\s*\}\}\s*$/;
+
+/**
+ * Render one argument template. One that's nothing but a placeholder which came out empty is dropped (an unset
+ * optional value); one that's nothing but a placeholder named in `split` (an `args` option) becomes several arguments.
+ */
+function renderArg(t: string, vars: TemplateVars, split: Set<string>): string[] {
+  const sole = SOLE_PLACEHOLDER.exec(t)?.[1];
+  if (sole && split.has(sole)) return splitArgs(vars[sole] ?? "");
+  const out = renderTemplate(t, vars);
+  return out === "" && sole ? [] : [out];
 }
 
 /** The value an option has: the node's / block's, else its default. */
@@ -215,6 +257,8 @@ const isSet = (v: IntegrationValue | undefined) => v !== undefined && v !== "" &
 export function buildArgs(def: IntegrationDef, action: IntegrationAction, values: Record<string, IntegrationValue>, vars: TemplateVars): string[] {
   const options = actionOptions(def, action);
   const optionVars: TemplateVars = {};
+  // `args` options are free-form command-line text: split into arguments wherever they stand alone.
+  const split = new Set(options.filter((o) => o.type === "args").map((o) => `option.${o.id}`));
   for (const o of options) {
     const v = optionValue(o, values);
     if (o.required && !isSet(v)) throw new Error(`Set "${o.label}" — it's required`);
@@ -222,11 +266,15 @@ export function buildArgs(def: IntegrationDef, action: IntegrationAction, values
     optionVars[`option.${o.id}`] = isSet(v) ? String(v) : undefined;
   }
   const all = { ...vars, ...optionVars };
-  const out = action.args.flatMap((t) => renderArg(t, all) ?? []);
+  const out = action.args.flatMap((t) => renderArg(t, all, split));
   for (const o of options) {
     const v = optionValue(o, values);
-    if (!isSet(v) || !o.args?.length) continue;
-    out.push(...o.args.flatMap((t) => renderArg(t, { ...all, value: String(v) }) ?? []));
+    if (!isSet(v)) continue;
+    // An `args` option without args of its own is appended as it is — unless the action's args already place it.
+    const placed = action.args.some((t) => new RegExp(`\\{\\{\\s*option\\.${o.id}\\s*\\}\\}`).test(t));
+    const templates = o.args?.length ? o.args : o.type === "args" && !placed ? ["{{value}}"] : [];
+    const own = o.type === "args" ? new Set([...split, "value"]) : split;
+    out.push(...templates.flatMap((t) => renderArg(t, { ...all, value: String(v) }, own)));
   }
   return out;
 }

@@ -188,7 +188,10 @@ The format (`integrations/<id>.json`):
 Templates: `{{input}}` (the incoming artifact, else the starting prompt), `{{artifact}}`, `{{steer}}`, `{{prompt}}`,
 `{{env.NAME}}`, `{{option.id}}`, `{{worktree}}`, `{{run.id}}`, `{{trigger.url}}` / `title` / `body` / `number` / …
 An option's `args` are added when it's set; an argument that's only an empty placeholder is dropped. Option types:
-`string`, `text`, `number`, `boolean`, `select`. Without `failExit`, an unmapped non-zero exit code fails the block.
+`string`, `text`, `number`, `boolean`, `select` (`allowCustom` lets a value outside the list be typed in), and `args`:
+free-form command-line text split into arguments (quotes respected, nothing expanded) — appended as typed, or placed
+where an argument is exactly `{{option.id}}`. An `args` option keeps a pack usable as its harness grows: new flags and
+commands work before the pack learns about them. Without `failExit`, an unmapped non-zero exit code fails the block.
 
 ### Flows inside flows
 

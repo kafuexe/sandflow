@@ -403,7 +403,8 @@ export interface AppData {
 
 // ---------- Integrations (other harnesses) ----------
 
-export type IntegrationOptionType = "string" | "text" | "boolean" | "number" | "select";
+/** `args` = free-form command-line text, split into arguments (quotes respected, nothing expanded). */
+export type IntegrationOptionType = "string" | "text" | "boolean" | "number" | "select" | "args";
 
 export interface IntegrationChoice {
   value: string;
@@ -474,7 +475,7 @@ export interface IntegrationDef {
   install?: { url?: string; notes?: string; commands?: Record<string, string> };
   /** Env vars every action needs. */
   env?: string[];
-  /** Options every action has (listed before the action's own). */
+  /** Options every action has (listed after the action's own). */
   options?: IntegrationOption[];
   actions: IntegrationAction[];
 }
