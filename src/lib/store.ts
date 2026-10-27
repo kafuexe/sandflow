@@ -4,6 +4,7 @@ import type {
   AppData,
   BlockConfig,
   BlockDef,
+  OverseerSettings,
   EnvValues,
   Flow,
   FlowColor,
@@ -82,6 +83,8 @@ interface State {
   setFlowRunOn(id: string, runOn: RunOn | undefined): void;
   /** The flow's "Continue interrupted runs automatically" switch (default on). */
   setFlowContinueAutomatically(id: string, on: boolean): void;
+  /** The flow's overseer agent (undefined = off). */
+  setFlowOverseer(id: string, overseer: OverseerSettings | undefined): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
   addNode(blockId: string, position: { x: number; y: number }, data?: Partial<FlowNode["data"]>): void;
@@ -359,6 +362,10 @@ export const useStore = create<State>((set, get) => {
     setFlowContinueAutomatically(id, on) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : on ? (({ continueAutomatically: _, ...rest }) => rest)(f) : { ...f, continueAutomatically: false })) }), "flows");
+    },
+    setFlowOverseer(id, overseer) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : overseer ? { ...f, overseer } : (({ overseer: _, ...rest }) => rest)(f))) }), "flows");
     },
     async continueRun(runId, repair) {
       // Repair adopts the flow as saved: write pending edits first.

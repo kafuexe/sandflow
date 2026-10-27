@@ -1,5 +1,6 @@
 import pkg from "../package.json";
 import { AGENT_PROVIDERS } from "./agents";
+import { validateSupervisorSettings } from "./supervisor";
 import type { AssistantAgent, Settings } from "./types";
 
 export const APP_VERSION: string = pkg.version;
@@ -50,6 +51,10 @@ export function validateSettings(s: Settings): Settings {
     out.webhooks = { enabled: !!w.enabled, host, port, ...(publicUrl ? { publicUrl } : {}) };
   }
   if (s.claudeCode) out.claudeCode = { enabled: s.claudeCode.enabled !== false };
+  if (s.supervisor) {
+    const sup = validateSupervisorSettings(s.supervisor);
+    if (Object.keys(sup).length) out.supervisor = sup;
+  }
   if (s.updates) {
     const mode = s.updates.mode;
     if (!["github", "url", "off"].includes(mode)) throw new Error("Invalid update mode");

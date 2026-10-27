@@ -205,3 +205,16 @@ describe("stopNode on an agent node (runAi)", () => {
     expect(closed).toBe(false);
   });
 });
+
+describe("Settings → Supervisor and the flow's overseer", () => {
+  it("validateSettings keeps supervisor settings in range and drops unset ones", async () => {
+    const { validateSettings } = await import("../shared/settings");
+    const { validateOverseer } = await import("../shared/supervisor");
+    expect(validateSettings({ ...settings, supervisor: { enabled: false, pollSeconds: 0, stuckAfterSeconds: 3600 } }).supervisor).toEqual({ enabled: false, pollSeconds: 1, stuckAfterSeconds: 3600 });
+    expect(validateSettings({ ...settings, supervisor: {} }).supervisor).toBeUndefined();
+    expect(() => validateSettings({ ...settings, supervisor: { remindAfterSeconds: "soon" as never } })).toThrow(/remindAfterSeconds/);
+    expect(validateOverseer({ enabled: false, model: "x" })).toBeUndefined();
+    expect(validateOverseer({ enabled: true, model: " haiku ", everySeconds: 5 })).toEqual({ enabled: true, model: "haiku", everySeconds: 30 });
+    expect(() => validateOverseer({ enabled: true, model: "rm -rf" })).toThrow(/model/);
+  });
+});

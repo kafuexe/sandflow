@@ -9,7 +9,7 @@ import { useCurrentFlow, useStore } from "@/lib/store";
 import { nodeLabel } from "../../shared/resolve";
 import type { SandboxKind } from "../../shared/types";
 import { AnswerBox } from "./RunPanel";
-import { ClaudeCodeSettingsField, SandboxImageSettings, UpdateSettingsField, WebhookSettingsField } from "./SandboxSettings";
+import { ClaudeCodeSettingsField, SandboxImageSettings, SupervisorSettingsField, UpdateSettingsField, WebhookSettingsField } from "./SandboxSettings";
 
 export function SettingsDialog() {
   const open = useStore((s) => s.settingsOpen);
@@ -56,6 +56,7 @@ export function SettingsDialog() {
               onChange={(e) => updateSettings({ startingPrompt: e.target.value })}
             />
           </div>
+          <SupervisorSettingsField settings={settings} />
           <WebhookSettingsField settings={settings} />
           <ClaudeCodeSettingsField settings={settings} />
           <UpdateSettingsField settings={settings} />

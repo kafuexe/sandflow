@@ -19,6 +19,7 @@ import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effor
 import { validateBlocks } from "../../shared/validate";
 import { ConditionEditor } from "./ConditionEditor";
 import { HostWarning, RunOnSelect } from "./RunOnSelect";
+import { nodeTimeoutSeconds } from "../../shared/supervisor";
 import { SkillsEditor } from "./SkillsEditor";
 import { TriggerEditor } from "./TriggerEditor";
 
@@ -322,6 +323,17 @@ export function BlockEditor() {
                 className="w-24"
                 value={cfg.maxIterations}
                 onChange={(e) => setCfg({ maxIterations: Math.max(1, Number(e.target.value) || 1) })}
+              />
+            </Field>
+            <Field label="Time limit (seconds)" overridden={c.timeoutSeconds !== undefined} onReset={() => setCfg({ timeoutSeconds: undefined })} inheritable>
+              <Input
+                type="number"
+                min={0}
+                className="w-28"
+                title="The supervisor stops a step that runs longer. Empty = inherited (none, or 30 min for Shell commands); 0 = no limit."
+                value={c.timeoutSeconds ?? ""}
+                placeholder={String(nodeTimeoutSeconds({ ...cfg, timeoutSeconds: inherited.timeoutSeconds }) ?? "none")}
+                onChange={(e) => setCfg({ timeoutSeconds: e.target.value === "" ? undefined : Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
               />
             </Field>
           </div>

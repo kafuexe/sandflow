@@ -9,7 +9,8 @@ import { api } from "@/lib/api";
 import { desktop } from "@/lib/desktop";
 import { useStore } from "@/lib/store";
 import { AGENT_TOOLS_MOUNT, DEFAULT_SANDBOX_IMAGE } from "../../shared/settings";
-import type { Settings, UpdateSettings } from "../../shared/types";
+import { SUPERVISOR_DEFAULTS, supervisorSettings } from "../../shared/supervisor";
+import type { Settings, SupervisorSettings, UpdateSettings } from "../../shared/types";
 
 type Status = Awaited<ReturnType<typeof api.sandboxStatus>>;
 
@@ -296,6 +297,55 @@ export function UpdateSettingsField({ settings }: { settings: Settings }) {
           : "Checked when the app starts."}{" "}
         Applies after restarting Sandflow.
       </p>
+    </div>
+  );
+}
+
+/** Settings → Supervisor: the timed check of running flows (silent / stuck steps, reminders). Minutes in the UI, seconds saved. */
+export function SupervisorSettingsField({ settings }: { settings: Settings }) {
+  const updateSettings = useStore((s) => s.updateSettings);
+  const sup = settings.supervisor ?? {};
+  const eff = supervisorSettings(sup);
+  const set = (patch: SupervisorSettings) => updateSettings({ supervisor: { ...sup, ...patch } });
+  const minutes = (k: "silentAfterSeconds" | "stuckAfterSeconds" | "remindAfterSeconds", label: string, fallback: string) => (
+    <div className="space-y-1">
+      <Label className="text-xs">{label}</Label>
+      <Input
+        type="number"
+        min={1}
+        value={sup[k] !== undefined ? Math.round(sup[k]! / 60) : ""}
+        placeholder={fallback}
+        onChange={(e) => set({ [k]: e.target.value === "" ? undefined : Math.max(1, Number(e.target.value) || 1) * 60 })}
+      />
+    </div>
+  );
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <label className="flex items-center justify-between text-sm">
+        <span>Supervisor</span>
+        <Switch checked={eff.enabled} onCheckedChange={(v) => set({ enabled: v ? undefined : false })} />
+      </label>
+      <p className="text-[11px] text-muted-foreground">
+        Looks at running flows every few seconds: flags a step that has gone silent, stops one that shows no sign of life (or runs past its time
+        limit), and reminds you of questions waiting for an answer.
+      </p>
+      {eff.enabled && (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <Label className="text-xs">Check every (seconds)</Label>
+            <Input
+              type="number"
+              min={1}
+              value={sup.pollSeconds ?? ""}
+              placeholder={String(SUPERVISOR_DEFAULTS.pollSeconds)}
+              onChange={(e) => set({ pollSeconds: e.target.value === "" ? undefined : Math.max(1, Number(e.target.value) || 1) })}
+            />
+          </div>
+          {minutes("silentAfterSeconds", "Silent warning after (min)", `${SUPERVISOR_DEFAULTS.silentAgentSeconds / 60} agents / ${SUPERVISOR_DEFAULTS.silentOtherSeconds / 60} others`)}
+          {minutes("stuckAfterSeconds", "Stop a stuck step after (min)", String(SUPERVISOR_DEFAULTS.stuckAfterSeconds / 60))}
+          {minutes("remindAfterSeconds", "Remind of a question after (min)", String(SUPERVISOR_DEFAULTS.remindAfterSeconds / 60))}
+        </div>
+      )}
     </div>
   );
 }

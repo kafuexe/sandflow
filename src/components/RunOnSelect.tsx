@@ -1,10 +1,12 @@
 import { Switch } from "@/components/ui/switch";
 import { TriangleAlert } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useStore } from "@/lib/store";
 import { HOST_WARNING, RUN_ON_LABELS, resolveRunOn, settingsRunOn } from "../../shared/runOn";
-import type { Flow, FlowNode, ResolvedConfig, RunOn, RunOnChoice } from "../../shared/types";
+import { SUPERVISOR_DEFAULTS } from "../../shared/supervisor";
+import type { Flow, FlowNode, OverseerSettings, ResolvedConfig, RunOn, RunOnChoice } from "../../shared/types";
 
 const INHERIT = "inherit";
 
@@ -107,6 +109,45 @@ export function FlowRunOn({ flow }: { flow: Flow }) {
       />
       <p className="text-[11px] text-muted-foreground">A block or node can still choose for itself.</p>
       {flow.runOn === "host" && <HostWarning />}
+    </section>
+  );
+}
+
+/** Inputs tab: an overseer agent that looks over this flow's running agents now and then (off by default). */
+export function FlowOverseer({ flow }: { flow: Flow }) {
+  const { setFlowOverseer } = useStore.getState();
+  const o = flow.overseer;
+  const on = !!o?.enabled;
+  const set = (patch: Partial<OverseerSettings>) => setFlowOverseer(flow.id, { enabled: true, ...o, ...patch });
+  return (
+    <section className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="flow-overseer">Overseer</Label>
+        <Switch id="flow-overseer" checked={on} onCheckedChange={(v) => setFlowOverseer(flow.id, v ? { ...o, enabled: true } : undefined)} />
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        While an AI agent of this flow works, Claude Code (on this computer, no tools) looks at what it's doing every few minutes: it may send it a
+        steering message, or stop it when it's stuck.
+      </p>
+      {on && (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <Label htmlFor="flow-overseer-model" className="text-xs">Model</Label>
+            <Input id="flow-overseer-model" value={o?.model ?? ""} placeholder={SUPERVISOR_DEFAULTS.overseerModel} onChange={(e) => set({ model: e.target.value.trim() || undefined })} />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="flow-overseer-every" className="text-xs">Every (seconds)</Label>
+            <Input
+              id="flow-overseer-every"
+              type="number"
+              min={30}
+              value={o?.everySeconds ?? ""}
+              placeholder={String(SUPERVISOR_DEFAULTS.overseerEverySeconds)}
+              onChange={(e) => set({ everySeconds: e.target.value === "" ? undefined : Math.max(30, Number(e.target.value) || 30) })}
+            />
+          </div>
+        </div>
+      )}
     </section>
   );
 }

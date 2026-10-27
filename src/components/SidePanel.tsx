@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { CORE_PACK } from "../../shared/packs";
 import { agentOrigin, resolveNode, templateChain, type AgentOrigin } from "../../shared/resolve";
 import { skillKey } from "../../shared/skills";
+import { nodeTimeoutSeconds } from "../../shared/supervisor";
 import { EXIT_NAME_RE, flowInterface, resolveNodeIn, subflowCycle } from "../../shared/subflow";
 import type { BlockDef, Flow, FlowNode, ResolvedConfig, RunState, StackConfig } from "../../shared/types";
 import { ConditionEditor } from "./ConditionEditor";
@@ -656,6 +657,20 @@ function BlockPanel() {
               onChange={(e) => updateNodeOverrides(node.id, { extraInstructions: e.target.value || undefined })}
               placeholder="Appended to the block's instructions"
             />
+          </div>
+        )}
+        {cfg && !["trigger", "condition", "flow-input", "flow-output"].includes(cfg.kind) && (
+          <div className="space-y-1.5">
+            <Label htmlFor="node-timeout">Time limit (seconds, this node)</Label>
+            <Input
+              id="node-timeout"
+              type="number"
+              min={0}
+              value={node.data.overrides?.timeoutSeconds ?? ""}
+              placeholder={`${nodeTimeoutSeconds(resolveNode({ ...node, data: { ...node.data, overrides: { ...node.data.overrides, timeoutSeconds: undefined } } }, blocks)) ?? "none"} — from the block`}
+              onChange={(e) => updateNodeOverrides(node.id, { timeoutSeconds: e.target.value === "" ? undefined : Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+            />
+            <p className="text-[11px] text-muted-foreground">The supervisor stops this step when it runs longer. 0 = no limit.</p>
           </div>
         )}
         {cfg && <Summary cfg={cfg} />}
