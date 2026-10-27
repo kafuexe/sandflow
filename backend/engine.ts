@@ -29,10 +29,12 @@ import type {
 } from "../shared/types";
 import type { ResumePlan } from "../shared/resume";
 import { DELIVERY_WAIT_MS, JOURNAL_SCHEMA, PAUSE_GRACE_MS, PAUSE_REASON_TEXT, activeNodeKeys, statusOfPhase } from "../shared/journal";
+import { GUARD_TEXT, classifyFailure, recoverySettings, reviewPrompt } from "../shared/recovery";
 import { MAX_STEER_CHARS } from "../shared/types";
 import type { AgentSessionRef, FailureCause, NodeRunState, NodeUsage, PauseReason, QueuedStep, RunPhase, SupervisionEntry } from "../shared/types";
 import { flowFingerprint, settingsFingerprint } from "./journal";
 import type { PackRuntimeInfo } from "./packs";
+import { decideAfterFailure, withTriageNotes, type AfterFailure, type TriageRunner } from "./recovery";
 import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
 
@@ -140,16 +142,26 @@ export interface RunContext {
    */
   deliver?<T>(fn: () => Promise<T>): Promise<T>;
   /**
-   * The node is re-running after its attempt was interrupted (pause / crash): returns what it had (its agent
-   * session), once — only the first call of the attempt continues it (MEOW resumes a session on its first query).
+   * The node is re-running after its attempt was interrupted (pause / crash) or failed (recovery): returns what it
+   * continues from, once — only the first call of the attempt continues it (MEOW resumes a session on its first query).
    */
-  takeInterrupted?(nodeId: string): { session?: AgentSessionRef } | undefined;
+  takeInterrupted?(nodeId: string): RerunFrom | undefined;
   /** An agent's session id appeared (journaled right away so a crash can continue it). */
   noteSession?(nodeId: string, session: AgentSessionRef): void;
   noteUsage?(nodeId: string, usage: Omit<NodeUsage, "at">): void;
   /** A sandbox container / an agent process on this computer started (removed if a crash leaves it behind). */
   noteContainer?(kind: "docker" | "podman", containerId: string): void;
   noteProcess?(pid: number, startedAt: number, running: boolean): void;
+}
+
+/**
+ * What a step running again continues from: its agent's session (continued with `prompt`, default "you were
+ * interrupted…"), or — `fresh` — a new session with `prompt` in front of its task (recovery recycles a session).
+ */
+export interface RerunFrom {
+  session?: AgentSessionRef;
+  prompt?: string;
+  fresh?: boolean;
 }
 
 /** Steering messages for one running agent node. */
@@ -173,7 +185,10 @@ export interface StartRunOptions {
   flows?: Flow[];
   env: EnvValues;
   settings: Settings;
-  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner };
+  /** `triage`: the recovery triage agent — without it a failed step fails the run (recovery is off). */
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner; triage?: TriageRunner };
+  /** Waits between automatic retries (default: a timer). */
+  sleep?: (ms: number) => Promise<void>;
   onChange?: (state: RunState) => void;
   saveArtifact?: (runId: string, nodeId: string, n: number, text: string) => void;
   /** Base directory for per-run agent logs (`<logRoot>/<runId>/<nodeId>.log`). */
@@ -251,7 +266,7 @@ export interface RunHandle {
    * Pause instead of cancel (quit, update): no new step starts, running steps get a short grace period, then their
    * processes are stopped and their attempts marked interrupted. Resolves once the run is paused (`done`).
    */
-  pause(reason: Exclude<PauseReason, "crash">): Promise<RunState>;
+  pause(reason: Exclude<PauseReason, "crash" | "blocked">): Promise<RunState>;
 }
 
 const MAX_LOGS = 2000;
@@ -313,6 +328,13 @@ export function mutates(cfg: ResolvedConfig): boolean {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref?.());
 
+/** Where the run's work is (for the triage agent): its sandbox's worktree, else the project. */
+function runWorktree(ctx: RunContext): string | undefined {
+  const sb = (ctx.sandbox ?? ctx.sandboxes?.none ?? Object.values(ctx.sandboxes ?? {})[0]) as { worktreePath?: unknown } | undefined;
+  if (typeof sb?.worktreePath === "string") return sb.worktreePath;
+  return ctx.env.REPO_PATH?.trim() || undefined;
+}
+
 export function startRun(opts: StartRunOptions): RunHandle {
   const { flow, blocks, env, runners } = opts;
   const flows = opts.flows?.some((f) => f.id === flow.id) ? opts.flows : [...(opts.flows ?? []), flow];
@@ -370,7 +392,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
    */
   const resumeQueues = new Map<string, QueueItem[]>();
   /** Interrupted node keys → what their re-run continues from (handed out once, see `takeInterrupted`). */
-  const interruptedNodes = new Map<string, { session?: AgentSessionRef }>();
+  const interruptedNodes = new Map<string, RerunFrom>();
   if (cont) {
     const prefixOf = (k: string) => k.slice(0, k.lastIndexOf("/") + 1);
     for (const [p, q] of Object.entries(cont.queues ?? {})) resumeQueues.set(p, q.map((s) => ({ nodeId: s.nodeId, inputs: { ...s.inputs } })));
@@ -381,7 +403,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
       const q = resumeQueues.get(p) ?? [];
       q.unshift({ nodeId: k.slice(p.length), inputs: { ...(ns.inputs ?? {}) }, again: true });
       resumeQueues.set(p, q);
-      interruptedNodes.set(k, { session: ns.session });
+      // A step that failed (held by recovery) reviews its work against the failure instead of "you were interrupted".
+      interruptedNodes.set(k, { session: ns.session, ...(ns.failure ? { prompt: reviewPrompt(ns.failure.cause, ns.failure.message) } : {}) });
     }
     // No queues journaled at all (it died before its first journal write): it starts from the beginning again.
     if (cont.queues && !resumeQueues.has("")) resumeQueues.set("", []);
@@ -422,6 +445,17 @@ export function startRun(opts: StartRunOptions): RunHandle {
   let pausing: PauseReason | undefined;
   /** Set by `cancel` (its abort may wait for a delivery in flight): no new step starts. */
   let stopping = false;
+  /** Why a step failed: the cause `stopNode` stopped it with, else what its error looks like (see shared/recovery.ts). */
+  const failureCause = (key: string, err: unknown): FailureCause => stopOf(key)?.cause ?? classifyFailure(err);
+  /** The run's Recovery setting (its own flow's); recovery needs a triage runner — without one a failure fails the run. */
+  const recovery = runners.triage ? recoverySettings(flow, flows, blocks) : undefined;
+  const wait = (ms: number) =>
+    ms <= 0
+      ? Promise.resolve()
+      : Promise.race([
+          (opts.sleep ?? sleep)(ms),
+          new Promise<void>((r) => (ctx.abort.signal.aborted ? r() : ctx.abort.signal.addEventListener("abort", () => r(), { once: true }))),
+        ]);
   const halted = () => ctx.abort.signal.aborted || stopping || !!pausing;
   /** Irreversible steps in flight (see `RunContext.deliver`). */
   const delivering = new Set<Promise<unknown>>();
@@ -762,7 +796,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
         run.steps = steps;
         const k = key(nodeId);
         const node = byId.get(nodeId)!;
-        const cfg = resolveNode(node, blocks);
+        // Triage notes for this step (recovery `resume`) are part of its instructions for the rest of the run.
+        const cfg = withTriageNotes(resolveNode(node, blocks), run.recovery?.[k]);
         const ns = run.nodes[k];
         if (ns.restored) {
           // A restored step reached again (e.g. a loop back to it): it runs for real now.
@@ -808,7 +843,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         };
 
         try {
-          let result: NodeResult;
+          let result!: NodeResult;
           let branch: BranchHandle | undefined;
           try {
             if (cfg.kind === "trigger") {
@@ -908,24 +943,98 @@ export function startRun(opts: StartRunOptions): RunHandle {
               result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(nctx, node, cfg, inputs));
             }
           } catch (e) {
-            if (pausing && (ctx.abort.signal.aborted || (e as Error).message === "Run paused")) {
-              // Cut off by a pause: this attempt runs again when the run continues.
-              ns.interrupted = mutates(cfg) ? "mutation" : "plain";
-              ns.error = undefined;
+            const message = (e as Error).message;
+            /** Cut off by a pause: this attempt runs again when the run continues. Stopped: it's over. */
+            const halt = () => {
+              if (pausing) {
+                ns.interrupted = mutates(cfg) ? "mutation" : "plain";
+                ns.error = undefined;
+              } else {
+                ns.status = "idle";
+                ns.error = "Stopped";
+              }
+            };
+            if (pausing && (ctx.abort.signal.aborted || message === "Run paused")) {
+              ns.failure = undefined;
+              halt();
               return {};
             }
             if (ctx.abort.signal.aborted || stopping) {
-              ns.status = "idle";
-              ns.error = "Stopped";
+              halt();
               return {};
             }
             const stop = stopOf(k);
-            ns.status = "failed";
-            ns.finishedAt = Date.now();
-            ns.error = stop?.message ?? (e as Error).message;
-            // Why it failed: stopped by `stopNode` (its cause), else the block's own error.
-            ns.failure = { cause: stop?.cause ?? "error", message: ns.error, at: ns.finishedAt };
-            throw new Error(`${label(nodeId)}: ${ns.error}`);
+            ns.failure = { cause: failureCause(k, e), message: stop?.message ?? message, at: Date.now() };
+            ns.error = stop?.message ?? message;
+            // What happens next is decided in one place (backend/recovery.ts). A subflow's own steps were already
+            // through recovery; a run being stopped or paused is never retried.
+            let next: AfterFailure = { kind: "fail" };
+            if (recovery && cfg.kind !== "subflow" && !halted()) {
+              journal();
+              // Journaled once recovery did something (recovery off leaves no trace).
+              const history = run.recovery?.[k] ?? { cycles: 0, history: [] };
+              try {
+                next = await decideAfterFailure(
+                  {
+                    settings: recovery,
+                    triage: runners.triage,
+                    signal: ctx.abort.signal,
+                    run,
+                    nodeKey: k,
+                    flow: g,
+                    blocks,
+                    inputs,
+                    cwd: runWorktree(ctx),
+                    canHold: !opts.parent,
+                    log: (level, msg) => ctx.log(level, msg, k),
+                  },
+                  node,
+                  cfg,
+                  ns.failure,
+                  history,
+                );
+              } catch (e2) {
+                if (!halted()) ctx.log("warn", `Recovery failed: ${(e2 as Error).message}`, k);
+              }
+              if (history.history.length) (run.recovery ??= {})[k] = history;
+              if (next.kind === "retry") await wait(next.delayMs);
+              if (halted()) {
+                halt();
+                journal();
+                return {};
+              }
+            }
+            if (next.kind === "fail") {
+              ns.status = "failed";
+              ns.finishedAt = Date.now();
+              throw new Error(`${label(nodeId)}: ${ns.error}`);
+            }
+            if (next.kind === "hold") {
+              // Paused for a human (part 1's pause): Continue runs this step again, reviewing against the failure.
+              ns.interrupted = mutates(cfg) ? "mutation" : "plain";
+              pausing = "blocked";
+              run.pauseReason = "blocked";
+              run.hold = { reason: "blocked", guard: next.guard, nodeKey: k, problems: [next.reason], at: Date.now() };
+              // Like the server's holds (`hold-<reason>`): dismissed when the run is continued.
+              ctx.flag("error", `Held at ${label(nodeId)} — ${GUARD_TEXT[next.guard]}: ${next.reason}`, { nodeKey: k }).id = "hold-blocked";
+              setPhase("pausing");
+              return {};
+            }
+            if (next.kind === "retry") {
+              // The same step again (it was counted when it started); an agent continues its session or starts fresh.
+              if (next.session === "resume") interruptedNodes.set(k, { session: ns.session, prompt: next.prompt });
+              else if (next.session === "fresh") interruptedNodes.set(k, { prompt: next.prompt, fresh: true });
+              else interruptedNodes.delete(k);
+              if (next.session !== "resume") ns.session = undefined;
+              const again: NodeIO = next.task !== undefined ? { ...inputs, artifact: next.task } : inputs;
+              queue.unshift({ nodeId, inputs: again, again: true });
+              journalQueues();
+              journal();
+              continue;
+            }
+            // Skipped by triage: it goes on as if it finished with the output triage gave.
+            ctx.log("warn", `Skipped after its failure — the flow goes on${next.output !== undefined ? " with the output triage gave" : ""}`, k);
+            result = { outputs: next.output !== undefined ? { artifact: next.output } : {} };
           }
 
           for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
@@ -956,6 +1065,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
           ns.outputs = outputs;
           ns.status = "done";
           ns.finishedAt = Date.now();
+          ns.failure = undefined;
+          if (run.recovery?.[k]) run.recovery[k].retries = 0;
           run.stalls = 0;
           if (exit !== undefined) ns.exit = exit;
           if (outputs.artifact !== undefined) opts.saveArtifact?.(run.id, k, ns.executions, outputs.artifact);
@@ -1079,7 +1190,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
       flushActivity();
       if (paused) {
         // Not finished: the journal (phase, active steps, queues) is what continuing starts from.
-        ctx.log("warn", `⏸ Paused — ${PAUSE_REASON_TEXT[pausing!]}. It continues where it was when Sandflow starts again.`);
+        if (pausing === "blocked") ctx.log("warn", `⏸ Held — ${run.hold?.problems[0] ?? PAUSE_REASON_TEXT.blocked}. Continue runs ${run.hold?.nodeKey ?? "the step"} again; Stop ends the run.`);
+        else ctx.log("warn", `⏸ Paused — ${PAUSE_REASON_TEXT[pausing!]}. It continues where it was when Sandflow starts again.`);
         setPhase("paused");
       } else {
         run.finishedAt = Date.now();

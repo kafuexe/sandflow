@@ -11,6 +11,7 @@ import { runAuto } from "../backend/runners/auto";
 import { runIntegration } from "../backend/runners/integration";
 import { runScript } from "../backend/runners/script";
 import { startAppServer, type AppServer } from "../backend/server";
+import { claudeTriage } from "../backend/triage";
 import type { UpdateSettings } from "../shared/types";
 
 const { autoUpdater } = electronUpdater;
@@ -133,7 +134,7 @@ async function start() {
     bundledSandboxImage: app.isPackaged
       ? path.join(process.resourcesPath, "sandbox", "sandflow-agent.tar.gz")
       : path.join(appRoot, "build", "sandbox", "sandflow-agent.tar.gz"),
-    runners: { auto: runAuto, ai: runAi, script: runScript, integration: runIntegration },
+    runners: { auto: runAuto, ai: runAi, script: runScript, integration: runIntegration, triage: claudeTriage },
     // Done on every start rather than by the installer: the app starts right after an install and after every
     // (silent) update, runs as the user whose ~/.claude it is, and knows its data folder.
     claudeCode: {

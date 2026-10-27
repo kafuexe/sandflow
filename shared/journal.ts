@@ -33,6 +33,7 @@ export const PAUSE_REASON_TEXT: Record<PauseReason, string> = {
   quit: "Sandflow was closed",
   update: "Sandflow was updated",
   crash: "Sandflow stopped unexpectedly",
+  blocked: "a failed step needs you",
 };
 
 /** The status the UI shows for a phase (`waiting` keeps meaning "needs your answer"). */

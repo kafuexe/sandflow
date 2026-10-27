@@ -45,11 +45,16 @@ function describeRun(run: RunState): string {
   if (run.prompt?.trim()) lines.push(`Prompt: ${clip(run.prompt.trim(), 300)}`);
   if (run.error) lines.push(`Error: ${run.error}`);
   if (run.pendingQuestion) lines.push(`Waiting for an answer from ${run.pendingQuestion.nodeId}: ${run.pendingQuestion.question}`);
+  if (run.hold) lines.push(`Held (${run.hold.reason}${run.hold.guard ? `: ${run.hold.guard}` : ""}${run.hold.nodeKey ? ` at ${run.hold.nodeKey}` : ""}): ${run.hold.problems.join("; ")} — continue it from Sandflow (Continue) or stop it`);
   const flags = (run.flags ?? []).filter((f) => !f.dismissed);
   if (flags.length) lines.push("Flags:", ...flags.map((f) => `- [${f.severity}] ${f.message}${f.nodeKey ? ` (${f.nodeKey})` : ""}`));
   lines.push("Steps:");
   for (const [key, ns] of Object.entries(run.nodes)) {
     lines.push(`- ${key}: ${ns.status}${ns.executions > 1 ? ` ×${ns.executions}` : ""}${ns.restored ? " (copied from the resumed run)" : ""}${ns.error ? ` — ${ns.error}` : ""}`);
+    const rec = run.recovery?.[key];
+    if (rec?.history.length) {
+      lines.push(`  Recovery (${rec.cycles} cycle${rec.cycles === 1 ? "" : "s"}): ${rec.history.map((h) => `${h.cause} → ${h.decision}${h.guard ? ` (${h.guard})` : ""}`).join(", ")}`);
+    }
     if (ns.outputs?.artifact && (ns.status === "done" || ns.status === "failed")) lines.push(`  ${clip(ns.outputs.artifact, OUTPUT_PREVIEW).replace(/\n/g, "\n  ")}`);
   }
   if (run.result?.outputs?.artifact) lines.push(`Result${run.result.exit ? ` (${run.result.exit})` : ""}: ${clip(run.result.outputs.artifact, OUTPUT_PREVIEW * 2)}`);
@@ -96,8 +101,9 @@ export function runTools(runs: McpRuns): McpTool[] {
       name: "watch_run",
       description:
         "Wait until a run has news after the cursor, then return it as JSON: {status, events, cursor, ended}. " +
-        "Events: step finished / failed, a question waiting for an answer, a flag, the run interrupted / paused / continuing / done / failed, " +
+        "Events: step finished / failed, a question waiting for an answer, a flag, what recovery did after a step failed (retry / resume / rescope / skip / blocked / hold, with the cause), the run interrupted / paused / continuing / done / failed, " +
         "and supervisor events (a step silent / stuck / over its time limit / looping / its container gone, a reminder of an unanswered question, the overseer's verdicts). " +
+        "A run held by recovery (phase paused, `hold`) waits for a human to fix the cause and press Continue. " +
         "Pass the returned cursor as `after` next time (omit it to get everything from the start). Returns after ~9 minutes with timedOut " +
         "and no events if nothing happened — just call it again. Events are kept in the run, so nothing is missed between calls.",
       unscopedOnly: true,
@@ -127,6 +133,7 @@ export function runTools(runs: McpRuns): McpTool[] {
               status: run.status,
               ...(j.phase ? { phase: j.phase } : {}),
               ...(run.pendingQuestion ? { pendingQuestion: { node: run.pendingQuestion.nodeId, question: run.pendingQuestion.question } } : {}),
+              ...(run.hold ? { hold: run.hold } : {}),
               events: r.events,
               cursor: r.cursor,
               ended,

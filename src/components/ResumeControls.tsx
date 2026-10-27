@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 import { nodeLabel } from "../../shared/resolve";
 import { runNodeLabel } from "../../shared/subflow";
 import { PAUSE_REASON_TEXT, isPaused } from "../../shared/journal";
+import { GUARD_TEXT } from "../../shared/recovery";
+import { RecoveryHistory } from "./Recovery";
 import { canRestartAt, planResume, resumeBlocker, type ResumeResult } from "../../shared/resume";
 import type { RunState } from "../../shared/types";
 
@@ -30,6 +32,7 @@ const HOLD_TEXT = {
   manual: "This flow's interrupted runs wait for you (Inputs → Continue interrupted runs automatically is off).",
   loop: "It was continued several times without a step finishing, so it isn't continued automatically any more.",
   corrupt: "Its journal can't be read, so it can't be continued.",
+  blocked: "Recovery held it at a failed step:",
 };
 
 /**
@@ -80,6 +83,16 @@ export function ContinueBox({
           {hold && (
             <div className="space-y-1 text-amber-300">
               <p>{HOLD_TEXT[hold.reason]}</p>
+              {hold.reason === "blocked" && (
+                <div className="space-y-1">
+                  <p>
+                    {hold.nodeKey ? runNodeLabel(hold.nodeKey, flows.find((f) => f.id === run.flowId), flows, blocks) : "A step"}
+                    {hold.guard ? ` — ${GUARD_TEXT[hold.guard]}` : ""}: {hold.problems.join("; ")}
+                  </p>
+                  <p className="text-muted-foreground">Fix the cause, then Continue runs that step again (it first reviews its own work); Stop ends the run.</p>
+                  {hold.nodeKey && <RecoveryHistory rec={run.recovery?.[hold.nodeKey]} />}
+                </div>
+              )}
               {hold.reason === "validation" && (
                 <ul className="list-disc space-y-0.5 pl-4">
                   {hold.problems.map((p) => (

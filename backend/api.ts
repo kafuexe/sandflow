@@ -36,6 +36,7 @@ import { createChatService, type AssistantRunner } from "./chats";
 import { syncClaudeCode, type ClaudeCodeOptions, type ClaudeCodeStatus } from "./claudeCode";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
 import { startRun, type NodeRunner, type RunHandle, type RunIntegrations, type RunPacks } from "./engine";
+import type { TriageRunner } from "./recovery";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { checkContinue, markCrashed, repairRun, runBranch } from "./continue";
@@ -106,7 +107,7 @@ function send(res: ServerResponse, status: number, body: unknown) {
 
 export type Api = Handler & {
   /** Pause every active run (quit / update) — they continue when Sandflow starts again — and stop the services. */
-  shutdown(timeoutMs?: number, reason?: Exclude<PauseReason, "crash">): Promise<void>;
+  shutdown(timeoutMs?: number, reason?: Exclude<PauseReason, "crash" | "blocked">): Promise<void>;
   /** The continue pass run at start (interrupted runs are found, checked and continued): settles once it's done. */
   ready: Promise<void>;
   /** Where the server listens ("127.0.0.1:<port>"): writes mcp.json before any request names the host. */
@@ -135,7 +136,7 @@ export interface ApiOptions {
 
 export function createApi(
   storage: Storage,
-  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner },
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner; triage?: TriageRunner },
   opts: ApiOptions = {},
 ): Api {
   const skills = createSkillStore(storage.dir, opts.bundledSkillsDir, storage.packs);
@@ -695,6 +696,8 @@ export function createApi(
       if (shuttingDown) return;
       if (readLock(runsDir, run.id) && !acquireAndRelease(run.id)) continue;
       const flow = data.flows.find((f) => f.id === run.flowId);
+      // Held by recovery at a failed step: it waits for you (Continue runs that step again).
+      if (run.hold?.reason === "blocked") continue;
       if (flow?.continueAutomatically === false) {
         if (run.hold?.reason !== "manual") {
           hold(run, { reason: "manual", problems: ["This flow's runs aren't continued automatically"] }, `Paused (${PAUSE_REASON_TEXT[run.pauseReason ?? "crash"].toLowerCase()}) — press Continue to carry on`);

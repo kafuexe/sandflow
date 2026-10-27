@@ -109,7 +109,12 @@ export interface TreeResult {
   stderr: string;
   /** Why it was killed ("cancelled", "timed out after 30s", …), if it was. */
   killed?: string;
+  /** The signal that ended it when nobody here killed it (a crash: SIGSEGV, SIGKILL from the OOM killer…). */
+  signal?: string;
 }
+
+/** How a command that failed ended, for its error: "code N", or "signal SIGSEGV" (a crash — see shared/recovery.ts). */
+export const exitText = (r: Pick<TreeResult, "code" | "signal">): string => (r.signal ? `was killed by signal ${r.signal}` : `exited with code ${r.code}`);
 
 export interface RunTreeOptions {
   cwd?: string;
@@ -164,6 +169,7 @@ export function runTree(cmd: string, args: string[] | null, o: RunTreeOptions = 
     let killed: string | undefined;
     let settled = false;
     let exitCode: number | null = null;
+    let exitSignal: string | undefined;
     let graceTimer: NodeJS.Timeout | undefined;
 
     const finish = (code: number | null) => {
@@ -173,7 +179,7 @@ export function runTree(cmd: string, args: string[] | null, o: RunTreeOptions = 
       clearTimeout(graceTimer);
       o.signal?.removeEventListener("abort", onAbort);
       if (partial.trim() && o.onLine) o.onLine(partial);
-      resolve({ code: code ?? 1, stdout, stderr, killed });
+      resolve({ code: code ?? 1, stdout, stderr, killed, ...(code === null && exitSignal && !killed ? { signal: exitSignal } : {}) });
     };
     const kill = (why: string) => {
       if (killed || settled) return;
@@ -222,9 +228,13 @@ export function runTree(cmd: string, args: string[] | null, o: RunTreeOptions = 
       o.signal?.removeEventListener("abort", onAbort);
       reject(e);
     });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       exitCode = code;
+      exitSignal = signal ?? undefined;
     });
-    child.on("close", (code) => finish(code));
+    child.on("close", (code, signal) => {
+      exitSignal ??= signal ?? undefined;
+      finish(code);
+    });
   });
 }

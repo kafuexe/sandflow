@@ -13,7 +13,7 @@ import type { FlowNode, IntegrationDef, IntegrationInfo, NodeIO, ResolvedConfig 
 import { cmdLine, resolveCli } from "../chats";
 import type { NodeResult, RunContext } from "../engine";
 import { tail } from "../prompt";
-import { runTree, type TreeResult } from "../proc";
+import { exitText, runTree, type TreeResult } from "../proc";
 
 /** stdout kept for the artifact (the log gets every line). */
 const STDOUT_TAIL = 200_000;
@@ -133,7 +133,7 @@ export async function runIntegration(ctx: RunContext, node: FlowNode, cfg: Resol
     exit = action.failExit;
     flags.push({ severity: "warning", message: `${action.name} exited with code ${r.code}`, details: tail(r.stderr.trim() || r.stdout.trim(), 4000) });
   } else {
-    throw new Error(`${def.command} exited with code ${r.code}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
+    throw new Error(`${def.command} ${exitText(r)}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
   }
 
   const out = { ...vars, stdout: r.stdout.trim(), stderr: r.stderr.trim(), code: String(r.code), ...outputMatches(action, `${r.stdout}\n${r.stderr}`) };

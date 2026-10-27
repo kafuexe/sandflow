@@ -46,6 +46,10 @@ lost, events are kept in the run). Report as you go, briefly:
 - `phase` `interrupted` / `paused` — Sandflow stopped (crash, quit, update) mid-run. Say so; it continues on its own
   when Sandflow starts again (unless that's turned off for the flow). Keep watching.
 - `phase` `continuing` — the run picked up where it left off (`attempt` counts the continuations). Say so.
+- `recovery` — a step failed and Sandflow's recovery acted on it: `cause` (error, crash, transient, timeout, stuck,
+  sandbox), then `decision` — an automatic or triage `retry` / `resume` / `rescope`, a `skip`, or `blocked` / `hold`
+  with a `guard`. Mention retries briefly. A hold pauses the run (`phase` `paused`, `hold` in the result): tell the
+  user what's needed (`reason`) — it waits until they fix it and press Continue in Sandflow (or stop it). Keep watching.
 - `end`, or `phase` `done` / `failed` / `cancelled` — the run is over.
 
 When it ends, `get_run` and give the user the outcome: status, what each step produced (the last step's output is
