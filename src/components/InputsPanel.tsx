@@ -10,6 +10,7 @@ import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { ENV_NAME_RE, flowRequirements, isSecretName, PROJECT_ENV, startsItself } from "../../shared/resolve";
 import { missingInputs } from "../../shared/validate";
+import { FlowRecoverySetting } from "./Recovery";
 import { FlowContinueSwitch, FlowRunOn } from "./RunOnSelect";
 
 /** Inputs still missing for the current flow (drives the Run button). */
@@ -93,6 +94,7 @@ export function InputsPanel() {
 
           {!flow.pack && <FlowRunOn flow={flow} />}
           {!flow.pack && <FlowContinueSwitch flow={flow} />}
+          {!flow.pack && <FlowRecoverySetting flow={flow} />}
 
           <section className="space-y-3">
             <div className="text-sm font-medium">Environment variables</div>

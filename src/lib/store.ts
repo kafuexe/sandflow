@@ -7,6 +7,7 @@ import type {
   EnvValues,
   Flow,
   FlowColor,
+  FlowRecovery,
   FlowEdge,
   FlowNode,
   RunOn,
@@ -82,6 +83,8 @@ interface State {
   setFlowRunOn(id: string, runOn: RunOn | undefined): void;
   /** The flow's "Continue interrupted runs automatically" switch (default on). */
   setFlowContinueAutomatically(id: string, on: boolean): void;
+  /** Change the flow's Recovery setting (fields set to undefined go back to their defaults). */
+  setFlowRecovery(id: string, patch: Partial<FlowRecovery>): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
   addNode(blockId: string, position: { x: number; y: number }, data?: Partial<FlowNode["data"]>): void;
@@ -359,6 +362,21 @@ export const useStore = create<State>((set, get) => {
     setFlowContinueAutomatically(id, on) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : on ? (({ continueAutomatically: _, ...rest }) => rest)(f) : { ...f, continueAutomatically: false })) }), "flows");
+    },
+    setFlowRecovery(id, patch) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      patchData(
+        (d) => ({
+          ...d,
+          flows: d.flows.map((f) => {
+            if (f.id !== id) return f;
+            const merged = Object.fromEntries(Object.entries({ ...f.recovery, ...patch }).filter(([, v]) => v !== undefined)) as FlowRecovery;
+            const { recovery: _, ...rest } = f;
+            return Object.keys(merged).length ? { ...rest, recovery: merged } : rest;
+          }),
+        }),
+        "flows",
+      );
     },
     async continueRun(runId, repair) {
       // Repair adopts the flow as saved: write pending edits first.

@@ -10,6 +10,7 @@ import { runNodeLabel } from "../../shared/subflow";
 import type { NodeRunStatus, RunState, RunStatus, TriggerEvent } from "../../shared/types";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
+import { RecoveryHistory } from "./Recovery";
 import { ContinueBox, RerunFromHere, ResumedFrom, RetryBox } from "./ResumeControls";
 import { ActivityFeed, ActivityFilterBar, CollapsibleSection, JumpButton, useActivityFilter, useFollow } from "./AgentActivity";
 
@@ -163,6 +164,11 @@ export function RunPanel() {
               <span className="flex-1 truncate">{label(id)}</span>
               {s.routedTo && <span className="truncate text-[10px] text-emerald-400">→ {label(prefixOf(id) + s.routedTo)}</span>}
               {s.exit && <span className="truncate text-[10px] text-violet-300">→ {s.exit}</span>}
+              {(run.recovery?.[id]?.history.length ?? 0) > 0 && (
+                <span className="text-[10px] text-amber-300" title="Recovery acted on this step — see its details">
+                  ↻{run.recovery![id].history.length}
+                </span>
+              )}
               {s.restored ? (
                 <span className="text-[10px] text-muted-foreground" title="Kept from the run this one resumed (not run again)">kept</span>
               ) : (
@@ -179,6 +185,10 @@ export function RunPanel() {
             </div>
             <RerunFromHere run={run} nodeId={picked} onResume={(from) => resumeRun(run.id, from)} />
             {detail.error && <div className="text-xs text-red-400">{detail.error}</div>}
+            {detail.failure && detail.status !== "done" && (
+              <div className="text-[11px] text-muted-foreground">Cause: {detail.failure.cause}</div>
+            )}
+            <RecoveryHistory rec={run.recovery?.[picked]} />
             {(
               [
                 ["Input artifact", detail.inputs?.artifact],
