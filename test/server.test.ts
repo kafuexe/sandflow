@@ -77,7 +77,7 @@ describe("app server", () => {
     expect(list.filter((s) => s.file?.store !== "pack").map((s) => s.name)).toEqual(["hello"]);
   });
 
-  it("cancels active runs on close so sandboxes get torn down", async () => {
+  it("pauses active runs on close (their processes stopped, sandboxes torn down) so they continue on the next start", async () => {
     const dataDir = tmp();
     let aborted = false;
     const waiting: NodeRunner = (ctx) =>
@@ -87,7 +87,7 @@ describe("app server", () => {
           reject(new Error("cancelled"));
         }),
       );
-    server = await startAppServer({ dataDir, webRoot: webRoot(), runners: { auto: waiting, ai: waiting } });
+    server = await startAppServer({ dataDir, webRoot: webRoot(), runners: { auto: waiting, ai: waiting }, pauseGraceMs: 20 });
     const base = `${server.url}/api`;
     const put = (p: string, b: unknown) =>
       fetch(`${base}${p}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
@@ -99,6 +99,7 @@ describe("app server", () => {
     server = undefined;
     expect(aborted).toBe(true);
     const saved = JSON.parse(fs.readFileSync(path.join(dataDir, "runs", `${runId}.json`), "utf8"));
-    expect(saved.status).toBe("cancelled");
+    expect(saved).toMatchObject({ status: "paused", phase: "paused", pauseReason: "quit" });
+    expect(saved.finishedAt).toBeUndefined();
   });
 });

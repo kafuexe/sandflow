@@ -1,7 +1,7 @@
 // /api/* request handler, mounted inside the Vite dev/preview server (see vite.config.ts) — no separate server.
 
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -13,12 +13,17 @@ import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import { planResume, type ResumePlan } from "../shared/resume";
+import { MAX_CONTINUES, PAUSE_REASON_TEXT, TERMINAL_PHASES, isPaused, isSettled } from "../shared/journal";
+import type { PauseReason, RunHold } from "../shared/types";
 import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, IntegrationDef, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
 import { startRun, type NodeRunner, type RunHandle, type RunIntegrations, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
+import { checkContinue, markCrashed, repairRun, runBranch } from "./continue";
+import { acquireRunLock, cleanupLeftovers, readLock, releaseRunLock } from "./journal";
+import { killPidTree } from "./proc";
 import {
   ensureSandboxReady,
   execCli,
@@ -80,7 +85,12 @@ function send(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-export type Api = Handler & { shutdown(timeoutMs?: number): Promise<void> };
+export type Api = Handler & {
+  /** Pause every active run (quit / update) — they continue when Sandflow starts again — and stop the services. */
+  shutdown(timeoutMs?: number, reason?: Exclude<PauseReason, "crash">): Promise<void>;
+  /** The continue pass run at start (interrupted runs are found, checked and continued): settles once it's done. */
+  ready: Promise<void>;
+};
 
 export interface ApiOptions {
   bundledSkillsDir?: string;
@@ -90,6 +100,10 @@ export interface ApiOptions {
   fetchBasePack?: boolean;
   /** The sandbox image bundle shipped with the app; loaded automatically while the default image is missing. */
   bundledSandboxImage?: string;
+  /** Don't look for interrupted runs to continue at start (default: do). */
+  noContinuePass?: boolean;
+  /** How long running steps get to finish when runs pause (default 5 s). */
+  pauseGraceMs?: number;
 }
 
 export function createApi(
@@ -167,11 +181,27 @@ export function createApi(
 
   /** Saves of live runs are throttled per run; a finished run is always saved. */
   const lastSave = new Map<string, number>();
+  const runsDir = path.join(storage.dir, "runs");
+  /** Top-level runs this Sandflow drives — it holds their `runs/<id>.lock` (one driver per run, MEOW DriverLock). */
+  const locked = new Set<string>();
+  const unlock = (id: string) => {
+    if (!locked.delete(id)) return;
+    try {
+      releaseRunLock(runsDir, id);
+    } catch {
+      /* a stale lock is reclaimed next time */
+    }
+  };
+  /** A journal that's been written immediately (node start / finish, phases, sessions): the throttle starts over. */
+  const saveJournal = (s: RunState) => {
+    lastSave.set(s.id, Date.now());
+    storage.saveRun(s);
+  };
   /** Runs still going, with the branch they share (if any) — for the concurrency warning. */
   const branchKeys = new Map<string, string>();
   function activeRuns(): ActiveRunInfo[] {
     return [...runs.values()]
-      .filter((h) => !h.state.finishedAt)
+      .filter((h) => !isSettled(h.state))
       .map((h) => ({ id: h.state.id, flowName: h.state.flowName, startedAt: h.state.startedAt, branchKey: branchKeys.get(h.state.id) }));
   }
 
@@ -181,8 +211,10 @@ export function createApi(
       branchKeys.delete(s.id);
       storage.saveRun(s);
       lastSave.delete(s.id);
-      setTimeout(() => runs.delete(s.id), 10 * 60_000).unref?.();
-      if (!s.parent) drainQueue(s.flowId);
+      // Paused or finished: nothing here drives it any more.
+      unlock(s.id);
+      setTimeout(() => runs.get(s.id) === handle && runs.delete(s.id), 10 * 60_000).unref?.();
+      if (!s.parent && !shuttingDown) drainQueue(s.flowId);
     });
   }
 
@@ -190,7 +222,7 @@ export function createApi(
   function launch(
     flow: Flow,
     data: AppData,
-    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan } } = {},
+    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan }; continueFrom?: RunState } = {},
     notes: string[] = [],
   ): RunHandle & { warning?: string } {
     // Runs are independent (own context, sandbox, branch and logs), so any number may run at once — the one thing
@@ -218,6 +250,9 @@ export function createApi(
       // Stack children are runs of their own: answerable, cancellable and streamed like any other.
       onSpawn: track,
       warnings: warnings.length ? warnings : undefined,
+      onJournal: saveJournal,
+      loadRun: (id) => storage.loadJournal(id).run,
+      ...(opts.pauseGraceMs !== undefined ? { pauseGraceMs: opts.pauseGraceMs } : {}),
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
         if (s.finishedAt || Date.now() - (lastSave.get(s.id) ?? 0) > 2000) {
@@ -228,7 +263,35 @@ export function createApi(
     });
     track(handle);
     if (branchKey) branchKeys.set(handle.state.id, branchKey);
+    const id = handle.state.id;
+    if (!locked.has(id)) {
+      try {
+        if (acquireRunLock(runsDir, id).ok) locked.add(id);
+      } catch (e) {
+        console.warn(`[runs] couldn't take the lock of run ${id}: ${(e as Error).message}`);
+      }
+    }
+    if (!extra.continueFrom) stampCommit(handle.state);
     return Object.assign(handle, { warning });
+  }
+
+  /**
+   * The workspace fingerprint's commit: where the run's branch (or, before it exists, the base) is as the run starts.
+   * Synchronous on purpose: it's read before any step of the run could commit.
+   */
+  function stampCommit(run: RunState) {
+    const repo = run.workspace?.repo;
+    const fp = run.fingerprints?.workspace;
+    if (!repo || !fp || fp.commit || !fs.existsSync(repo)) return;
+    const at = (ref: string) => {
+      try {
+        return execFileSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], { cwd: repo, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 }).trim();
+      } catch {
+        return undefined;
+      }
+    };
+    const commit = at(`refs/heads/${fp.branch}`) ?? at(storage.load().env.BASE_BRANCH?.trim() || "HEAD");
+    if (commit) fp.commit = commit;
   }
 
   // ---------- triggers ----------
@@ -236,7 +299,7 @@ export function createApi(
   /** Triggered runs waiting because their flow is busy (overlap: queue). */
   const queues = new Map<string, { nodeId: string; event: TriggerEvent }[]>();
   const MAX_QUEUE = 50;
-  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.parent && !h.state.finishedAt);
+  const flowBusy = (flowId: string) => [...runs.values()].some((h) => h.state.flowId === flowId && !h.state.parent && !isSettled(h.state));
 
   function startTriggered(flowId: string, nodeId: string, event: TriggerEvent): FireOutcome {
     const data = storage.load();
@@ -407,6 +470,172 @@ export function createApi(
       }
     }
     return launch(flow, env === data.env ? data : { ...data, env }, { prompt, branch: plan.branch, resume: { from: orig, plan } }, notes);
+  }
+
+  // ---------- continuing paused / interrupted runs (see shared/journal.ts, backend/continue.ts) ----------
+
+  let shuttingDown = false;
+  /** Runs being continued right now (the checks await git): a second Continue of the same one is refused. */
+  const continuing = new Set<string>();
+
+  /** Hold a paused run for the user: it doesn't continue by itself; the flag says why. */
+  function hold(run: RunState, h: Omit<RunHold, "at">, flag: string) {
+    run.hold = { ...h, at: Date.now() };
+    if (!run.flags?.some((f) => f.id === `hold-${h.reason}` && !f.dismissed && f.message === flag)) {
+      const f = { id: `hold-${h.reason}`, severity: h.reason === "manual" ? ("warning" as const) : ("error" as const), message: flag, details: h.problems.join("\n"), at: Date.now() };
+      run.flags = [...(run.flags ?? []).filter((x) => x.id !== f.id), f];
+      announceFlag(run, f);
+    }
+    storage.saveRun(run);
+  }
+
+  /**
+   * Continue a paused / interrupted run as the same run, after MEOW's checks (`checkContinue`); `repair` first adopts
+   * what changed instead. `auto` = the continue pass at start (a failed check holds the run instead of throwing).
+   */
+  async function continueRun(id: string, o: { repair?: boolean; auto?: boolean } = {}): Promise<{ run: RunState; changes?: string[] }> {
+    const live = runs.get(id);
+    if (live && !isSettled(live.state)) throw new HttpError(409, "This run is still going");
+    if (continuing.has(id)) throw new HttpError(409, "This run is already being continued");
+    continuing.add(id);
+    let mine = false;
+    try {
+      const j = storage.loadJournal(id);
+      if (j.problem === "missing") throw new HttpError(404, "Run not found");
+      if (j.problem) throw new HttpError(409, `Can't continue: the run's journal is corrupt (${j.problem}) — it's preserved as it is at ${j.file}`);
+      if (j.legacy || !j.run) throw new HttpError(409, "This run was started by an older version of Sandflow, which didn't journal what continuing needs — use Retry instead");
+      const run = j.run;
+      if (run.parent) throw new HttpError(409, "This is a Box Stack task — it continues with the run that started it");
+      if (TERMINAL_PHASES.has(run.phase!)) throw new HttpError(409, `This run has ${run.phase === "done" ? "finished" : run.phase === "failed" ? "failed — use Retry" : "been stopped — use Retry"}`);
+      const lock = locked.has(id) ? { ok: true as const } : acquireRunLock(runsDir, id);
+      if (!lock.ok) throw new HttpError(409, `Another Sandflow${lock.holder ? ` (process ${lock.holder.pid})` : ""} is running this run`);
+      if (!locked.has(id)) {
+        locked.add(id);
+        mine = true;
+      }
+      const data = storage.load();
+      // Not paused: its driver died without saying (we hold the lock now) — a crash.
+      if (!isPaused(run)) markCrashed(run, data);
+      let changes: string[] | undefined;
+      if (o.repair) {
+        try {
+          changes = await repairRun(run, data);
+        } catch (e) {
+          throw new HttpError(409, (e as Error).message);
+        }
+        (run.repairs ??= []).push({ at: Date.now(), changes });
+        run.logs.push({ ts: Date.now(), level: "warn", msg: `Repaired: ${changes.length ? changes.join("; ") : "nothing had changed"}` });
+      }
+      const check = await checkContinue(run, data);
+      if (check.problems.length) {
+        hold(run, { reason: "validation", problems: check.problems, repairable: check.repairable }, `Paused — can't continue as it is: ${check.problems[0]}${check.problems.length > 1 ? ` (+${check.problems.length - 1} more)` : ""}`);
+        throw new HttpError(409, `Can't continue: ${check.problems.join("; ")}`, { problems: check.problems, repairable: check.repairable });
+      }
+      const flow = data.flows.find((f) => f.id === run.flowId)!;
+      // What a crash left behind (its containers, its agents' processes) goes first — only what matches its record.
+      const removed = await cleanupLeftovers(run, exec, killPidTree).catch(() => []);
+      if (removed.length) run.logs.push({ ts: Date.now(), level: "info", msg: `Removed what the interrupted attempt left running: ${removed.join(", ")}` });
+      run.sandboxes = [];
+      run.processes = [];
+      for (const f of run.flags ?? []) if (f.id.startsWith("hold-") || f.id === "interrupted") f.dismissed = true;
+      // Steps that read BRANCH_NAME work on the branch the run continues, not one set since.
+      const branch = runBranch(run);
+      const explicit = data.env.BRANCH_NAME?.trim();
+      const env = explicit && explicit !== branch && run.workspace?.repo ? { ...data.env, BRANCH_NAME: branch } : data.env;
+      const h = launch(flow, env === data.env ? data : { ...data, env }, { continueFrom: run, prompt: run.prompt ?? "", branch });
+      mine = false; // the run holds it now (released when it pauses or ends)
+      return { run: h.state, changes };
+    } finally {
+      continuing.delete(id);
+      if (mine) unlock(id);
+    }
+  }
+
+  /** Stop a paused run that isn't loaded: it's cancelled (and never continued). */
+  function cancelPaused(id: string): RunState | undefined {
+    const j = storage.loadJournal(id);
+    const run = j.run;
+    if (!run || j.legacy || TERMINAL_PHASES.has(run.phase!)) return undefined;
+    const lock = locked.has(id) ? { ok: true as const } : acquireRunLock(runsDir, id);
+    if (!lock.ok) throw new HttpError(409, "Another Sandflow is running this run — stop it there");
+    try {
+      run.phase = "cancelled";
+      run.status = "cancelled";
+      (run.transitions ??= []).push({ phase: "cancelled", at: Date.now(), attempt: run.attempt ?? 1 });
+      run.finishedAt = Date.now();
+      run.hold = undefined;
+      run.queues = undefined;
+      run.logs.push({ ts: Date.now(), level: "warn", msg: "Run stopped while paused — it won't be continued" });
+      storage.saveRun(run);
+      return run;
+    } finally {
+      if (!locked.has(id)) releaseRunLock(runsDir, id);
+    }
+  }
+
+  /**
+   * At start (MEOW tick reconcile + `resume --continue`): every journal not in a terminal phase is looked at. One that
+   * was going with no live driver crashed → interrupted. Paused / interrupted runs are checked and continued — unless
+   * their flow's "Continue interrupted runs automatically" is off, or they keep dying without progress.
+   */
+  async function continuePass() {
+    const data = storage.load();
+    const max = data.settings.maxContinues ?? MAX_CONTINUES;
+    const open: RunState[] = [];
+    for (const id of storage.runIds()) {
+      const j = storage.loadJournal(id);
+      // Corrupt journals are left as they are (listed with a flag); old runs are never continued.
+      if (j.run && !j.legacy && !TERMINAL_PHASES.has(j.run.phase!) && !runs.has(id)) open.push(j.run);
+    }
+    const byId = new Map(open.map((r) => [r.id, r]));
+    const crashed = new Set<string>();
+    for (const run of open.filter((r) => !r.parent && !isPaused(r))) {
+      const lock = acquireRunLock(runsDir, run.id);
+      if (!lock.ok) continue; // another Sandflow on this data folder drives it
+      try {
+        storage.saveRun(markCrashed(run, data));
+        crashed.add(run.id);
+      } finally {
+        releaseRunLock(runsDir, run.id);
+      }
+    }
+    // A crashed run's stack tasks crashed with it (they continue with it).
+    const rootOf = (r: RunState) => {
+      let cur = r;
+      for (let i = 0; i < 20 && cur.parent && byId.has(cur.parent.runId); i++) cur = byId.get(cur.parent.runId)!;
+      return cur.parent ? cur.parent.runId : cur.id;
+    };
+    for (const c of open.filter((r) => r.parent && !isPaused(r))) {
+      if (crashed.has(rootOf(c)) || (!byId.has(rootOf(c)) && !readLock(runsDir, rootOf(c)))) storage.saveRun(markCrashed(c, data));
+    }
+    for (const run of open.filter((r) => !r.parent && isPaused(r))) {
+      if (shuttingDown) return;
+      if (readLock(runsDir, run.id) && !acquireAndRelease(run.id)) continue;
+      const flow = data.flows.find((f) => f.id === run.flowId);
+      if (flow?.continueAutomatically === false) {
+        if (run.hold?.reason !== "manual") {
+          hold(run, { reason: "manual", problems: ["This flow's runs aren't continued automatically"] }, `Paused (${PAUSE_REASON_TEXT[run.pauseReason ?? "crash"].toLowerCase()}) — press Continue to carry on`);
+        }
+        continue;
+      }
+      if (run.hold?.reason === "loop") continue; // waits for Continue
+      if ((run.stalls ?? 0) >= max) {
+        hold(run, { reason: "loop", problems: [`Continued ${run.stalls} times without a step finishing`] }, `Not continued automatically: it was continued ${run.stalls} times without a step finishing — press Continue to try again`);
+        continue;
+      }
+      try {
+        await continueRun(run.id, { auto: true });
+        console.log(`[runs] continued run ${run.id} (${run.flowName})`);
+      } catch (e) {
+        console.warn(`[runs] run ${run.id} stays paused: ${(e as Error).message}`);
+      }
+    }
+  }
+  /** Whether a lock left on a paused run is stale (we can take it); taken locks are released again. */
+  function acquireAndRelease(id: string): boolean {
+    if (!acquireRunLock(runsDir, id).ok) return false;
+    releaseRunLock(runsDir, id);
+    return true;
   }
 
   function getRun(id: string): RunState {
@@ -833,7 +1062,8 @@ export function createApi(
         });
         const push = (s: RunState) => res.write(`event: state\ndata: ${JSON.stringify(s)}\n\n`);
         push(state);
-        if (state.finishedAt) return res.end();
+        // Finished or paused: nothing more comes (a continued run is watched again).
+        if (isSettled(state)) return res.end();
         let set = listeners.get(state.id);
         if (!set) listeners.set(state.id, (set = new Set()));
         // A finished run can still change once more (e.g. "Run stopped" logged after it ended): the stream is closed
@@ -845,7 +1075,7 @@ export function createApi(
         const fn = (s: RunState) => {
           if (res.writableEnded) return stop();
           push(s);
-          if (s.finishedAt) {
+          if (isSettled(s)) {
             res.end();
             stop();
           }
@@ -875,10 +1105,24 @@ export function createApi(
 
       case "POST /runs/:id/cancel": {
         const h = runs.get(parts[1]);
+        // A paused run (not running here): Stop cancels it for good, so it's never continued.
+        if (!h || isPaused(h.state)) {
+          const stopped = cancelPaused(parts[1]);
+          if (stopped) {
+            runs.delete(parts[1]);
+            return send(res, 200, { ok: true, status: stopped.status });
+          }
+        }
         // Stopping a run that already ended (e.g. a second click on Stop) is fine; an unknown run is not.
         if (!h) return send(res, 200, { ok: true, status: getRun(parts[1]).status });
         h.cancel();
         return send(res, 200, { ok: true, status: h.state.status });
+      }
+
+      case "POST /runs/:id/continue":
+      case "POST /runs/:id/repair": {
+        const r = await continueRun(parts[1], { repair: parts[2] === "repair" });
+        return send(res, 200, { runId: r.run.id, ...(r.changes ? { changes: r.changes } : {}) });
       }
     }
     throw new HttpError(404, `No route ${method} ${url.pathname}`);
@@ -891,21 +1135,27 @@ export function createApi(
       else send(res, 500, { error: (e as Error).message });
     });
   };
-  /** Cancel every active run and wait (bounded) for its cleanup — sandboxes/containers get closed. */
-  handler.shutdown = async (timeoutMs = 15_000) => {
+  /**
+   * Pause every active run (they continue when Sandflow starts again; Stop is the way to cancel one) and wait, bounded,
+   * for them: running steps get a grace period, irreversible ones finish, sandboxes / containers get closed.
+   */
+  handler.shutdown = async (timeoutMs = 45_000, reason = "quit") => {
+    shuttingDown = true;
     offPacks();
     triggers.stop();
     queues.clear();
     await chats.shutdown();
     await webhookServer?.close();
     webhookServer = undefined;
-    const active = [...runs.values()].filter((h) => !h.state.finishedAt);
-    active.forEach((h) => h.cancel());
+    const active = [...runs.values()].filter((h) => !isSettled(h.state));
     await Promise.race([
-      Promise.allSettled(active.map((h) => h.done)),
-      new Promise((r) => setTimeout(r, timeoutMs)),
+      Promise.allSettled(active.map((h) => h.pause(reason))),
+      new Promise((r) => setTimeout(r, timeoutMs).unref?.()),
     ]);
+    // Whatever didn't get to "paused" in time stays "pausing" in its journal: the next start treats it as a crash.
     for (const h of active) storage.saveRun(h.state);
+    for (const id of [...locked]) unlock(id);
   };
+  handler.ready = opts.noContinuePass ? Promise.resolve() : continuePass().catch((e) => console.warn(`[runs] continue pass failed: ${(e as Error).message}`));
   return handler;
 }

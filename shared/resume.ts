@@ -9,6 +9,7 @@
 // the original's trigger event and starting prompt, and works on the original's branch so code changes made by the
 // earlier steps are there.
 
+import { isPaused } from "./journal";
 import { nodeLabel, resolveNode } from "./resolve";
 import type { BlockDef, Flow, NodeIO, NodeRunState, QuestionRecord, RunState } from "./types";
 
@@ -38,8 +39,8 @@ export type ResumeResult = { ok: true; plan: ResumePlan } | { ok: false; problem
 const topOf = (key: string) => key.split("/")[0];
 
 /** Why this run can't be resumed at all (whatever step is picked), or undefined when it can. */
-export function resumeBlocker(run: Pick<RunState, "finishedAt" | "parent" | "workspace">): string | undefined {
-  if (!run.finishedAt) return "The run is still going";
+export function resumeBlocker(run: Pick<RunState, "finishedAt" | "parent" | "workspace" | "phase">): string | undefined {
+  if (!run.finishedAt) return isPaused(run) ? "The run is paused — Continue it instead (it carries on as the same run)" : "The run is still going";
   if (run.parent) return "This is a Box Stack task — resume the run that started it instead";
   if (!run.workspace) return "This run was started by an older version of Sandflow, which didn't record what a resume needs (its branch / workspace). Start a new run instead.";
   return undefined;

@@ -278,7 +278,7 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
 }
 
 /** Blocks whose cut-off attempt may have left files half-changed (MEOW `interrupted_mutation`). */
-function mutates(cfg: ResolvedConfig): boolean {
+export function mutates(cfg: ResolvedConfig): boolean {
   if (cfg.kind === "auto") return cfg.autoAction === "shell" || cfg.autoAction === "create-mr" || cfg.autoAction === "merge-parent";
   return cfg.kind === "ai" || cfg.kind === "manager" || cfg.kind === "script" || cfg.kind === "integration";
 }

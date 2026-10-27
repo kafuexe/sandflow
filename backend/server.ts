@@ -24,13 +24,15 @@ export interface AppServerOptions {
   fetchBasePack?: boolean;
   /** Default 0 = pick a free port. */
   port?: number;
+  /** How long running steps get to finish when runs pause on close (default 5 s). */
+  pauseGraceMs?: number;
 }
 
 export interface AppServer {
   url: string;
   port: number;
-  /** Cancels active runs (so sandboxes are torn down), then stops the server. */
-  close(): Promise<void>;
+  /** Pauses active runs (they continue on the next start; sandboxes are torn down), then stops the server. */
+  close(reason?: "quit" | "update"): Promise<void>;
 }
 
 const MIME: Record<string, string> = {
@@ -51,6 +53,7 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
     bundledSkillsDir: opts.bundledSkillsDir,
     fetchBasePack: opts.fetchBasePack ?? true,
     bundledSandboxImage: opts.bundledSandboxImage,
+    pauseGraceMs: opts.pauseGraceMs,
   });
   const root = path.resolve(opts.webRoot);
   let allowedHosts = new Set<string>();
@@ -97,8 +100,8 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
   return {
     url: `http://127.0.0.1:${port}`,
     port,
-    async close() {
-      await api.shutdown();
+    async close(reason = "quit") {
+      await api.shutdown(undefined, reason);
       server.closeAllConnections(); // SSE streams would otherwise keep it open
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
