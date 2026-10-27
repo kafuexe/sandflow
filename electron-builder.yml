@@ -21,6 +21,9 @@ extraResources:
     to: skills
   - from: packs
     to: packs
+  # Skills for Claude Code (sandflow-flows, sandflow-runs), installed into ~/.claude/skills on start.
+  - from: agent-skills
+    to: agent-skills
   - from: build/sandbox
     to: sandbox
     filter: ["sandflow-agent.tar.gz"]

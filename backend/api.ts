@@ -31,6 +31,7 @@ import type {
   TriggerEvent,
 } from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
+import { syncClaudeCode, type ClaudeCodeOptions, type ClaudeCodeStatus } from "./claudeCode";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
 import { startRun, type NodeRunner, type RunHandle, type RunIntegrations, type RunPacks } from "./engine";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
@@ -96,7 +97,11 @@ function send(res: ServerResponse, status: number, body: unknown) {
   res.end(JSON.stringify(body));
 }
 
-export type Api = Handler & { shutdown(timeoutMs?: number): Promise<void> };
+export type Api = Handler & {
+  shutdown(timeoutMs?: number): Promise<void>;
+  /** Where the server listens ("127.0.0.1:<port>"): writes mcp.json before any request names the host. */
+  noteHost(host: string): void;
+};
 
 export interface ApiOptions {
   bundledSkillsDir?: string;
@@ -106,6 +111,8 @@ export interface ApiOptions {
   fetchBasePack?: boolean;
   /** The sandbox image bundle shipped with the app; loaded automatically while the default image is missing. */
   bundledSandboxImage?: string;
+  /** Desktop app: keep Sandflow registered with Claude Code (Settings → Claude Code integration). */
+  claudeCode?: ClaudeCodeOptions;
 }
 
 export function createApi(
@@ -279,6 +286,22 @@ export function createApi(
     if (branchKey) branchKeys.set(handle.state.id, branchKey);
     return Object.assign(handle, { warning });
   }
+
+  // ---------- Claude Code integration ----------
+
+  let claudeCodeStatus: ClaudeCodeStatus | undefined;
+  /** Syncs one at a time; a change while one runs syncs again after it. */
+  let claudeCodeSync: Promise<void> = Promise.resolve();
+  const claudeCodeEnabled = () => storage.load().settings.claudeCode?.enabled !== false;
+  function syncClaudeCodeIntegration() {
+    const o = opts.claudeCode;
+    if (!o) return;
+    claudeCodeSync = claudeCodeSync.then(async () => {
+      claudeCodeStatus = await syncClaudeCode(o, claudeCodeEnabled());
+      for (const n of claudeCodeStatus.notes) console.log(`[claude-code] ${n}`);
+    }).catch((e: Error) => console.warn(`[claude-code] ${e.message}`));
+  }
+  syncClaudeCodeIntegration();
 
   // ---------- triggers ----------
 
@@ -694,14 +717,20 @@ export function createApi(
 
       case "PUT /settings": {
         const s = await readJson<Settings>(req);
+        const wasOn = claudeCodeEnabled();
         try {
           storage.saveSettings(validateSettings(s));
         } catch (e) {
           throw new HttpError(400, (e as Error).message);
         }
         syncTriggers();
+        if (claudeCodeEnabled() !== wasOn) syncClaudeCodeIntegration();
         return send(res, 200, { ok: true });
       }
+
+      case "GET /claude-code":
+        await claudeCodeSync;
+        return send(res, 200, { available: !!opts.claudeCode, ...(claudeCodeStatus ?? { enabled: claudeCodeEnabled(), notes: [] }) });
 
       case "GET /sandbox/status":
         return send(res, 200, await sandboxImageStatus(storage.load().settings, exec));
@@ -958,6 +987,7 @@ export function createApi(
     });
   };
   /** Cancel every active run and wait (bounded) for its cleanup — sandboxes/containers get closed. */
+  handler.noteHost = noteHost;
   handler.shutdown = async (timeoutMs = 15_000) => {
     offPacks();
     triggers.stop();

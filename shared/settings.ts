@@ -48,6 +48,7 @@ export function validateSettings(s: Settings): Settings {
     if (publicUrl && !/^https?:\/\/\S+$/i.test(publicUrl)) throw new Error("Webhook public URL must be an http(s) URL");
     out.webhooks = { enabled: !!w.enabled, host, port, ...(publicUrl ? { publicUrl } : {}) };
   }
+  if (s.claudeCode) out.claudeCode = { enabled: s.claudeCode.enabled !== false };
   if (s.updates) {
     const mode = s.updates.mode;
     if (!["github", "url", "off"].includes(mode)) throw new Error("Invalid update mode");
