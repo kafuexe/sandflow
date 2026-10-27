@@ -104,7 +104,7 @@ function send(res: ServerResponse, status: number, body: unknown) {
 
 export type Api = Handler & {
   /** Pause every active run (quit / update) — they continue when Sandflow starts again — and stop the services. */
-  shutdown(timeoutMs?: number, reason?: Exclude<PauseReason, "crash">): Promise<void>;
+  shutdown(timeoutMs?: number, reason?: Exclude<PauseReason, "crash" | "blocked">): Promise<void>;
   /** The continue pass run at start (interrupted runs are found, checked and continued): settles once it's done. */
   ready: Promise<void>;
   /** Where the server listens ("127.0.0.1:<port>"): writes mcp.json before any request names the host. */

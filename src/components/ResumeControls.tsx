@@ -30,6 +30,7 @@ const HOLD_TEXT = {
   manual: "This flow's interrupted runs wait for you (Inputs → Continue interrupted runs automatically is off).",
   loop: "It was continued several times without a step finishing, so it isn't continued automatically any more.",
   corrupt: "Its journal can't be read, so it can't be continued.",
+  blocked: "Recovery held it at a failed step:",
 };
 
 /**

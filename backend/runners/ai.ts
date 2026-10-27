@@ -11,7 +11,7 @@ import { agentOrigin, nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/r
 import { hostAgentEnv, resolveRunOn } from "../../shared/runOn";
 import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
 import type { AgentProvider, EnvValues, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
-import type { NodeResult, RunContext } from "../engine";
+import type { NodeResult, RerunFrom, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
 import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider, withAgentEnv } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
@@ -556,25 +556,32 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
    * The first call of the attempt. After an interruption (pause / crash) the agent first continues its own session
    * with "you were interrupted…" (MEOW resumes a session on its first query only); when that session can't be
    * continued (its container is gone, it was never saved, the resume fails) it starts fresh with that message plus
-   * its original task.
+   * its original task. After a failure (recovery) the message says how the previous attempt ended; a recycled
+   * session (`fresh`) starts fresh with it right away.
    */
-  function firstCall(interrupted: { session?: { id: string; where: string } } | undefined): Start {
-    if (!interrupted) return (signal) => runFresh(signal);
-    const recap = (signal: AbortSignal) => runFresh(signal, cfg.maxIterations, INTERRUPTED_PROMPT);
-    const s = interrupted.session;
+  function firstCall(again: RerunFrom | undefined): Start {
+    if (!again) return (signal) => runFresh(signal);
+    const prompt = again.prompt ?? INTERRUPTED_PROMPT;
+    const what = again.prompt ? "This step runs again after its failure" : "This step was interrupted";
+    const recap = (signal: AbortSignal) => runFresh(signal, cfg.maxIterations, prompt);
+    if (again.fresh) {
+      ctx.log("info", `${what} — starting a fresh agent session with its task and a note to check what's already done`, node.id);
+      return recap;
+    }
+    const s = again.session;
     const why =
       !s ? "its session was never saved"
       : !canResumeSessions(agent) ? `${cfg.agent.provider} can't continue a session`
       : s.where !== where ? (s.where === "host" ? "it ran on this computer, now it runs in a container" : "its container is gone")
       : undefined;
     if (why) {
-      ctx.log("warn", `This step was interrupted; its agent session can't be continued (${why}) — starting it again with its task and a note to check what's already done`, node.id);
+      ctx.log("warn", `${what}; its agent session can't be continued (${why}) — starting it again with its task and a note to check what's already done`, node.id);
       return recap;
     }
     return async (signal) => {
-      ctx.log("info", `This step was interrupted — continuing the agent's own session ${s!.id}`, node.id);
+      ctx.log("info", `${what} — continuing the agent's own session ${s!.id}`, node.id);
       try {
-        return await sandbox.run({ ...baseOptions, signal, agent: resumingAgent(agent, s!.id), prompt: INTERRUPTED_PROMPT, maxIterations: 1 });
+        return await sandbox.run({ ...baseOptions, signal, agent: resumingAgent(agent, s!.id), prompt, maxIterations: 1 });
       } catch (e) {
         if (signal.aborted) throw e;
         ctx.log("warn", `Couldn't continue the agent's session ${s!.id} (${tail((e as Error).message, 300)}) — starting it again with its task and a note to check what's already done`, node.id);

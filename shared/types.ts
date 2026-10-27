@@ -352,6 +352,23 @@ export interface Flow {
   color?: FlowColor;
   /** Continue this flow's interrupted runs by themselves when Sandflow starts again (default on). */
   continueAutomatically?: boolean;
+  /** What happens when one of its steps fails (see shared/recovery.ts). Absent = the defaults. */
+  recovery?: FlowRecovery;
+}
+
+/** off: a failed step fails the run (as before recovery existed); triage: retries, then a triage agent decides. */
+export type RecoveryMode = "off" | "triage";
+
+/** A flow's Recovery setting (Inputs tab). */
+export interface FlowRecovery {
+  /** Default: `triage` when the flow has agent blocks, else `off`. */
+  mode?: RecoveryMode;
+  /** The triage agent (Claude Code; empty model = the CLI's default). */
+  agent?: AssistantAgent;
+  /** Triage decisions a step may cost per run before the run is held for you (default 3). */
+  maxRecoveryCycles?: number;
+  /** Automatic retries of a crashed / transient / stuck / timed-out step before triage (default 2). */
+  maxRetries?: number;
 }
 
 /** The curated palette a flow can be tagged with. */
@@ -620,8 +637,48 @@ export type RunStatus = "running" | "waiting" | "paused" | "done" | "failed" | "
 
 /** Where a run is in its life (journaled with every change, see shared/journal.ts). */
 export type RunPhase = "running" | "waiting" | "pausing" | "paused" | "interrupted" | "continuing" | "done" | "failed" | "cancelled";
-/** Why a run paused: Sandflow quit, updated, or stopped without saying (crash, power loss…). */
-export type PauseReason = "quit" | "update" | "crash";
+/** Why a run paused: Sandflow quit, updated, stopped without saying (crash, power loss…), or recovery held it for you. */
+export type PauseReason = "quit" | "update" | "crash" | "blocked";
+
+/** Why a step failed (journaled with the failure; decides what recovery does, see shared/recovery.ts). */
+export type FailureCause = "error" | "timeout" | "stuck" | "crash" | "transient" | "sandbox" | "interrupted";
+
+/** What triage may decide for a failed step. */
+export type RecoveryAction = "retry" | "resume" | "rescope" | "skip" | "blocked";
+
+/** Why recovery held the run for a human instead of going on (MEOW blocker causes). */
+export type RecoveryGuard = "needs-human" | "repeated-decision" | "invalid-decision" | "triage-failed" | "recovery-exhausted";
+
+/** One thing recovery did after a step failed. */
+export interface RecoveryEntry {
+  at: number;
+  cause: FailureCause;
+  message: string;
+  /** What was done: a triage action, an automatic `retry`, `fail` (recovery off / nothing to do) or `hold`. */
+  decision: RecoveryAction | "fail" | "hold";
+  by: "auto" | "triage";
+  reason?: string;
+  notes?: string;
+  /** rescope: the task the step got instead of its input. */
+  task?: string;
+  /** Held: which guard stopped it. */
+  guard?: RecoveryGuard;
+  /** Agent steps run again: whether they continued their own session or started fresh. */
+  session?: "resume" | "fresh";
+  /** Automatic retries: the backoff before it. */
+  delayMs?: number;
+}
+
+/** A step's recovery in this run (journaled: the budget survives a continue). */
+export interface NodeRecovery {
+  /** Triage decisions applied (counted against maxRecoveryCycles). */
+  cycles: number;
+  /** Automatic retries since the step last finished or triage last decided. */
+  retries?: number;
+  /** Triage notes for this step, appended to its instructions for the rest of the run. */
+  notes?: string[];
+  history: RecoveryEntry[];
+}
 
 export interface RunTransition {
   phase: RunPhase;
@@ -687,8 +744,14 @@ export interface StackJournal {
 
 /** Why a paused run waits for you instead of continuing by itself. */
 export interface RunHold {
-  /** validation: something it needs changed (Repair adopts it); manual: the flow's switch is off; loop: continued too often. */
-  reason: "validation" | "manual" | "loop" | "corrupt";
+  /**
+   * validation: something it needs changed (Repair adopts it); manual: the flow's switch is off; loop: continued too
+   * often; blocked: recovery stopped at a failed step and needs you (`guard` says why; Continue runs that step again).
+   */
+  reason: "validation" | "manual" | "loop" | "corrupt" | "blocked";
+  /** blocked: which recovery guard held it, and the step. */
+  guard?: RecoveryGuard;
+  nodeKey?: string;
   problems: string[];
   /** Repair can adopt the current state. */
   repairable?: boolean;
@@ -724,6 +787,8 @@ export interface NodeRunState {
   usage?: NodeUsage[];
   delivery?: NodeDelivery;
   stack?: StackJournal;
+  /** The last failure of this step, and why (see shared/recovery.ts). */
+  failure?: { cause: FailureCause; message: string; at: number };
 }
 
 /** Where a run's agents worked — recorded so the run can be resumed on the same branch. */
@@ -885,6 +950,8 @@ export interface RunState {
   processes?: { pid: number; startedAt: number }[];
   /** What each Repair adopted. */
   repairs?: { at: number; changes: string[] }[];
+  /** What recovery did after steps failed, by node key (see shared/recovery.ts). */
+  recovery?: Record<string, NodeRecovery>;
   startedBy?: RunStartedBy;
 }
 
