@@ -267,6 +267,11 @@ export interface BlockConfig {
   stack?: Partial<StackConfig>;
   /** integration blocks. */
   integration?: IntegrationBlockConfig;
+  /**
+   * Longest a node may run (every kind; inherited like the rest). Unset = no limit, except Shell command (30 min);
+   * 0 = no limit (turns that default off). The supervisor stops a node that exceeds it (failure cause `timeout`).
+   */
+  timeoutSeconds?: number;
 }
 
 export interface BlockDef {
@@ -309,6 +314,7 @@ export interface ResolvedConfig {
   flowOutput: { name: string };
   stack: StackConfig;
   integration: { ref: string; action: string; exits: string[]; options: Record<string, IntegrationValue> };
+  timeoutSeconds?: number;
 }
 
 export interface FlowNodeData {
@@ -352,6 +358,17 @@ export interface Flow {
   color?: FlowColor;
   /** Continue this flow's interrupted runs by themselves when Sandflow starts again (default on). */
   continueAutomatically?: boolean;
+  /** An agent that looks over this flow's running agents now and then (see backend/supervisor.ts). Default off. */
+  overseer?: OverseerSettings;
+}
+
+/** Per flow: the overseer agent (a short, read-only turn on this machine — Claude Code, `claude -p`, no tools). */
+export interface OverseerSettings {
+  enabled: boolean;
+  /** Empty = SUPERVISOR_DEFAULTS.overseerModel (a small model). */
+  model?: string;
+  /** How often it looks, while the run has a running agent (default 300). */
+  everySeconds?: number;
 }
 
 /** The curated palette a flow can be tagged with. */
@@ -379,6 +396,20 @@ export interface Settings {
   webhooks?: WebhookSettings;
   /** Desktop app: register Sandflow's MCP server and skills with Claude Code (default on; off removes them). */
   claudeCode?: { enabled: boolean };
+  /** Settings → Supervisor: the timed check of running runs (defaults: SUPERVISOR_DEFAULTS in shared/supervisor.ts). */
+  supervisor?: SupervisorSettings;
+}
+
+export interface SupervisorSettings {
+  enabled?: boolean;
+  /** How often it looks at every live run. */
+  pollSeconds?: number;
+  /** A node quiet this long gets a warning flag. Unset: 10 min for agents, 15 min for others. */
+  silentAfterSeconds?: number;
+  /** A node quiet this long is stopped (failure cause `stuck`). */
+  stuckAfterSeconds?: number;
+  /** A question unanswered this long gets a reminder (then at most hourly). */
+  remindAfterSeconds?: number;
 }
 
 export interface WebhookSettings {
@@ -700,6 +731,26 @@ export interface NodeIO {
   steer?: string;
 }
 
+/**
+ * Why a node failed: `error` the block itself failed · `timeout` its time limit · `stuck` the supervisor stopped it ·
+ * `crash` a crash-like exit · `transient` OS / network / CLI connection trouble · `sandbox` its container vanished ·
+ * `interrupted` cut off by a pause / crash.
+ */
+export type FailureCause = "error" | "timeout" | "stuck" | "crash" | "transient" | "sandbox" | "interrupted";
+
+/** What the supervisor noticed or did (journaled on the run, reported to watchers as `supervisor` events). */
+export interface SupervisionEntry {
+  at: number;
+  /** Node key it's about, if any. */
+  node?: string;
+  /** The node's execution it was about (overseer limits count per execution). */
+  exec?: number;
+  kind: "silent" | "stuck" | "timeout" | "loop" | "reminder" | "sandbox" | "overseer";
+  detail: string;
+  /** What was done: `stopped`, `steered`, `flagged`, `ignored`… (absent: only noted). */
+  action?: string;
+}
+
 export interface NodeRunState {
   status: NodeRunStatus;
   executions: number;
@@ -724,6 +775,12 @@ export interface NodeRunState {
   usage?: NodeUsage[];
   delivery?: NodeDelivery;
   stack?: StackJournal;
+  /** Why the last attempt failed (see FailureCause). */
+  failure?: { cause: FailureCause; message: string; at: number };
+  /** Its latest sign of life (log line, agent activity) — what the supervisor's liveness check reads. */
+  lastActivityAt?: number;
+  /** Executions in a row that produced exactly the previous execution's output (a loop going nowhere). */
+  repeats?: number;
 }
 
 /** Where a run's agents worked — recorded so the run can be resumed on the same branch. */
@@ -886,6 +943,9 @@ export interface RunState {
   /** What each Repair adopted. */
   repairs?: { at: number; changes: string[] }[];
   startedBy?: RunStartedBy;
+  /** What the supervisor noticed / did, oldest first (capped; `supervisionDropped` counts what was cut off the front). */
+  supervision?: SupervisionEntry[];
+  supervisionDropped?: number;
 }
 
 // ---------- "Edit with AI" chats ----------

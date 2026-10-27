@@ -98,6 +98,7 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
           options: { ...base.integration.options, ...(stripUndef(patch.integration.options) as Record<string, IntegrationValue>) },
         }
       : base.integration,
+    timeoutSeconds: def(patch.timeoutSeconds, base.timeoutSeconds),
   };
 }
 

@@ -84,6 +84,11 @@ export const CONFIG_FIELDS: Record<keyof BlockConfig, FieldDoc> = {
     example: { flowId: "fix-one-issue", successExits: ["done"], workspace: "isolated", maxConcurrent: 3, maxChildren: 10, maxRetries: 1 },
   },
   flowOutput: { type: "object", kinds: ["flow-output"], doc: "{name}: the exit this output becomes on the parent's subflow node", example: { name: "approved" } },
+  timeoutSeconds: {
+    type: "number",
+    doc: "Longest the node may run, in seconds (any kind); the supervisor stops it after that. Unset = no limit (Shell command: 30 min); 0 = no limit. Script and integration blocks also keep their own time limits",
+    example: 3600,
+  },
   integration: {
     type: "object",
     kinds: ["integration"],
@@ -238,6 +243,8 @@ function valueProblem(key: keyof BlockConfig, v: unknown): string | undefined {
       return ["create-task", "create-mr", "shell", "post-comment"].includes(v as string) ? undefined : `unknown action "${v}". Use create-task, create-mr, shell or post-comment`;
     case "maxIterations":
       return Number.isInteger(v) && (v as number) > 0 ? undefined : "must be a positive whole number";
+    case "timeoutSeconds":
+      return typeof v === "number" && Number.isFinite(v) && v >= 0 ? undefined : "must be a number of seconds (0 = no limit)";
     case "agent": {
       const a = v as Record<string, unknown>;
       if (a.provider !== undefined && !AGENT_PROVIDERS.includes(a.provider as never)) return `unknown provider "${a.provider}". Use one of: ${AGENT_PROVIDERS.join(", ")}`;

@@ -30,7 +30,7 @@ import type {
 import type { ResumePlan } from "../shared/resume";
 import { DELIVERY_WAIT_MS, JOURNAL_SCHEMA, PAUSE_GRACE_MS, PAUSE_REASON_TEXT, activeNodeKeys, statusOfPhase } from "../shared/journal";
 import { MAX_STEER_CHARS } from "../shared/types";
-import type { AgentSessionRef, NodeRunState, NodeUsage, PauseReason, QueuedStep, RunPhase } from "../shared/types";
+import type { AgentSessionRef, FailureCause, NodeRunState, NodeUsage, PauseReason, QueuedStep, RunPhase, SupervisionEntry } from "../shared/types";
 import { flowFingerprint, settingsFingerprint } from "./journal";
 import type { PackRuntimeInfo } from "./packs";
 import { runStack } from "./stack";
@@ -97,7 +97,12 @@ export interface RunContext {
   sandboxes?: Partial<Record<SandboxKind, unknown>>;
   /** While a subflow's node runs: the flows around it, innermost first (where they run agents is inherited). */
   outerFlows?: Flow[];
+  /** While a node runs: that node's own (aborted by the run's, or alone by `stopNode`). */
   abort: AbortController;
+  /** The whole run's: what outlives one node (its sandboxes) listens to this one, not `abort`. */
+  runAbort?: AbortController;
+  /** Stop one running node (its agent turn / process tree): it fails with `cause` (see RunHandle.stopNode). */
+  stopNode?(key: string, cause: FailureCause, message: string): boolean;
   installedSkills: Set<string>;
   /** Only the env vars the block declares — never leak all globals. */
   blockEnv(cfg: ResolvedConfig): Record<string, string>;
@@ -233,6 +238,16 @@ export interface RunHandle {
   steer(nodeKey: string, message: string): SteerResult;
   cancel(): void;
   /**
+   * Stop one running node (by node key — inside a subflow node, everything in it): its agent turn / process tree is
+   * aborted, the rest of the run is left alone, and the node fails with `failure = {cause, message}`. False when
+   * it isn't running (or is already being stopped).
+   */
+  stopNode(key: string, cause: FailureCause, message: string): boolean;
+  /** Raise a flag on the run from outside it (the supervisor) — not a sign of life of the node it names. */
+  flag(severity: FlagSeverity, message: string, o?: { nodeKey?: string; details?: string }): RunFlag;
+  /** Journal what the supervisor noticed / did (`run.supervision`), and say it in the run's log. */
+  supervise(entry: SupervisionEntry): void;
+  /**
    * Pause instead of cancel (quit, update): no new step starts, running steps get a short grace period, then their
    * processes are stopped and their attempts marked interrupted. Resolves once the run is paused (`done`).
    */
@@ -240,6 +255,8 @@ export interface RunHandle {
 }
 
 const MAX_LOGS = 2000;
+/** Supervision entries kept on a run (the oldest go first). */
+export const MAX_SUPERVISION = 500;
 /** Agent activity is pushed to the UI at most this often per run. */
 export const ACTIVITY_FLUSH_MS = 300;
 const CLEANUP_TIMEOUT_MS = 20_000;
@@ -276,6 +293,14 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
   return new Proxy(ctx, {
     get: (target, key) => (key in own ? own[key as keyof RunContext] : Reflect.get(target, key)),
     // Runners set ctx.branch / ctx.sandbox — those belong to the whole run.
+    set: (target, key, value) => Reflect.set(target, key, value),
+  });
+}
+
+/** The context a node's runner sees: the same, but `abort` is the node's own (`stopNode` stops just this node). */
+function nodeContext(ctx: RunContext, abort: AbortController, runAbort: AbortController): RunContext {
+  return new Proxy(ctx, {
+    get: (target, key) => (key === "abort" ? abort : key === "runAbort" ? runAbort : Reflect.get(target, key)),
     set: (target, key, value) => Reflect.set(target, key, value),
   });
 }
@@ -435,6 +460,20 @@ export function startRun(opts: StartRunOptions): RunHandle {
     emit();
   };
 
+  const logLine = (level: LogLine["level"], msg: string, nodeId?: string) => {
+    run.logs.push({ ts: Date.now(), level, nodeId, msg });
+    if (run.logs.length > MAX_LOGS) run.logs.splice(0, run.logs.length - MAX_LOGS);
+    emit();
+  };
+  /** `live`: raised by the node itself (a sign of life); the supervisor's flags aren't. */
+  const raiseFlag = (severity: FlagSeverity, message: string, o: Parameters<RunContext["flag"]>[2] = {}, live: boolean): RunFlag => {
+    const f: RunFlag = { id: randomUUID().slice(0, 8), severity, message, at: Date.now(), ...o };
+    (run.flags ??= []).push(f);
+    (live ? ctx.log : logLine)(severity === "error" ? "error" : "warn", `⚑ ${message}`, o.nodeKey);
+    opts.onFlag?.(run, f);
+    return f;
+  };
+
   const ctx: RunContext = {
     run,
     flow,
@@ -453,14 +492,15 @@ export function startRun(opts: StartRunOptions): RunHandle {
     blockEnv: (cfg) =>
       Object.fromEntries(cfg.env.filter((k) => env[k] !== undefined).map((k) => [k, env[k]])),
     log(level, msg, nodeId) {
-      run.logs.push({ ts: Date.now(), level, nodeId, msg });
-      if (run.logs.length > MAX_LOGS) run.logs.splice(0, run.logs.length - MAX_LOGS);
-      emit();
+      logLine(level, msg, nodeId);
+      // A sign of life for the supervisor (its saves ride on the run's throttled ones, not every line).
+      if (nodeId !== undefined && run.nodes[nodeId]) run.nodes[nodeId].lastActivityAt = Date.now();
     },
     activity(nodeId, items) {
       if (!items.length || run.finishedAt) return;
       const exec = run.nodes[nodeId]?.executions;
       const ts = Date.now();
+      if (run.nodes[nodeId]) run.nodes[nodeId].lastActivityAt = ts;
       let q = activityQueue.get(nodeId);
       if (!q) activityQueue.set(nodeId, (q = []));
       for (const it of items) q.push({ ...it, ts, ...(exec ? { exec } : {}) });
@@ -469,13 +509,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         activityTimer.unref?.();
       }
     },
-    flag(severity, message, o = {}) {
-      const f: RunFlag = { id: randomUUID().slice(0, 8), severity, message, at: Date.now(), ...o };
-      (run.flags ??= []).push(f);
-      ctx.log(severity === "error" ? "error" : "warn", `⚑ ${message}`, o.nodeKey);
-      opts.onFlag?.(run, f);
-      return f;
-    },
+    flag: (severity, message, o = {}) => raiseFlag(severity, message, o, true),
     steerable(nodeId, onSteer) {
       steerTargets.set(nodeId, onSteer);
       steerSeen.add(nodeId);
@@ -627,10 +661,32 @@ export function startRun(opts: StartRunOptions): RunHandle {
     else ctx.abort.signal.addEventListener("abort", fail, { once: true });
   });
   stopped.catch(() => {});
-  const untilStopped = <T>(p: Promise<T>): Promise<T> => {
-    p.catch(() => {}); // it may still fail after the run was stopped — nobody waits for it any more
-    return Promise.race([p, stopped]);
-  };
+
+  /** Running nodes' own abort controllers, by node key (`stopNode` aborts one; the run's abort aborts them all). */
+  const nodeAborts = new Map<string, AbortController>();
+  /** Why a node is being stopped (set by `stopNode`, read when it fails). */
+  const nodeStops = new Map<string, { cause: FailureCause; message: string }>();
+  const ancestors = (k: string) => k.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/")).reverse();
+  /** The stop of this node, or of a node around it (stopping a subflow node stops what runs inside it). */
+  const stopOf = (k: string) => nodeStops.get(k) ?? ancestors(k).map((a) => nodeStops.get(a)).find(Boolean);
+
+  function stopNode(key: string, cause: FailureCause, message: string): boolean {
+    if (run.finishedAt || settled || halted()) return false;
+    const ns = run.nodes[key];
+    const abort = nodeAborts.get(key);
+    if (!ns || !abort || abort.signal.aborted || (ns.status !== "running" && ns.status !== "waiting")) return false;
+    nodeStops.set(key, { cause, message });
+    logLine("warn", `■ Stopping this step (${cause}): ${message}`, key);
+    // A question it (or a step inside it) waits on won't be answered now.
+    const q = run.pendingQuestion;
+    if (pending && q && (q.nodeId === key || q.nodeId.startsWith(`${key}/`))) {
+      pending.reject(new Error(message));
+      setPhase("running");
+    }
+    abort.abort(new Error(message));
+    return true;
+  }
+  ctx.stopNode = stopNode;
 
   /**
    * Run one flow's graph. Top level (`entry` undefined): starts at the trigger node or every node without inputs.
@@ -695,6 +751,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
     try {
       while (queue.length) {
         if (halted()) return {};
+        // The subflow node this graph runs in was stopped: nothing more starts in it.
+        const outerStop = prefix ? stopOf(prefix.slice(0, -1)) : undefined;
+        if (outerStop) throw new Error(outerStop.message);
         const { nodeId, inputs, again } = queue.shift()!;
         // An interrupted step running again is the same step: it was counted when it started.
         if (!again && ++steps > settings.maxSteps) {
@@ -714,6 +773,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
         if (!again || !ns.executions) ns.executions++;
         ns.inputs = inputs;
         ns.error = undefined;
+        ns.failure = undefined;
         ns.startedAt = Date.now();
         ns.finishedAt = undefined;
         ns.interrupted = undefined;
@@ -726,6 +786,26 @@ export function startRun(opts: StartRunOptions): RunHandle {
         journal();
         ctx.log("info", `${again ? "↻" : "▶"} ${label(nodeId)} (${cfg.kind}) — execution ${ns.executions}${again ? ", interrupted — running it again" : ""}`, k);
         runningNodes++;
+        // The node's own abort: follows the run's (or the subflow node's around it), and `stopNode` aborts it alone.
+        nodeStops.delete(k);
+        const outerAbort = ancestors(k).map((a) => nodeAborts.get(a)).find(Boolean) ?? ctx.abort;
+        const nodeAbort = new AbortController();
+        const follow = () => nodeAbort.abort(outerAbort.signal.reason);
+        if (outerAbort.signal.aborted) follow();
+        else outerAbort.signal.addEventListener("abort", follow, { once: true });
+        nodeAborts.set(k, nodeAbort);
+        const nctx = nodeContext(gctx, nodeAbort, ctx.abort);
+        const nodeStopped = new Promise<never>((_, reject) => {
+          const fail = () => reject(new Error("Stopped"));
+          if (nodeAbort.signal.aborted) fail();
+          else nodeAbort.signal.addEventListener("abort", fail, { once: true });
+        });
+        nodeStopped.catch(() => {});
+        /** A runner raced against Stop and `stopNode`: neither waits on it. */
+        const untilStopped = <T>(p: Promise<T>): Promise<T> => {
+          p.catch(() => {}); // it may still fail after it was stopped — nobody waits for it any more
+          return Promise.race([p, stopped, nodeStopped]);
+        };
 
         try {
           let result: NodeResult;
@@ -788,8 +868,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
               });
               result = await runStack(
                 {
-                  ctx,
-                  scoped: gctx,
+                  // Stopping the stack node (its own abort) stops its tasks' runs.
+                  ctx: nodeContext(ctx, nodeAbort, ctx.abort),
+                  scoped: nctx,
                   nodeKey: k,
                   label: label(nodeId),
                   ai: runners.ai,
@@ -819,12 +900,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
               );
             } else if (cfg.kind === "script") {
               if (!runners.script) throw new Error("Script blocks aren't supported here");
-              result = await untilStopped(runners.script(gctx, node, cfg, inputs));
+              result = await untilStopped(runners.script(nctx, node, cfg, inputs));
             } else if (cfg.kind === "integration") {
               if (!runners.integration) throw new Error("Integration blocks aren't supported here");
-              result = await untilStopped(runners.integration(gctx, node, cfg, inputs));
+              result = await untilStopped(runners.integration(nctx, node, cfg, inputs));
             } else {
-              result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs));
+              result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(nctx, node, cfg, inputs));
             }
           } catch (e) {
             if (pausing && (ctx.abort.signal.aborted || (e as Error).message === "Run paused")) {
@@ -838,10 +919,13 @@ export function startRun(opts: StartRunOptions): RunHandle {
               ns.error = "Stopped";
               return {};
             }
+            const stop = stopOf(k);
             ns.status = "failed";
             ns.finishedAt = Date.now();
-            ns.error = (e as Error).message;
-            throw new Error(`${label(nodeId)}: ${(e as Error).message}`);
+            ns.error = stop?.message ?? (e as Error).message;
+            // Why it failed: stopped by `stopNode` (its cause), else the block's own error.
+            ns.failure = { cause: stop?.cause ?? "error", message: ns.error, at: ns.finishedAt };
+            throw new Error(`${label(nodeId)}: ${ns.error}`);
           }
 
           for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
@@ -866,6 +950,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
           const outputs: NodeIO = {};
           if ((byExit || cfg.outputs.artifact) && result.outputs.artifact !== undefined) outputs.artifact = result.outputs.artifact;
           if ((byExit || cfg.outputs.steer) && result.outputs.steer !== undefined) outputs.steer = result.outputs.steer;
+          // The same output as its previous execution: a loop that may be going nowhere (the supervisor warns).
+          const same = ns.executions > 1 && JSON.stringify(outputs) === JSON.stringify(ns.outputs ?? {});
+          ns.repeats = same ? (ns.repeats ?? 0) + 1 : 0;
           ns.outputs = outputs;
           ns.status = "done";
           ns.finishedAt = Date.now();
@@ -925,6 +1012,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
           journalQueues();
           journal();
         } finally {
+          outerAbort.signal.removeEventListener("abort", follow);
+          nodeAborts.delete(k);
           nodeEnded();
         }
       }
@@ -1039,6 +1128,16 @@ export function startRun(opts: StartRunOptions): RunHandle {
       onSteer();
       emit();
       return { ok: true, steer };
+    },
+    stopNode,
+    flag: (severity, message, o) => raiseFlag(severity, message, o, false),
+    supervise(entry) {
+      const list = (run.supervision ??= []);
+      list.push(entry);
+      if (list.length > MAX_SUPERVISION) run.supervisionDropped = (run.supervisionDropped ?? 0) + list.splice(0, list.length - MAX_SUPERVISION).length;
+      const quiet = entry.kind === "overseer" && (!entry.action || entry.action === "none");
+      logLine(quiet ? "info" : "warn", `◉ Supervisor: ${entry.detail}${entry.action && entry.action !== "none" ? ` — ${entry.action}` : ""}`, entry.node);
+      journal();
     },
     cancel() {
       // Idempotent: a second Stop (or one after the run ended) does nothing.

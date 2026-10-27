@@ -10,6 +10,7 @@ import { CORE_PACK } from "../../shared/packs";
 import { agentOrigin, nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
 import { hostAgentEnv, resolveRunOn } from "../../shared/runOn";
 import { SKILL_NAME_RE, SKILL_SOURCE_RE, skillKey } from "../../shared/skills";
+import { agentIdleTimeoutSeconds } from "../../shared/supervisor";
 import type { AgentProvider, EnvValues, Flow, FlowNode, NodeIO, QaPair, ResolvedConfig, RunOn, SandboxKind, SkillRef } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
@@ -186,7 +187,8 @@ async function createRunSandbox(ctx: RunContext, kind: SandboxKind): Promise<San
   const packMounts = (ctx.packs?.dirs() ?? [])
     .filter((p) => existsSync(p.dir))
     .map((p) => ({ hostPath: p.dir, sandboxPath: `${SANDBOX_PACKS_DIR}/${p.id}` }));
-  const signal = ctx.abort.signal;
+  // The sandbox outlives the node that creates it: only the run's own abort tears it down.
+  const signal = (ctx.runAbort ?? ctx.abort).signal;
   if (signal.aborted) throw new Error("Run cancelled");
   const baseProvider =
     kind === "docker"
@@ -434,6 +436,12 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   // sandcastle doesn't hand a sandbox's agent its provider env: the sandbox's exec does (see withAgentEnv).
   const scoped = withAgentEnv(await makeAgent(cfg, fullEnv), fullEnv);
   release.push(scoped.release);
+  // This node stopped on its own (`stopNode`: stuck, timeout…): kill the agent's current command, not the sandbox.
+  const stopAgent = () => void scoped.interrupt().catch(() => {});
+  if (ctx.runAbort) {
+    ctx.abort.signal.addEventListener("abort", stopAgent, { once: true });
+    release.push(() => ctx.abort.signal.removeEventListener("abort", stopAgent));
+  }
   const agent = scoped.agent;
   steering.agent = agent;
   steering.interrupt = scoped.interrupt;
@@ -451,8 +459,11 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const where = onHost ? "host" : (ctx.run.sandboxes?.filter((c) => c.kind === kind).at(-1)?.containerId ?? kind);
   const qa: QaPair[] = [];
   const stream = agentStreamHandler(ctx, node.id, cfg.agent.provider);
+  const idle = agentIdleTimeoutSeconds(ctx.settings);
   const baseOptions = {
     name: label,
+    // Sandcastle's idle timeout sits above the supervisor's stuck check: the supervisor decides (and says why).
+    ...(idle ? { idleTimeoutSeconds: idle } : {}),
     ...(cfg.maxIterations > 1 ? { completionSignal: COMPLETE } : {}),
     ...(ctx.logDir
       ? {
@@ -495,7 +506,7 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   const followUp = (res: RunResultLike, message: string): Start => {
     const steers = steering.take("next-turn");
     const text = steers.length ? `${steerPrompt(steers, false)}\n\n${message}` : message;
-    return (signal) => (res.resume ? res.resume(text, { name: label, signal }) : runFresh(signal));
+    return (signal) => (res.resume ? res.resume(text, { name: label, signal, ...(idle ? { idleTimeoutSeconds: idle } : {}) }) : runFresh(signal));
   };
   const merge = (a: RunResultLike | undefined, b: RunResultLike): RunResultLike =>
     a ? { ...b, stdout: a.stdout + b.stdout, commits: [...a.commits, ...b.commits], iterations: [...a.iterations, ...b.iterations] } : b;
@@ -588,7 +599,7 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     for (let i = 0; i < MAX_STEER_TURNS && steering.pending().length; i++) {
       const steers = steering.take("next-turn");
       ctx.log("info", "Giving the agent the steering message as its next turn", node.id);
-      res = await turn((signal) => (res.resume ? res.resume(steerPrompt(steers, false), { name: label, signal }) : runFresh(signal)));
+      res = await turn((signal) => (res.resume ? res.resume(steerPrompt(steers, false), { name: label, signal, ...(idle ? { idleTimeoutSeconds: idle } : {}) }) : runFresh(signal)));
     }
     return res;
   };
