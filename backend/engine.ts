@@ -27,7 +27,10 @@ import type {
   SkillFileRef,
 } from "../shared/types";
 import type { ResumePlan } from "../shared/resume";
+import { DELIVERY_WAIT_MS, JOURNAL_SCHEMA, PAUSE_GRACE_MS, PAUSE_REASON_TEXT, activeNodeKeys, statusOfPhase } from "../shared/journal";
 import { MAX_STEER_CHARS } from "../shared/types";
+import type { AgentSessionRef, NodeRunState, NodeUsage, PauseReason, QueuedStep, RunPhase } from "../shared/types";
+import { flowFingerprint, settingsFingerprint } from "./journal";
 import type { PackRuntimeInfo } from "./packs";
 import { runStack } from "./stack";
 import type { SkillFile } from "./skills";
@@ -119,6 +122,28 @@ export interface RunContext {
   integrations?: RunIntegrations;
   /** Packs whose runtime copy is already prepared in this run's sandbox. */
   preparedPacks: Set<string>;
+
+  // ---- journal (see shared/journal.ts) ----
+  /** Write the run's journal now (not throttled). A failed write is logged; it never fails the caller. */
+  journal?(): void;
+  /** The node's own state in the run (node ids are scoped like `log`'s). */
+  nodeState?(nodeId: string): NodeRunState | undefined;
+  /**
+   * Run an irreversible step (create an MR, push, post a comment, merge): a pause or Stop waits for it (bounded)
+   * instead of cutting it in half (MEOW `delivery_lock`).
+   */
+  deliver?<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * The node is re-running after its attempt was interrupted (pause / crash): returns what it had (its agent
+   * session), once — only the first call of the attempt continues it (MEOW resumes a session on its first query).
+   */
+  takeInterrupted?(nodeId: string): { session?: AgentSessionRef } | undefined;
+  /** An agent's session id appeared (journaled right away so a crash can continue it). */
+  noteSession?(nodeId: string, session: AgentSessionRef): void;
+  noteUsage?(nodeId: string, usage: Omit<NodeUsage, "at">): void;
+  /** A sandbox container / an agent process on this computer started (removed if a crash leaves it behind). */
+  noteContainer?(kind: "docker" | "podman", containerId: string): void;
+  noteProcess?(pid: number, startedAt: number, running: boolean): void;
 }
 
 /** Steering messages for one running agent node. */
@@ -182,6 +207,19 @@ export interface StartRunOptions {
    * starting prompt as `prompt` and its branch as `branch`.
    */
   resume?: { from: RunState; plan: ResumePlan };
+  /**
+   * Continue this paused / interrupted run as the same run (same id): finished steps are skipped, interrupted ones
+   * run again, every graph's journaled queue is restored. Pass its branch as `branch` and its prompt as `prompt`.
+   */
+  continueFrom?: RunState;
+  /** Write the journal now (node start / finish, queue and phase changes, sessions) — not throttled like onChange. */
+  onJournal?: (state: RunState) => void;
+  /** Reads a saved run (a Box Stack continuing its tasks' runs). */
+  loadRun?: (id: string) => RunState | undefined;
+  /** How long running steps get to finish when the run pauses (default PAUSE_GRACE_MS). */
+  pauseGraceMs?: number;
+  /** Longest a pause / Stop waits for an irreversible step (default DELIVERY_WAIT_MS). */
+  deliveryWaitMs?: number;
 }
 
 export interface RunHandle {
@@ -191,12 +229,20 @@ export interface RunHandle {
   /** Send a steering message to a running agent node (by node key). */
   steer(nodeKey: string, message: string): SteerResult;
   cancel(): void;
+  /**
+   * Pause instead of cancel (quit, update): no new step starts, running steps get a short grace period, then their
+   * processes are stopped and their attempts marked interrupted. Resolves once the run is paused (`done`).
+   */
+  pause(reason: Exclude<PauseReason, "crash">): Promise<RunState>;
 }
 
 const MAX_LOGS = 2000;
 /** Agent activity is pushed to the UI at most this often per run. */
 export const ACTIVITY_FLUSH_MS = 300;
 const CLEANUP_TIMEOUT_MS = 20_000;
+
+/** A step in a graph's queue; `again` = its attempt was interrupted, it runs again (same execution). */
+type QueueItem = QueuedStep & { again?: boolean };
 
 /** Where a graph run ended up: a subflow reached one of its Flow outputs (or ran out of nodes). */
 interface GraphResult {
@@ -218,6 +264,10 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
     ask: (nodeId, question) => ctx.ask(prefix + nodeId, question),
     steerable: (nodeId, onSteer) => ctx.steerable!(prefix + nodeId, onSteer),
     flag: (severity, message, o) => ctx.flag(severity, message, o?.nodeKey === undefined ? o : { ...o, nodeKey: prefix + o.nodeKey }),
+    nodeState: (nodeId) => ctx.nodeState?.(prefix + nodeId),
+    takeInterrupted: (nodeId) => ctx.takeInterrupted?.(prefix + nodeId),
+    noteSession: (nodeId, session) => ctx.noteSession?.(prefix + nodeId, session),
+    noteUsage: (nodeId, usage) => ctx.noteUsage?.(prefix + nodeId, usage),
     logDir: ctx.logDir ? path.join(ctx.logDir, prefix.replace(/[^\w-]/g, "_")) : undefined,
   };
   return new Proxy(ctx, {
@@ -227,11 +277,20 @@ function scopedContext(ctx: RunContext, flow: Flow, prefix: string, outerFlows: 
   });
 }
 
+/** Blocks whose cut-off attempt may have left files half-changed (MEOW `interrupted_mutation`). */
+function mutates(cfg: ResolvedConfig): boolean {
+  if (cfg.kind === "auto") return cfg.autoAction === "shell" || cfg.autoAction === "create-mr" || cfg.autoAction === "merge-parent";
+  return cfg.kind === "ai" || cfg.kind === "manager" || cfg.kind === "script" || cfg.kind === "integration";
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms).unref?.());
+
 export function startRun(opts: StartRunOptions): RunHandle {
   const { flow, blocks, env, runners } = opts;
   const flows = opts.flows?.some((f) => f.id === flow.id) ? opts.flows : [...(opts.flows ?? []), flow];
   const settings: Settings = opts.prompt === undefined ? opts.settings : { ...opts.settings, startingPrompt: opts.prompt };
-  const run: RunState = {
+  const cont = opts.continueFrom;
+  const run: RunState = cont ?? {
     id: `${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID().slice(0, 8)}`,
     flowId: flow.id,
     flowName: flow.name,
@@ -246,11 +305,57 @@ export function startRun(opts: StartRunOptions): RunHandle {
     ...(opts.parent ? { parent: opts.parent } : {}),
     ...(opts.stack ? { stack: opts.stack } : {}),
     ...(opts.entry ? { input: opts.entry } : {}),
+    schemaVersion: JOURNAL_SCHEMA,
+    phase: "running",
+    attempt: 1,
+    transitions: [{ phase: "running", at: Date.now(), attempt: 1 }],
+    steps: 0,
   };
-  if (!opts.share) {
+  if (cont) {
+    // The same run, again: what was going when it stopped runs again (see `continuing` below).
+    run.attempt = (run.attempt ?? 1) + 1;
+    run.stalls = (run.stalls ?? 0) + 1;
+    run.finishedAt = undefined;
+    run.hold = undefined;
+    run.pauseReason = undefined;
+    run.pendingQuestion = undefined;
+    run.error = undefined;
+    for (const n of flow.nodes) run.nodes[n.id] ??= { status: "idle", executions: 0 };
+  } else if (!opts.share) {
     // What a resume needs to find this run's work again (see shared/resume.ts).
     const repo = env.REPO_PATH?.trim();
     run.workspace = { ...(repo ? { repo } : {}), branch: opts.branch || env.BRANCH_NAME?.trim() || `sandflow/${run.id}` };
+  }
+  if (!cont) {
+    // What continuing checks against later (MEOW plan / config fingerprints); the server adds the branch's commit.
+    run.fingerprints = {
+      flow: flowFingerprint(flow, flows, blocks),
+      settings: settingsFingerprint(settings),
+      workspace: { ...(run.workspace?.repo ? { repo: run.workspace.repo } : {}), branch: run.workspace?.branch ?? opts.branch ?? `sandflow/${run.id}` },
+    };
+  }
+
+  /**
+   * Continuing: each graph's queue (by node-key prefix) as it starts again — first the steps whose attempt was cut
+   * off (they run again with the inputs they had), then what was still queued. Taken once per graph.
+   */
+  const resumeQueues = new Map<string, QueueItem[]>();
+  /** Interrupted node keys → what their re-run continues from (handed out once, see `takeInterrupted`). */
+  const interruptedNodes = new Map<string, { session?: AgentSessionRef }>();
+  if (cont) {
+    const prefixOf = (k: string) => k.slice(0, k.lastIndexOf("/") + 1);
+    for (const [p, q] of Object.entries(cont.queues ?? {})) resumeQueues.set(p, q.map((s) => ({ nodeId: s.nodeId, inputs: { ...s.inputs } })));
+    // Outer steps first: a subflow node must run again before the steps inside it can.
+    for (const k of activeNodeKeys(cont).sort((a, b) => b.split("/").length - a.split("/").length)) {
+      const ns = cont.nodes[k];
+      const p = prefixOf(k);
+      const q = resumeQueues.get(p) ?? [];
+      q.unshift({ nodeId: k.slice(p.length), inputs: { ...(ns.inputs ?? {}) }, again: true });
+      resumeQueues.set(p, q);
+      interruptedNodes.set(k, { session: ns.session });
+    }
+    if (!resumeQueues.has("")) resumeQueues.set("", []);
+    for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
   }
   const resume = opts.resume;
   if (resume) {
@@ -263,6 +368,47 @@ export function startRun(opts: StartRunOptions): RunHandle {
     if (from.branch && plan.branch === from.branch) run.branch = from.branch;
   }
   const emit = () => opts.onChange?.(run);
+  let journalFailed = false;
+  /** Save the journal now; a failed write is logged once (until one succeeds again) and never stops the run. */
+  const journal = () => {
+    emit();
+    if (!opts.onJournal) return;
+    try {
+      opts.onJournal(run);
+      journalFailed = false;
+    } catch (e) {
+      if (!journalFailed) ctx.log("warn", `Couldn't write the run journal (the run goes on): ${(e as Error).message}`);
+      journalFailed = true;
+    }
+  };
+  const setPhase = (phase: RunPhase) => {
+    if (run.phase === phase) return;
+    run.phase = phase;
+    run.status = statusOfPhase(phase, run.status);
+    (run.transitions ??= []).push({ phase, at: Date.now(), attempt: run.attempt ?? 1 });
+    journal();
+  };
+  /** Set by `pause`: no new step starts, and the run ends paused instead of done / cancelled. */
+  let pausing: PauseReason | undefined;
+  /** Set by `cancel` (its abort may wait for a delivery in flight): no new step starts. */
+  let stopping = false;
+  const halted = () => ctx.abort.signal.aborted || stopping || !!pausing;
+  /** Irreversible steps in flight (see `RunContext.deliver`). */
+  const delivering = new Set<Promise<unknown>>();
+  const deliveriesDone = () =>
+    delivering.size ? Promise.race([Promise.allSettled([...delivering]), sleep(opts.deliveryWaitMs ?? DELIVERY_WAIT_MS)]) : Promise.resolve();
+  /** Nodes running right now, and who waits for none to be. */
+  let runningNodes = 0;
+  const idleWaiters = new Set<() => void>();
+  const nodeEnded = () => {
+    runningNodes--;
+    if (runningNodes <= 0) for (const w of [...idleWaiters]) w();
+  };
+  /** Every live graph's queue by prefix, journaled whenever one changes. */
+  const liveQueues = new Map<string, QueueItem[]>();
+  const journalQueues = () => {
+    run.queues = Object.fromEntries([...liveQueues].map(([p, q]) => [p, q.map(({ nodeId, inputs }): QueuedStep => ({ nodeId, inputs }))]));
+  };
 
   let pending: { resolve: (a: string) => void; reject: (e: Error) => void } | undefined;
   /** Running agent nodes that take steering messages, by node key. */
@@ -361,9 +507,52 @@ export function startRun(opts: StartRunOptions): RunHandle {
         },
       };
     },
+    journal,
+    nodeState: (nodeId) => run.nodes[nodeId],
+    async deliver(fn) {
+      if (halted()) throw new Error(pausing ? "Run paused" : "Run cancelled");
+      const p = fn();
+      delivering.add(p);
+      try {
+        return await p;
+      } finally {
+        delivering.delete(p);
+      }
+    },
+    takeInterrupted(nodeId) {
+      const it = interruptedNodes.get(nodeId);
+      interruptedNodes.delete(nodeId);
+      return it;
+    },
+    noteSession(nodeId, session) {
+      const ns = run.nodes[nodeId];
+      if (!ns || (ns.session?.id === session.id && ns.session.where === session.where)) return;
+      ns.session = session;
+      journal();
+    },
+    noteUsage(nodeId, usage) {
+      const ns = run.nodes[nodeId];
+      if (!ns) return;
+      (ns.usage ??= []).push({ ...usage, at: Date.now() });
+      journal();
+    },
+    noteContainer(kind, containerId) {
+      const list = (run.sandboxes ??= []);
+      if (list.some((c) => c.containerId === containerId)) return;
+      list.push({ kind, containerId });
+      journal();
+    },
+    noteProcess(pid, startedAt, running) {
+      const list = (run.processes ??= []);
+      const i = list.findIndex((p) => p.pid === pid);
+      if (running && i < 0) list.push({ pid, startedAt });
+      else if (!running && i >= 0) list.splice(i, 1);
+      else return;
+      journal();
+    },
     ask(nodeId, question) {
-      if (ctx.abort.signal.aborted) return Promise.reject(new Error("Run cancelled"));
-      run.status = "waiting";
+      if (halted()) return Promise.reject(new Error(pausing ? "Run paused" : "Run cancelled"));
+      setPhase("waiting");
       run.nodes[nodeId].status = "waiting";
       const askedAt = Date.now();
       const record: QuestionRecord = { nodeId, question, askedAt };
@@ -374,12 +563,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
         pending = {
           resolve: (a) => {
             pending = undefined;
-            run.status = "running";
             run.nodes[nodeId].status = "running";
             run.pendingQuestion = undefined;
             record.answer = a;
             record.answeredAt = Date.now();
             ctx.log("info", `Answer: ${a}`, nodeId);
+            setPhase("running");
             resolve(a);
           },
           reject: (e) => {
@@ -392,7 +581,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     },
   };
 
-  ctx.branch = opts.branch;
+  ctx.branch = opts.branch ?? cont?.branch;
   ctx.baseBranch = opts.baseBranch;
   ctx.parentContext = opts.parentContext;
   if (opts.share) {
@@ -403,6 +592,14 @@ export function startRun(opts: StartRunOptions): RunHandle {
     }
   }
   for (const w of opts.warnings ?? []) ctx.log("warn", w);
+  if (cont) {
+    const again = [...interruptedNodes.keys()];
+    ctx.log(
+      "info",
+      `↻ Continuing this run (attempt ${run.attempt})${again.length ? ` — ${again.join(", ")} ${again.length === 1 ? "was" : "were"} interrupted and run${again.length === 1 ? "s" : ""} again` : ""}; finished steps are kept`,
+    );
+    setPhase("continuing");
+  }
   if (resume) {
     const restoredCount = Object.keys(resume.plan.restored).filter((k) => !k.includes("/")).length;
     ctx.log(
@@ -414,7 +611,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     );
   }
 
-  let steps = 0;
+  let steps = cont?.steps ?? 0;
   /** The top-level graph's queue: what's still waiting when the run ends is saved as `run.unstarted`. */
   let topQueue: { nodeId: string; inputs: NodeIO }[] = [];
 
@@ -453,8 +650,14 @@ export function startRun(opts: StartRunOptions): RunHandle {
     };
 
     const incoming = new Set(g.edges.map((e) => e.target));
+    // Continuing: this graph picks up from its journaled queue (once — a later pass through a subflow starts afresh).
+    const resumed = resumeQueues.get(prefix);
+    resumeQueues.delete(prefix);
     let starts: FlowNode[];
-    if (entry) {
+    if (resumed) {
+      starts = [];
+      for (const q of resumed.filter((q) => !byId.has(q.nodeId))) ctx.log("warn", `Step ${key(q.nodeId)} is no longer in the flow — skipped`);
+    } else if (entry) {
       starts = g.nodes.filter((n) => kindOf(n) === "flow-input");
       // No Flow input: start where a top-level run would (never at a trigger — they don't fire inside subflows).
       if (!starts.length) starts = g.nodes.filter((n) => !incoming.has(n.id) && kindOf(n) !== "trigger");
@@ -472,217 +675,265 @@ export function startRun(opts: StartRunOptions): RunHandle {
       }
     }
 
-    const queue: { nodeId: string; inputs: NodeIO }[] =
-      resume && !prefix && !entry ? resume.plan.starts.map((s) => ({ nodeId: s.nodeId, inputs: { ...s.inputs } })) : starts.map((n) => ({ nodeId: n.id, inputs: {} }));
+    const queue: QueueItem[] = resumed
+      ? resumed.filter((q) => byId.has(q.nodeId))
+      : resume && !prefix && !entry
+        ? resume.plan.starts.map((s) => ({ nodeId: s.nodeId, inputs: { ...s.inputs } }))
+        : starts.map((n) => ({ nodeId: n.id, inputs: {} }));
     if (!prefix && !entry) topQueue = queue;
     for (const q of queue) run.nodes[key(q.nodeId)].status = "queued";
-    emit();
+    liveQueues.set(prefix, queue);
+    journalQueues();
+    journal();
+    if (!prefix) setPhase(run.pendingQuestion ? "waiting" : "running");
 
-    while (queue.length) {
-      if (ctx.abort.signal.aborted) return {};
-      if (++steps > settings.maxSteps) {
-        throw new Error(`Max steps exceeded (${settings.maxSteps}) — is the flow stuck in a loop?`);
-      }
-      const { nodeId, inputs } = queue.shift()!;
-      if (ctx.abort.signal.aborted) return {};
-      const k = key(nodeId);
-      const node = byId.get(nodeId)!;
-      const cfg = resolveNode(node, blocks);
-      const ns = run.nodes[k];
-      if (ns.restored) {
-        // A restored step reached again (e.g. a loop back to it): it runs for real now.
-        delete ns.restored;
-        ns.executions = 0;
-      }
-      ns.status = "running";
-      ns.executions++;
-      ns.inputs = inputs;
-      ns.error = undefined;
-      ctx.log("info", `▶ ${label(nodeId)} (${cfg.kind}) — execution ${ns.executions}`, k);
+    try {
+      while (queue.length) {
+        if (halted()) return {};
+        const { nodeId, inputs, again } = queue.shift()!;
+        // An interrupted step running again is the same step: it was counted when it started.
+        if (!again && ++steps > settings.maxSteps) {
+          throw new Error(`Max steps exceeded (${settings.maxSteps}) — is the flow stuck in a loop?`);
+        }
+        run.steps = steps;
+        const k = key(nodeId);
+        const node = byId.get(nodeId)!;
+        const cfg = resolveNode(node, blocks);
+        const ns = run.nodes[k];
+        if (ns.restored) {
+          // A restored step reached again (e.g. a loop back to it): it runs for real now.
+          delete ns.restored;
+          ns.executions = 0;
+        }
+        ns.status = "running";
+        if (!again || !ns.executions) ns.executions++;
+        ns.inputs = inputs;
+        ns.error = undefined;
+        ns.startedAt = Date.now();
+        ns.finishedAt = undefined;
+        ns.interrupted = undefined;
+        if (!again) {
+          ns.session = undefined;
+          interruptedNodes.delete(k);
+        }
+        // Journaled before it runs: a crash from here on finds it active (and re-runs it).
+        journalQueues();
+        journal();
+        ctx.log("info", `${again ? "↻" : "▶"} ${label(nodeId)} (${cfg.kind}) — execution ${ns.executions}${again ? ", interrupted — running it again" : ""}`, k);
+        runningNodes++;
 
-      let result: NodeResult;
-      let branch: BranchHandle | undefined;
-      try {
-        if (cfg.kind === "trigger") {
-          result = { outputs: { artifact: eventMarkdown(run.trigger!) } };
-        } else if (cfg.kind === "condition") {
-          const r = evaluateCondition(cfg.condition, { text: inputs.artifact, steer: inputs.steer, trigger: run.trigger });
-          branch = r.result ? "true" : "false";
-          for (const x of r.rules) {
-            ctx.log("info", `${x.passed ? "✓" : "✗"} ${describeCondition({ match: "all", rules: [x.rule] })} (got ${JSON.stringify(x.actual) ?? "nothing"})`, k);
+        try {
+          let result: NodeResult;
+          let branch: BranchHandle | undefined;
+          try {
+            if (cfg.kind === "trigger") {
+              result = { outputs: { artifact: eventMarkdown(run.trigger!) } };
+            } else if (cfg.kind === "condition") {
+              const r = evaluateCondition(cfg.condition, { text: inputs.artifact, steer: inputs.steer, trigger: run.trigger });
+              branch = r.result ? "true" : "false";
+              for (const x of r.rules) {
+                ctx.log("info", `${x.passed ? "✓" : "✗"} ${describeCondition({ match: "all", rules: [x.rule] })} (got ${JSON.stringify(x.actual) ?? "nothing"})`, k);
+              }
+              result = { outputs: {} };
+            } else if (cfg.kind === "flow-input") {
+              // As a subflow: what the parent sent. On its own: the starting prompt, so the flow can be tried out directly.
+              result = { outputs: entry ? { ...entry } : settings.startingPrompt.trim() ? { artifact: settings.startingPrompt } : {} };
+            } else if (cfg.kind === "flow-output") {
+              const name = cfg.flowOutput.name.trim() || DEFAULT_EXIT;
+              ns.outputs = inputs;
+              ns.status = "done";
+              ns.exit = name;
+              ns.finishedAt = Date.now();
+              if (entry) {
+                ctx.log("info", `⇥ flow output "${name}"`, k);
+                // The subflow is finished: drop whatever else it had queued.
+                for (const q of queue) if (run.nodes[key(q.nodeId)].status === "queued") run.nodes[key(q.nodeId)].status = "idle";
+                return { exit: name, outputs: inputs };
+              }
+              ctx.log("info", `⇥ flow output "${name}" (this flow isn't running as a subflow, so this path ends)`, k);
+              continue;
+            } else if (cfg.kind === "subflow") {
+              const child = flows.find((f) => f.id === cfg.subflow.flowId);
+              if (!child) throw new Error(cfg.subflow.flowId ? `Subflow runs unknown flow "${cfg.subflow.flowId}"` : "Subflow has no flow selected");
+              if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
+              ctx.log("info", `↳ running flow "${child.name}"`, k);
+              const r = await runGraph(child, `${k}/`, depth + 1, inputs, [g, ...outer]);
+              if (halted()) throw new Error(pausing ? "Run paused" : "Run cancelled");
+              if (r.exit === undefined) ctx.log("warn", `Flow "${child.name}" ended without reaching a Flow output — nothing continues after it`, k);
+              result = { outputs: r.outputs ?? {}, exit: r.exit };
+            } else if (cfg.kind === "stack") {
+              if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
+              result = await runStack(
+                {
+                  ctx,
+                  scoped: gctx,
+                  nodeKey: k,
+                  label: label(nodeId),
+                  ai: runners.ai,
+                  spawn: (child, o) => {
+                    const h = startRun({
+                      ...opts,
+                      flow: child,
+                      trigger: run.trigger,
+                      startNodeId: undefined,
+                      prompt: undefined,
+                      settings,
+                      entry: o.entry,
+                      depth: depth + 1,
+                      parent: { runId: run.id, nodeKey: k },
+                      stack: o.stack,
+                      share: o.shared ? ctx : undefined,
+                      branch: o.branch,
+                      baseBranch: o.baseBranch,
+                      parentContext: o.shared ? undefined : ctx,
+                      onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
+                    });
+                    opts.onSpawn?.(h);
+                    return h;
+                  },
+                  settled: (h) => opts.onChange?.(h.state),
+                },
+                node,
+                cfg,
+                inputs,
+              );
+            } else if (cfg.kind === "script") {
+              if (!runners.script) throw new Error("Script blocks aren't supported here");
+              result = await untilStopped(runners.script(gctx, node, cfg, inputs));
+            } else if (cfg.kind === "integration") {
+              if (!runners.integration) throw new Error("Integration blocks aren't supported here");
+              result = await untilStopped(runners.integration(gctx, node, cfg, inputs));
+            } else {
+              result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs));
+            }
+          } catch (e) {
+            if (pausing && (ctx.abort.signal.aborted || (e as Error).message === "Run paused")) {
+              // Cut off by a pause: this attempt runs again when the run continues.
+              ns.interrupted = mutates(cfg) ? "mutation" : "plain";
+              ns.error = undefined;
+              return {};
+            }
+            if (ctx.abort.signal.aborted || stopping) {
+              ns.status = "idle";
+              ns.error = "Stopped";
+              return {};
+            }
+            ns.status = "failed";
+            ns.finishedAt = Date.now();
+            ns.error = (e as Error).message;
+            throw new Error(`${label(nodeId)}: ${(e as Error).message}`);
           }
-          result = { outputs: {} };
-        } else if (cfg.kind === "flow-input") {
-          // As a subflow: what the parent sent. On its own: the starting prompt, so the flow can be tried out directly.
-          result = { outputs: entry ? { ...entry } : settings.startingPrompt.trim() ? { artifact: settings.startingPrompt } : {} };
-        } else if (cfg.kind === "flow-output") {
-          const name = cfg.flowOutput.name.trim() || DEFAULT_EXIT;
-          ns.outputs = inputs;
+
+          for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
+
+          // Named exits (Script / integration / subflow): the result leaves through one exit and keeps both artifact and steer.
+          const exits =
+            cfg.kind === "script" ? cfg.script.exits.filter(Boolean)
+            : cfg.kind === "integration" ? cfg.integration.exits.filter(Boolean)
+            : cfg.kind === "subflow" ? null
+            : [];
+          let exit: string | undefined;
+          if (cfg.kind === "subflow" || cfg.kind === "stack") exit = result.exit;
+          else if (exits?.length) {
+            exit = result.exit;
+            if (!exit || !exits.includes(exit)) {
+              ctx.log("warn", `Script picked exit "${exit ?? ""}", which isn't one of ${exits.join(", ")} — using "${exits[0]}"`, k);
+              exit = exits[0];
+            }
+          }
+          const byExit = exit !== undefined || cfg.kind === "subflow" || cfg.kind === "stack";
+
+          const outputs: NodeIO = {};
+          if ((byExit || cfg.outputs.artifact) && result.outputs.artifact !== undefined) outputs.artifact = result.outputs.artifact;
+          if ((byExit || cfg.outputs.steer) && result.outputs.steer !== undefined) outputs.steer = result.outputs.steer;
+          ns.outputs = outputs;
           ns.status = "done";
-          ns.exit = name;
-          if (entry) {
-            ctx.log("info", `⇥ flow output "${name}"`, k);
-            // The subflow is finished: drop whatever else it had queued.
-            for (const q of queue) if (run.nodes[key(q.nodeId)].status === "queued") run.nodes[key(q.nodeId)].status = "idle";
-            return { exit: name, outputs: inputs };
-          }
-          ctx.log("info", `⇥ flow output "${name}" (this flow isn't running as a subflow, so this path ends)`, k);
-          continue;
-        } else if (cfg.kind === "subflow") {
-          const child = flows.find((f) => f.id === cfg.subflow.flowId);
-          if (!child) throw new Error(cfg.subflow.flowId ? `Subflow runs unknown flow "${cfg.subflow.flowId}"` : "Subflow has no flow selected");
-          if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
-          ctx.log("info", `↳ running flow "${child.name}"`, k);
-          const r = await runGraph(child, `${k}/`, depth + 1, inputs, [g, ...outer]);
-          if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
-          if (r.exit === undefined) ctx.log("warn", `Flow "${child.name}" ended without reaching a Flow output — nothing continues after it`, k);
-          result = { outputs: r.outputs ?? {}, exit: r.exit };
-        } else if (cfg.kind === "stack") {
-          if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
-          result = await runStack(
-            {
-              ctx,
-              scoped: gctx,
-              nodeKey: k,
-              label: label(nodeId),
-              ai: runners.ai,
-              spawn: (child, o) => {
-                const h = startRun({
-                  ...opts,
-                  flow: child,
-                  trigger: run.trigger,
-                  startNodeId: undefined,
-                  prompt: undefined,
-                  settings,
-                  entry: o.entry,
-                  depth: depth + 1,
-                  parent: { runId: run.id, nodeKey: k },
-                  stack: o.stack,
-                  share: o.shared ? ctx : undefined,
-                  branch: o.branch,
-                  baseBranch: o.baseBranch,
-                  parentContext: o.shared ? undefined : ctx,
-                  onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
-                });
-                opts.onSpawn?.(h);
-                return h;
-              },
-              settled: (h) => opts.onChange?.(h.state),
-            },
-            node,
-            cfg,
-            inputs,
+          ns.finishedAt = Date.now();
+          run.stalls = 0;
+          if (exit !== undefined) ns.exit = exit;
+          if (outputs.artifact !== undefined) opts.saveArtifact?.(run.id, k, ns.executions, outputs.artifact);
+
+          // A condition only follows the edges of the branch it took, carrying its own input along.
+          const outEdges = g.edges.filter((e) =>
+            e.source !== nodeId ? false
+            : branch ? e.sourceHandle === branch
+            : byExit ? exit !== undefined && e.sourceHandle === exitHandle(exit)
+            : e.sourceHandle !== "true" && e.sourceHandle !== "false" && !isExitHandle(e.sourceHandle),
           );
-        } else if (cfg.kind === "script") {
-          if (!runners.script) throw new Error("Script blocks aren't supported here");
-          result = await untilStopped(runners.script(gctx, node, cfg, inputs));
-        } else if (cfg.kind === "integration") {
-          if (!runners.integration) throw new Error("Integration blocks aren't supported here");
-          result = await untilStopped(runners.integration(gctx, node, cfg, inputs));
-        } else {
-          result = await untilStopped((cfg.kind === "auto" ? runners.auto : runners.ai)(gctx, node, cfg, inputs));
-        }
-      } catch (e) {
-        if (ctx.abort.signal.aborted) {
-          ns.status = "idle";
-          ns.error = "Stopped";
-          return {};
-        }
-        ns.status = "failed";
-        ns.error = (e as Error).message;
-        throw new Error(`${label(nodeId)}: ${(e as Error).message}`);
-      }
+          if (branch) {
+            ns.branch = branch;
+            ns.outputs = inputs;
+            ctx.log("info", outEdges.length ? `↪ ${branch}` : `↪ ${branch} — nothing connected, this path ends`, k);
+          } else if (exit !== undefined) {
+            ctx.log("info", outEdges.length ? `↪ exit ${exit}` : `↪ exit ${exit} — nothing connected, this path ends`, k);
+          }
+          const passOn: NodeIO = branch ? inputs : outputs;
+          const successors = [...new Set(outEdges.map((e) => e.target))];
+          let targets = successors;
+          if (cfg.kind === "manager" && successors.length) {
+            let chosen = result.route;
+            if (!chosen || !successors.includes(chosen)) {
+              ctx.log("warn", `Manager returned invalid route "${chosen ?? ""}" — falling back to ${label(successors[0])}`, k);
+              chosen = successors[0];
+            }
+            ns.routedTo = chosen;
+            targets = [chosen];
+            ctx.log("info", `↪ routed to ${label(chosen)}`, k);
+          }
 
-      for (const f of result.flags ?? []) ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details });
-
-      // Named exits (Script / integration / subflow): the result leaves through one exit and keeps both artifact and steer.
-      const exits =
-        cfg.kind === "script" ? cfg.script.exits.filter(Boolean)
-        : cfg.kind === "integration" ? cfg.integration.exits.filter(Boolean)
-        : cfg.kind === "subflow" ? null
-        : [];
-      let exit: string | undefined;
-      if (cfg.kind === "subflow" || cfg.kind === "stack") exit = result.exit;
-      else if (exits?.length) {
-        exit = result.exit;
-        if (!exit || !exits.includes(exit)) {
-          ctx.log("warn", `Script picked exit "${exit ?? ""}", which isn't one of ${exits.join(", ")} — using "${exits[0]}"`, k);
-          exit = exits[0];
+          for (const t of targets) {
+            const tCfg = resolveNode(byId.get(t)!, blocks);
+            // A subflow node accepts whatever its flow's Flow input takes; checked again inside it.
+            const accepts = (h: "artifact" | "steer") => tCfg.kind === "subflow" || tCfg.inputs[h];
+            const tInputs: NodeIO = {};
+            for (const e of outEdges.filter((e) => e.target === t)) {
+              const value =
+                e.sourceHandle === "true" || e.sourceHandle === "false"
+                  ? e.targetHandle === "steer"
+                    ? (passOn.steer ?? passOn.artifact)
+                    : passOn.artifact
+                  : isExitHandle(e.sourceHandle)
+                    ? passOn[e.targetHandle]
+                    : passOn[e.sourceHandle];
+              if (value !== undefined && accepts(e.targetHandle)) tInputs[e.targetHandle] = value;
+            }
+            queue.push({ nodeId: t, inputs: tInputs });
+            if (run.nodes[key(t)].status !== "running") run.nodes[key(t)].status = "queued";
+          }
+          flushActivity();
+          ctx.log("info", `✓ ${label(nodeId)}`, k);
+          journalQueues();
+          journal();
+        } finally {
+          nodeEnded();
         }
       }
-      const byExit = exit !== undefined || cfg.kind === "subflow" || cfg.kind === "stack";
-
-      const outputs: NodeIO = {};
-      if ((byExit || cfg.outputs.artifact) && result.outputs.artifact !== undefined) outputs.artifact = result.outputs.artifact;
-      if ((byExit || cfg.outputs.steer) && result.outputs.steer !== undefined) outputs.steer = result.outputs.steer;
-      ns.outputs = outputs;
-      ns.status = "done";
-      if (exit !== undefined) ns.exit = exit;
-      if (outputs.artifact !== undefined) opts.saveArtifact?.(run.id, k, ns.executions, outputs.artifact);
-
-      // A condition only follows the edges of the branch it took, carrying its own input along.
-      const outEdges = g.edges.filter((e) =>
-        e.source !== nodeId ? false
-        : branch ? e.sourceHandle === branch
-        : byExit ? exit !== undefined && e.sourceHandle === exitHandle(exit)
-        : e.sourceHandle !== "true" && e.sourceHandle !== "false" && !isExitHandle(e.sourceHandle),
-      );
-      if (branch) {
-        ns.branch = branch;
-        ns.outputs = inputs;
-        ctx.log("info", outEdges.length ? `↪ ${branch}` : `↪ ${branch} — nothing connected, this path ends`, k);
-      } else if (exit !== undefined) {
-        ctx.log("info", outEdges.length ? `↪ exit ${exit}` : `↪ exit ${exit} — nothing connected, this path ends`, k);
+      return {};
+    } finally {
+      // A paused run keeps every graph's queue in its journal (continuing restores them); otherwise this graph is over.
+      if (!pausing) {
+        liveQueues.delete(prefix);
+        journalQueues();
       }
-      const passOn: NodeIO = branch ? inputs : outputs;
-      const successors = [...new Set(outEdges.map((e) => e.target))];
-      let targets = successors;
-      if (cfg.kind === "manager" && successors.length) {
-        let chosen = result.route;
-        if (!chosen || !successors.includes(chosen)) {
-          ctx.log("warn", `Manager returned invalid route "${chosen ?? ""}" — falling back to ${label(successors[0])}`, k);
-          chosen = successors[0];
-        }
-        ns.routedTo = chosen;
-        targets = [chosen];
-        ctx.log("info", `↪ routed to ${label(chosen)}`, k);
-      }
-
-      for (const t of targets) {
-        const tCfg = resolveNode(byId.get(t)!, blocks);
-        // A subflow node accepts whatever its flow's Flow input takes; checked again inside it.
-        const accepts = (h: "artifact" | "steer") => tCfg.kind === "subflow" || tCfg.inputs[h];
-        const tInputs: NodeIO = {};
-        for (const e of outEdges.filter((e) => e.target === t)) {
-          const value =
-            e.sourceHandle === "true" || e.sourceHandle === "false"
-              ? e.targetHandle === "steer"
-                ? (passOn.steer ?? passOn.artifact)
-                : passOn.artifact
-              : isExitHandle(e.sourceHandle)
-                ? passOn[e.targetHandle]
-                : passOn[e.sourceHandle];
-          if (value !== undefined && accepts(e.targetHandle)) tInputs[e.targetHandle] = value;
-        }
-        queue.push({ nodeId: t, inputs: tInputs });
-        if (run.nodes[key(t)].status !== "running") run.nodes[key(t)].status = "queued";
-      }
-      flushActivity();
-      ctx.log("info", `✓ ${label(nodeId)}`, k);
     }
-    return {};
   }
 
   /** Set once the graph has ended (done / failed / cancelled): a Stop during cleanup no longer changes the outcome. */
   let settled = false;
+  /** The run ended paused (quit / update): it's continued later instead of finishing. */
+  let paused = false;
   const done = (async () => {
     try {
       const r = await runGraph(flow, "", opts.depth ?? 0, opts.entry);
-      if (opts.entry) run.result = r;
-      run.status = ctx.abort.signal.aborted ? "cancelled" : "done";
+      if (pausing) paused = true;
+      else {
+        if (opts.entry) run.result = r;
+        run.status = ctx.abort.signal.aborted || stopping ? "cancelled" : "done";
+      }
     } catch (e) {
-      run.status = ctx.abort.signal.aborted ? "cancelled" : "failed";
-      if (run.status === "failed") {
+      if (pausing && (ctx.abort.signal.aborted || (e as Error).message === "Run paused")) paused = true;
+      else run.status = ctx.abort.signal.aborted || stopping ? "cancelled" : "failed";
+      if (!paused && run.status === "failed") {
         run.error = (e as Error).message;
         ctx.log("error", run.error);
         // A stack child's failure is reported by its stack (it may be retried).
@@ -709,17 +960,25 @@ export function startRun(opts: StartRunOptions): RunHandle {
           clearTimeout(timer);
         }
       }
-      if (run.status !== "done" && topQueue.length) run.unstarted = topQueue.map((q) => ({ nodeId: q.nodeId, inputs: q.inputs }));
+      if (!paused && run.status !== "done" && topQueue.length) run.unstarted = topQueue.map((q) => ({ nodeId: q.nodeId, inputs: q.inputs }));
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
       run.pendingQuestion = undefined;
       steerTargets.clear();
       for (const st of run.steers ?? []) {
-        if (st.status === "pending") Object.assign(st, { status: "dropped", note: "The run ended before the agent got this message" });
+        if (st.status === "pending") Object.assign(st, { status: "dropped", note: `The run ${paused ? "paused" : "ended"} before the agent got this message` });
       }
       flushActivity();
-      run.finishedAt = Date.now();
-      if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
-      emit();
+      if (paused) {
+        // Not finished: the journal (phase, active steps, queues) is what continuing starts from.
+        ctx.log("warn", `⏸ Paused — ${PAUSE_REASON_TEXT[pausing!]}. It continues where it was when Sandflow starts again.`);
+        setPhase("paused");
+      } else {
+        run.finishedAt = Date.now();
+        run.queues = undefined;
+        if (run.status === "cancelled") ctx.log("warn", "Run stopped — every running step was cancelled and its processes killed");
+        setPhase(run.status as RunPhase);
+      }
+      journal();
     }
     return run;
   })();
@@ -736,7 +995,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
       const text = message.trim();
       if (!text) return { ok: false, status: 400, error: "The steering message is empty" };
       if (text.length > MAX_STEER_CHARS) return { ok: false, status: 400, error: `The steering message is too long (max ${MAX_STEER_CHARS} characters)` };
-      if (run.finishedAt || settled || ctx.abort.signal.aborted) return { ok: false, status: 409, error: "This run has ended — there's no agent left to steer" };
+      if (run.finishedAt || settled || halted()) return { ok: false, status: 409, error: "This run has ended — there's no agent left to steer" };
       const ns = run.nodes[nodeKey];
       if (!ns) return { ok: false, status: 404, error: `No step "${nodeKey}" in this run` };
       const onSteer = steerTargets.get(nodeKey);
@@ -763,7 +1022,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     },
     cancel() {
       // Idempotent: a second Stop (or one after the run ended) does nothing.
-      if (run.finishedAt || ctx.abort.signal.aborted) return;
+      if (run.finishedAt || ctx.abort.signal.aborted || stopping) return;
       if (settled) {
         // The run already ended and is only closing its sandboxes: hurry that along (kills containers / processes)
         // but keep its real outcome — it finished, it wasn't stopped.
@@ -771,14 +1030,43 @@ export function startRun(opts: StartRunOptions): RunHandle {
         return;
       }
       // Show it right away; the run finishes once cleanup (closing sandboxes) is done.
-      run.status = "cancelled";
+      stopping = true;
+      pausing = undefined;
       const active = Object.entries(run.nodes).filter(([, ns]) => ns.status === "running" || ns.status === "waiting");
       ctx.log("warn", `Stop requested — cancelling ${active.length ? active.map(([id]) => id).join(", ") : "the run"} and killing its processes`);
-      ctx.abort.abort(new Error("Run cancelled"));
       pending?.reject(new Error("Run cancelled"));
       run.pendingQuestion = undefined;
       for (const ns of Object.values(run.nodes)) if (ns.status === "queued") ns.status = "idle";
-      emit();
+      setPhase("cancelled");
+      const abort = () => ctx.abort.abort(new Error("Run cancelled"));
+      if (!delivering.size) return abort();
+      // An irreversible step (Create MR, Post comment, …) isn't cut in half: it finishes first (bounded).
+      ctx.log("warn", "Waiting for the step that is delivering (MR / comment / merge) to finish before stopping");
+      void deliveriesDone().then(abort);
+    },
+    async pause(reason) {
+      if (run.finishedAt || settled || stopping || ctx.abort.signal.aborted) return done;
+      if (pausing) return done;
+      pausing = reason;
+      run.pauseReason = reason;
+      ctx.log("warn", `Pausing — ${PAUSE_REASON_TEXT[reason]}; no new step starts`);
+      setPhase("pausing");
+      // Irreversible steps finish first (MEOW: cancellation waits on the delivery lock).
+      await deliveriesDone();
+      // A short grace period for what's running to finish by itself (not for a question nobody will answer now).
+      if (runningNodes > 0 && !pending) {
+        await Promise.race([
+          new Promise<void>((r) => {
+            const w = () => (idleWaiters.delete(w), r());
+            idleWaiters.add(w);
+          }),
+          sleep(opts.pauseGraceMs ?? PAUSE_GRACE_MS),
+        ]);
+      }
+      // Still going: stop its processes. Its attempt is marked interrupted and runs again when the run continues.
+      if (!settled) ctx.abort.abort(new Error("Run paused"));
+      pending?.reject(new Error("Run paused"));
+      return done;
     },
   };
 }
