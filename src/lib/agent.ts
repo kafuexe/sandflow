@@ -1,6 +1,7 @@
 // State for the Agent screen: every run (manual, agent or triggered), live-updated, plus the new-run draft.
 
 import { create } from "zustand";
+import { isSettled } from "../../shared/journal";
 import { summarize as toSummary } from "../../shared/runs";
 import type { RunState, RunSummary } from "../../shared/types";
 import { api, ApiError, subscribeFlags, subscribeRun, type FlagEvent } from "./api";
@@ -31,6 +32,8 @@ interface AgentState {
   stop(id: string): Promise<void>;
   /** Resume a finished run as a new run (default: from its failed steps) and select the new run. */
   resume(id: string, fromNodeIds?: string[]): Promise<void>;
+  /** Continue a paused run as the same run (`repair`: adopt what changed first). Returns Repair's changes. */
+  continueRun(id: string, repair?: boolean): Promise<string[] | undefined>;
   answer(id: string, text: string): Promise<boolean>;
   /** Close a popup (the flag stays on the run). */
   closeAlert(flagId: string): void;
@@ -70,7 +73,7 @@ export const useAgent = create<AgentState>((set, get) => {
       id,
       subscribeRun(id, (run) => {
         apply(run);
-        if (run.finishedAt) subs.delete(id);
+        if (isSettled(run)) subs.delete(id);
       }),
     );
   }
@@ -99,14 +102,14 @@ export const useAgent = create<AgentState>((set, get) => {
       const detail = get().detail;
       set({ list: fresh.map((r) => (subs.has(r.id) && detail[r.id] ? toSummary(detail[r.id]) : r)) });
       const selected = get().selectedId;
-      if (selected && fresh.some((r) => r.id === selected && !r.finishedAt)) watch(selected);
+      if (selected && fresh.some((r) => r.id === selected && !isSettled(r))) watch(selected);
     },
     select(id) {
       set({ selectedId: id, error: undefined });
       if (!id) return;
       void open(id).then(() => {
         const run = get().detail[id];
-        if (get().selectedId === id && (!run || !run.finishedAt)) watch(id);
+        if (get().selectedId === id && (!run || !isSettled(run))) watch(id);
       });
     },
     setDraft(draft) {
@@ -150,6 +153,21 @@ export const useAgent = create<AgentState>((set, get) => {
       } catch (e) {
         const missing = e instanceof ApiError ? (e.body.missing as string[] | undefined) : undefined;
         set({ error: missing ? `Missing inputs: ${missing.join(", ")}` : (e as Error).message });
+      }
+    },
+    async continueRun(id, repair) {
+      set({ error: undefined });
+      try {
+        if (repair && !(await useStore.getState().flushSaves())) throw new Error(`Couldn't save your latest edits: ${useStore.getState().saveError}`);
+        const { changes } = await api.continueRun(id, repair);
+        apply(await api.getRun(id));
+        watch(id);
+        return changes ?? [];
+      } catch (e) {
+        // A failed check holds the run with what failed (the Continue box lists it); anything else is shown here.
+        if (!(e instanceof ApiError && Array.isArray(e.body.problems))) set({ error: (e as Error).message });
+        apply(await api.getRun(id).catch(() => get().detail[id]));
+        return undefined;
       }
     },
     async stop(id) {

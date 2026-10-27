@@ -80,6 +80,8 @@ interface State {
   setFlowActive(id: string, active: boolean): void;
   /** Where the flow's agents run by default (undefined = Settings → Sandbox). */
   setFlowRunOn(id: string, runOn: RunOn | undefined): void;
+  /** The flow's "Continue interrupted runs automatically" switch (default on). */
+  setFlowContinueAutomatically(id: string, on: boolean): void;
   deleteFlow(id: string): void;
   // nodes / edges (current flow)
   addNode(blockId: string, position: { x: number; y: number }, data?: Partial<FlowNode["data"]>): void;
@@ -112,6 +114,8 @@ interface State {
    * Resolves to the new run's id, or undefined when it couldn't start (`runError` says why).
    */
   resumeRun(runId: string, fromNodeIds?: string[]): Promise<string | undefined>;
+  /** Continue a paused run as the same run (`repair`: adopt what changed first). Returns Repair's changes. */
+  continueRun(runId: string, repair?: boolean): Promise<string[] | undefined>;
   /** Refresh the runs list + trigger status (polled while the app is open). */
   refreshActivity(): Promise<void>;
   /** Stop a run (default: the one shown). */
@@ -351,6 +355,36 @@ export const useStore = create<State>((set, get) => {
     setFlowActive(id, active) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id === id ? { ...f, active } : f)) }), "flows");
+    },
+    setFlowContinueAutomatically(id, on) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : on ? (({ continueAutomatically: _, ...rest }) => rest)(f) : { ...f, continueAutomatically: false })) }), "flows");
+    },
+    async continueRun(runId, repair) {
+      // Repair adopts the flow as saved: write pending edits first.
+      if (repair && !(await get().flushSaves())) {
+        set({ runError: `Can't repair: ${get().saveError}`, sideTab: "run" });
+        return undefined;
+      }
+      try {
+        set({ runError: undefined });
+        const { changes } = await api.continueRun(runId, repair);
+        const run = await api.getRun(runId);
+        set({ run, runs: mergeRun(get().runs, run), sideTab: "run" });
+        watchRun(runId);
+        return changes ?? [];
+      } catch (e) {
+        // A failed check holds the run with what failed (the Continue box lists it); anything else is shown here.
+        const listed = e instanceof ApiError && Array.isArray(e.body.problems);
+        set({ runError: listed ? undefined : (e as Error).message, sideTab: "run" });
+        try {
+          const run = await api.getRun(runId);
+          if (get().run?.id === runId) set({ run });
+        } catch {
+          /* keep the old state */
+        }
+        return undefined;
+      }
     },
     setFlowRunOn(id, runOn) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;

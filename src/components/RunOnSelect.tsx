@@ -1,3 +1,4 @@
+import { Switch } from "@/components/ui/switch";
 import { TriangleAlert } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -70,6 +71,23 @@ export function NodeRunOn({ flow, node, cfg }: { flow: Flow; node: FlowNode; cfg
       />
       {effective === "host" && <HostWarning />}
     </div>
+  );
+}
+
+/** Inputs tab: whether this flow's runs cut off by a crash, quit or update carry on by themselves on the next start. */
+export function FlowContinueSwitch({ flow }: { flow: Flow }) {
+  const { setFlowContinueAutomatically } = useStore.getState();
+  return (
+    <section className="space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor="flow-continue-auto">Continue interrupted runs automatically</Label>
+        <Switch id="flow-continue-auto" checked={flow.continueAutomatically !== false} onCheckedChange={(v) => setFlowContinueAutomatically(flow.id, v)} />
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        When Sandflow quits, updates or crashes mid-run, the run carries on where it was on the next start. Off: it waits for you to
+        press Continue. Stop always ends a run for good.
+      </p>
+    </section>
   );
 }
 

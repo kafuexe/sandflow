@@ -1,6 +1,7 @@
 // How the Agent screen's run list is organised: top-level runs in sections, Box Stack children grouped under the run
 // that started them (one group per time the stack ran, latest attempt per task).
 
+import { isSettled } from "../../shared/journal";
 import type { RunSummary } from "../../shared/types";
 
 export interface StackGroup {
@@ -70,11 +71,12 @@ const hasFlags = (r: RunSummary) => !!r.flags && r.flags.warning + r.flags.error
 
 export function sectionRuns(list: RunSummary[]): RunSections {
   const roots = list.filter((r) => !r.parent);
+  // A paused run isn't working: it sits with the finished ones (flagged when it waits for you).
   return {
-    flagged: roots.filter((r) => r.finishedAt && hasFlags(r)),
-    waiting: list.filter((r) => !r.finishedAt && r.pendingQuestion),
-    running: roots.filter((r) => !r.finishedAt && !r.pendingQuestion),
-    earlier: roots.filter((r) => r.finishedAt && !hasFlags(r)),
+    flagged: roots.filter((r) => isSettled(r) && hasFlags(r)),
+    waiting: list.filter((r) => !isSettled(r) && r.pendingQuestion),
+    running: roots.filter((r) => !isSettled(r) && !r.pendingQuestion),
+    earlier: roots.filter((r) => isSettled(r) && !hasFlags(r)),
   };
 }
 

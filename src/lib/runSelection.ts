@@ -1,3 +1,4 @@
+import { isSettled } from "../../shared/journal";
 import type { RunState, RunSummary } from "../../shared/types";
 
 /** Pure helpers for showing several runs at once: which runs of a flow are going, and which one the builder shows. */
@@ -14,6 +15,9 @@ export function toSummary(r: RunState): RunSummary {
     trigger: t ? { source: t.source, type: t.type, author: t.author, title: t.title } : undefined,
     prompt: r.prompt,
     pendingQuestion: r.pendingQuestion,
+    ...(r.phase ? { phase: r.phase } : {}),
+    ...(r.pauseReason ? { pauseReason: r.pauseReason } : {}),
+    ...(r.hold ? { hold: r.hold } : {}),
   };
 }
 
@@ -31,7 +35,7 @@ export function mergeRun(runs: RunSummary[], run: RunState | RunSummary | undefi
 /** Runs of `flowId` that haven't finished, newest first (the watched run's live state wins over its summary). */
 export function activeRunsOf(runs: RunSummary[], flowId: string | null | undefined, watched?: RunState): RunSummary[] {
   if (!flowId) return [];
-  return mergeRun(runs, watched).filter((r) => r.flowId === flowId && !r.finishedAt);
+  return mergeRun(runs, watched).filter((r) => r.flowId === flowId && !isSettled(r));
 }
 
 /**

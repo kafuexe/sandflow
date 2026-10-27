@@ -1,5 +1,6 @@
 // Whether a node of a run can be steered right now, and how the message will reach it. Free of React (unit-tested).
 
+import { isPaused } from "../../shared/journal";
 import type { AgentProvider, ResolvedConfig, RunState, SteerRecord } from "../../shared/types";
 
 /** Agent CLIs whose sessions can be resumed: steering interrupts them and continues the same session. */
@@ -14,8 +15,9 @@ export interface Steerability {
   hint: string;
 }
 
-export function steerability(run: Pick<RunState, "finishedAt" | "nodes"> | undefined, nodeKey: string, cfg: Pick<ResolvedConfig, "kind" | "agent"> | undefined): Steerability {
+export function steerability(run: Pick<RunState, "finishedAt" | "nodes" | "phase"> | undefined, nodeKey: string, cfg: Pick<ResolvedConfig, "kind" | "agent"> | undefined): Steerability {
   const agent = cfg?.kind === "ai" || cfg?.kind === "manager";
+  if (run && isPaused(run)) return { can: false, agent, hint: "This run is paused — continue it first." };
   if (!run || run.finishedAt) return { can: false, agent, hint: "This run has ended — steering reaches an agent only while it works." };
   if (!agent) return { can: false, agent, hint: "Only AI agent and manager blocks can be steered." };
   const status = run.nodes[nodeKey]?.status ?? "idle";

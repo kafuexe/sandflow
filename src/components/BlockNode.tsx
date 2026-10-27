@@ -1,3 +1,4 @@
+import { isSettled } from "../../shared/journal";
 import { memo } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { Check, HelpCircle, KeyRound, Loader2, MessageSquareText, Navigation, X } from "lucide-react";
@@ -193,7 +194,7 @@ function BlockNodeImpl({ id, data, selected }: NodeProps<BlockNodeType>) {
   const integrations = useStore((s) => s.data?.integrations ?? []);
   // Only the shown run's states, and only when it is a run of the flow on the canvas.
   const runNode = useStore((s) => (s.run?.flowId === s.currentFlowId ? s.run?.nodes[id] : undefined));
-  const runLive = useStore((s) => s.run?.flowId === s.currentFlowId && !s.run?.finishedAt);
+  const runLive = useStore((s) => s.run?.flowId === s.currentFlowId && !!s.run && !isSettled(s.run));
   const steerNode = useStore((s) => s.steerNode);
   const updateOverrides = useStore((s) => s.updateNodeOverrides);
   const touchedAt = useStore((s) => s.highlight[id]);

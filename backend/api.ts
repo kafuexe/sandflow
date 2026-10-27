@@ -593,7 +593,13 @@ export function createApi(
       const lock = acquireRunLock(runsDir, run.id);
       if (!lock.ok) continue; // another Sandflow on this data folder drives it
       try {
-        storage.saveRun(markCrashed(run, data));
+        markCrashed(run, data);
+        // What it left running (containers, agent processes) goes now, whether or not it's continued.
+        const removed = await cleanupLeftovers(run, exec, killPidTree).catch(() => []);
+        if (removed.length) run.logs.push({ ts: Date.now(), level: "info", msg: `Removed what the interrupted attempt left running: ${removed.join(", ")}` });
+        run.sandboxes = [];
+        run.processes = [];
+        storage.saveRun(run);
         crashed.add(run.id);
       } finally {
         releaseRunLock(runsDir, run.id);
@@ -1153,8 +1159,8 @@ export function createApi(
       new Promise((r) => setTimeout(r, timeoutMs).unref?.()),
     ]);
     // Whatever didn't get to "paused" in time stays "pausing" in its journal: the next start treats it as a crash.
+    // Its lock stays ours until it settles (a new API in this same process — a dev-server restart — leaves it alone).
     for (const h of active) storage.saveRun(h.state);
-    for (const id of [...locked]) unlock(id);
   };
   handler.ready = opts.noContinuePass ? Promise.resolve() : continuePass().catch((e) => console.warn(`[runs] continue pass failed: ${(e as Error).message}`));
   return handler;

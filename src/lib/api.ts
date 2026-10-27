@@ -1,3 +1,4 @@
+import { isSettled } from "../../shared/journal";
 import type {
   AppData,
   AssistantAgent,
@@ -88,6 +89,9 @@ export const api = {
   /** Resume a finished run as a new run (default: from its failed steps). See shared/resume.ts. */
   resumeRun: (id: string, fromNodeIds?: string[]) =>
     request<{ runId: string; warning?: string }>("POST", `/runs/${encodeURIComponent(id)}/resume`, fromNodeIds ? { fromNodeIds } : {}),
+  /** Continue a paused / interrupted run as the same run; `repair` first adopts what changed (see backend/continue.ts). */
+  continueRun: (id: string, repair = false) =>
+    request<{ runId: string; changes?: string[] }>("POST", `/runs/${encodeURIComponent(id)}/${repair ? "repair" : "continue"}`, {}),
   answer: (id: string, answer: string) => request("POST", `/runs/${encodeURIComponent(id)}/answer`, { answer }),
   /** Send a steering message to a running agent node (node keys of subflow nodes contain "/"). */
   steer: (id: string, nodeKey: string, message: string) =>
@@ -208,7 +212,8 @@ export function subscribeRun(runId: string, onState: (s: RunState) => void): () 
   es.addEventListener("state", (ev) => {
     const s = JSON.parse((ev as MessageEvent).data) as RunState;
     onState(s);
-    if (s.finishedAt) es.close();
+    // Finished or paused: the server ends the stream (Continue subscribes again).
+    if (isSettled(s)) es.close();
   });
   return () => es.close();
 }

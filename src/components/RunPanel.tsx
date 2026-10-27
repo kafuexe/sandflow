@@ -10,7 +10,7 @@ import { runNodeLabel } from "../../shared/subflow";
 import type { NodeRunStatus, RunState, RunStatus, TriggerEvent } from "../../shared/types";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
-import { RerunFromHere, ResumedFrom, RetryBox } from "./ResumeControls";
+import { ContinueBox, RerunFromHere, ResumedFrom, RetryBox } from "./ResumeControls";
 import { ActivityFeed, ActivityFilterBar, CollapsibleSection, JumpButton, useActivityFilter, useFollow } from "./AgentActivity";
 
 const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
@@ -68,6 +68,7 @@ export function RunPanel() {
   const runWarning = useStore((s) => s.runWarning);
   const cancelRun = useStore((s) => s.cancelRun);
   const resumeRun = useStore((s) => s.resumeRun);
+  const continueRun = useStore((s) => s.continueRun);
   const watch = useStore((s) => s.watch);
   const flow = useCurrentFlow();
   const [picked, setPicked] = useState<string | null>(null);
@@ -127,6 +128,7 @@ export function RunPanel() {
           {runError && <div role="alert" className="text-xs text-red-400">{runError}</div>}
         </div>
 
+        <ContinueBox run={run} onContinue={(repair) => continueRun(run.id, repair)} />
         <RetryBox run={run} onResume={(from) => resumeRun(run.id, from)} />
 
         {run.pendingQuestion && (

@@ -1,11 +1,13 @@
 // "Retry from failed step" / "Re-run from here" for finished runs (see shared/resume.ts for what a resume does).
 
 import { useId, useState } from "react";
-import { Loader2, RotateCcw } from "lucide-react";
+import { Loader2, PauseCircle, Play, RotateCcw, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { nodeLabel } from "../../shared/resolve";
+import { runNodeLabel } from "../../shared/subflow";
+import { PAUSE_REASON_TEXT, isPaused } from "../../shared/journal";
 import { canRestartAt, planResume, resumeBlocker, type ResumeResult } from "../../shared/resume";
 import type { RunState } from "../../shared/types";
 
@@ -21,6 +23,93 @@ function useResumeCheck(run: RunState, fromNodeIds?: string[]): ResumeResult & {
   };
   if (!flow) return { ok: false, problems: [`Flow "${run.flowName}" no longer exists`], label };
   return { ...planResume(run, flow, blocks, fromNodeIds), label };
+}
+
+const HOLD_TEXT = {
+  validation: "It can't continue as it is:",
+  manual: "This flow's interrupted runs wait for you (Inputs → Continue interrupted runs automatically is off).",
+  loop: "It was continued several times without a step finishing, so it isn't continued automatically any more.",
+  corrupt: "Its journal can't be read, so it can't be continued.",
+};
+
+/**
+ * Run tab / Agent screen: a paused or interrupted run (quit, update, crash) — Continue carries on as the same run
+ * (finished steps kept, interrupted ones run again); Repair first adopts what changed when a check failed.
+ */
+export function ContinueBox({
+  run,
+  onContinue,
+  className,
+}: {
+  run: RunState;
+  onContinue: (repair: boolean) => Promise<string[] | undefined>;
+  className?: string;
+}) {
+  const flows = useStore((s) => s.data?.flows ?? []);
+  const blocks = useStore((s) => s.data?.blocks ?? []);
+  const [busy, setBusy] = useState<"continue" | "repair">();
+  const [changes, setChanges] = useState<string[]>();
+  if (!isPaused(run)) return null;
+  const why = PAUSE_REASON_TEXT[run.pauseReason ?? "crash"];
+  const interrupted = Object.keys(run.nodes)
+    .filter((k) => run.nodes[k].interrupted)
+    .map((k) => runNodeLabel(k, flows.find((f) => f.id === run.flowId), flows, blocks));
+  const hold = run.hold;
+  const go = async (repair: boolean) => {
+    setBusy(repair ? "repair" : "continue");
+    try {
+      const c = await onContinue(repair);
+      if (repair && c) setChanges(c);
+    } finally {
+      setBusy(undefined);
+    }
+  };
+  return (
+    <div role="status" className={cn("space-y-2 rounded-lg border border-violet-400/30 bg-violet-500/5 p-2.5 text-xs", className)}>
+      <div className="flex items-center gap-1.5 font-medium text-violet-200">
+        <PauseCircle className="size-4" aria-hidden /> {run.phase === "interrupted" ? "Interrupted" : "Paused"} — {why}
+      </div>
+      {run.parent ? (
+        <p className="text-muted-foreground">It continues with the run that started it.</p>
+      ) : (
+        <>
+          <p className="leading-relaxed text-muted-foreground">
+            Continue carries on as this same run: finished steps are kept
+            {interrupted.length > 0 && <>, and {interrupted.join(", ")} (cut off) runs again — an agent first continues its own session</>}.
+          </p>
+          {hold && (
+            <div className="space-y-1 text-amber-300">
+              <p>{HOLD_TEXT[hold.reason]}</p>
+              {hold.reason === "validation" && (
+                <ul className="list-disc space-y-0.5 pl-4">
+                  {hold.problems.map((p) => (
+                    <li key={p}>{p}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {changes && <p className="text-emerald-300">Repaired: {changes.length ? changes.join("; ") : "nothing had changed"}.</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" disabled={!!busy || hold?.reason === "corrupt"} onClick={() => void go(false)} title="Check it can go on, then carry on as the same run">
+              {busy === "continue" ? <Loader2 className="animate-spin" /> : <Play />} Continue
+            </Button>
+            {hold?.reason === "validation" && hold.repairable && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!!busy}
+                onClick={() => void go(true)}
+                title="Adopt the current flow, settings and branch (each change is listed and kept in the run's journal), then continue"
+              >
+                {busy === "repair" ? <Loader2 className="animate-spin" /> : <Wrench />} Repair and continue
+              </Button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
 }
 
 /** Run tab / Agent screen: the primary way back into a failed or stopped run. */

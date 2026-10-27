@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Loader2, Plus, RotateCcw, Send, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAgent } from "@/lib/agent";
+import { isPaused } from "../../../shared/journal";
+import { ContinueBox } from "../ResumeControls";
 import { cn } from "@/lib/utils";
 import type { RunState } from "../../../shared/types";
 import type { RunFlow } from "./useRunFlow";
@@ -130,6 +132,7 @@ function FinishedBar({ run }: { run: RunState }) {
 /** Bottom of a run's conversation: answer a question, watch it work, or start again. */
 export function RunComposer({ run, rf }: { run: RunState; rf: RunFlow }) {
   if (run.finishedAt) return <FinishedBar run={run} />;
+  if (isPaused(run)) return <ContinueBox run={run} onContinue={(repair) => useAgent.getState().continueRun(run.id, repair)} className="rounded-xl px-4 py-3" />;
   if (run.pendingQuestion) return <AnswerComposer key={`${run.id}:${run.pendingQuestion.askedAt}`} run={run} rf={rf} />;
   return <RunningBar run={run} rf={rf} />;
 }

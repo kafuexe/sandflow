@@ -17,6 +17,8 @@ const { autoUpdater } = electronUpdater;
 let server: AppServer | undefined;
 let win: BrowserWindow | undefined;
 let quitting = false;
+/** Why the app quits: running flows pause with this reason and continue on the next start. */
+let quitReason: "quit" | "update" = "quit";
 
 /**
  * Apps started from Finder / a desktop launcher get a minimal PATH, so git, docker, gh and the agent
@@ -105,9 +107,13 @@ function setupAutoUpdate(dataDir: string) {
       defaultId: 0,
       cancelId: 1,
       message: `Sandflow ${info.version} is ready to install`,
-      detail: "Restart to update. Any running flow will be cancelled. Otherwise it installs the next time you quit.",
+      detail: "Restart to update. Running flows are paused and continue where they were after the restart. Otherwise it installs the next time you quit.",
     });
-    if (response === 0) autoUpdater.quitAndInstall();
+    if (response === 0) {
+      // Runs pause with reason "update" (see before-quit), then the installer takes over.
+      quitReason = "update";
+      autoUpdater.quitAndInstall();
+    }
   });
   void autoUpdater.checkForUpdates().catch((e: Error) => console.warn("[update]", e.message));
 }
@@ -145,11 +151,12 @@ if (!app.requestSingleInstanceLock()) {
     app.exit(1);
   });
   app.on("window-all-closed", () => app.quit());
-  // Cancel active runs first so sandboxes / containers are torn down, then really quit.
+  // Pause active runs first (they continue on the next start; Stop is what cancels one) so sandboxes / containers are
+  // torn down, then really quit.
   app.on("before-quit", (e) => {
     if (quitting || !server) return;
     e.preventDefault();
     quitting = true;
-    void server.close().finally(() => app.quit());
+    void server.close(quitReason).finally(() => (quitReason === "update" ? autoUpdater.quitAndInstall() : app.quit()));
   });
 }
