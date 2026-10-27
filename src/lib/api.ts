@@ -96,6 +96,8 @@ export const api = {
   /** Send a steering message to a running agent node (node keys of subflow nodes contain "/"). */
   steer: (id: string, nodeKey: string, message: string) =>
     request<{ ok: true; steer: SteerRecord }>("POST", `/runs/${encodeURIComponent(id)}/nodes/${encodeURIComponent(nodeKey)}/steer`, { message }),
+  /** Desktop app: whether Claude Code is installed and what the integration did (waits for a sync in progress). */
+  claudeCodeStatus: () => request<{ available: boolean; present?: boolean; enabled: boolean; notes: string[] }>("GET", "/claude-code"),
   sandboxStatus: () =>
     request<{ runtime: string; runtimeAvailable: boolean; image: string; imagePresent: boolean; bundled: boolean }>(
       "GET",

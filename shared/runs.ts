@@ -27,5 +27,6 @@ export function summarize(r: RunState): RunSummary {
     ...(r.phase ? { phase: r.phase } : {}),
     ...(r.pauseReason ? { pauseReason: r.pauseReason } : {}),
     ...(r.hold ? { hold: r.hold } : {}),
+    ...(r.startedBy ? { startedBy: r.startedBy } : {}),
   };
 }

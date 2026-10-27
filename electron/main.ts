@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import electronUpdater from "electron-updater";
@@ -133,6 +134,16 @@ async function start() {
       ? path.join(process.resourcesPath, "sandbox", "sandflow-agent.tar.gz")
       : path.join(appRoot, "build", "sandbox", "sandflow-agent.tar.gz"),
     runners: { auto: runAuto, ai: runAi, script: runScript, integration: runIntegration },
+    // Done on every start rather than by the installer: the app starts right after an install and after every
+    // (silent) update, runs as the user whose ~/.claude it is, and knows its data folder.
+    claudeCode: {
+      home: os.homedir(),
+      dataDir,
+      skillsDir: app.isPackaged ? path.join(process.resourcesPath, "agent-skills") : path.join(appRoot, "agent-skills"),
+      // The bridge runs on the app's own binary as Node, so Claude Code needs no Node install.
+      node: { command: process.execPath, env: { ELECTRON_RUN_AS_NODE: "1" } },
+      version: app.getVersion(),
+    },
   });
   console.log(`Sandflow backend listening on ${server.url}`);
   createWindow(server.url);

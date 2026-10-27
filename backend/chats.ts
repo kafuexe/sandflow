@@ -312,8 +312,8 @@ export function createChatService(opts: { dir: string; load(): AppData; mcp: Mcp
         if (ops !== undefined && !failure) {
           const replace = ops && typeof ops === "object" && !Array.isArray(ops) ? (ops as { replace?: Record<string, unknown> }).replace : undefined;
           const r = replace
-            ? opts.mcp.callTool("replace_flow", replace, { scope: flow.id, onCall: (c) => record(chat.id, c) })
-            : opts.mcp.callTool("edit_flow", { ops }, { scope: flow.id, onCall: (c) => record(chat.id, c) });
+            ? await opts.mcp.callTool("replace_flow", replace, { scope: flow.id, onCall: (c) => record(chat.id, c) })
+            : await opts.mcp.callTool("edit_flow", { ops }, { scope: flow.id, onCall: (c) => record(chat.id, c) });
           if (r.isError) failure = r.text;
         }
         touch();

@@ -18,7 +18,9 @@ picks a new port each launch) is written to `mcp.json` in Sandflow's data folder
 - Linux: `~/.config/Sandflow/data/mcp.json`
 - `npm run dev`: `./.sandflow/mcp.json` (URL `http://localhost:5173/api/mcp`)
 
-Claude Code: `claude mcp add --transport http sandflow <url>` or `claude --mcp-config <path to mcp.json>`.
+Claude Code: the desktop app registers the `sandflow` server (and this skill) with Claude Code on start, unless
+Settings → Claude Code integration is off. Otherwise: `claude mcp add --transport http sandflow <url>` or
+`claude --mcp-config <path to mcp.json>`.
 
 Append `?flow=<flowId>` to the URL to limit a session to editing one flow.
 

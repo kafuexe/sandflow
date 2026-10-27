@@ -6,6 +6,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import { createApi } from "./api";
+import type { ClaudeCodeOptions } from "./claudeCode";
 import type { NodeRunner } from "./engine";
 import { createStorage } from "./storage";
 
@@ -26,6 +27,8 @@ export interface AppServerOptions {
   port?: number;
   /** How long running steps get to finish when runs pause on close (default 5 s). */
   pauseGraceMs?: number;
+  /** Register Sandflow with Claude Code (desktop app; Settings can turn it off). */
+  claudeCode?: ClaudeCodeOptions;
 }
 
 export interface AppServer {
@@ -54,6 +57,7 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
     fetchBasePack: opts.fetchBasePack ?? true,
     bundledSandboxImage: opts.bundledSandboxImage,
     pauseGraceMs: opts.pauseGraceMs,
+    claudeCode: opts.claudeCode,
   });
   const root = path.resolve(opts.webRoot);
   let allowedHosts = new Set<string>();
@@ -96,6 +100,8 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
   });
   const port = (server.address() as AddressInfo).port;
   allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
+  // Claude Code's bridge finds this port in mcp.json, even before the window has loaded.
+  api.noteHost(`127.0.0.1:${port}`);
 
   return {
     url: `http://127.0.0.1:${port}`,

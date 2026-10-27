@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, CircleDashed, HelpCircle, Loader2, Send, Square, TriangleAlert, X, Zap } from "lucide-react";
+import { Bot, Check, CircleDashed, HelpCircle, Loader2, Send, Square, TriangleAlert, X, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -115,6 +115,12 @@ export function RunPanel() {
                   open
                 </a>
               )}
+            </div>
+          )}
+          {run.startedBy && (
+            <div className="text-xs text-muted-foreground">
+              <Bot className="mr-1 inline size-3 text-sky-400" aria-hidden />
+              Started by {run.startedBy.label}
             </div>
           )}
           {run.branch && <div className="font-mono text-xs text-muted-foreground">branch: {run.branch}</div>}
