@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { nodeLabel } from "../../shared/resolve";
-import type { FlowNode, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
+import type { FlowNode, NodeDelivery, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { withMergeLock } from "../stack";
 import { runTree } from "../proc";
@@ -36,6 +36,16 @@ export function mrTitle(startingPrompt: string): string {
 
 const MAX_COMMENT = 60_000;
 
+/** The posted comment's URL from gh / glab's JSON answer. */
+function commentUrlOf(out: string, event: TriggerEvent | undefined): string | undefined {
+  try {
+    const j = JSON.parse(out) as { html_url?: string; id?: number };
+    return j.html_url ?? (j.id !== undefined ? `${event?.url ?? ""}#note_${j.id}` : undefined);
+  } catch {
+    return undefined; // non-JSON output
+  }
+}
+
 /**
  * gh/glab command that posts `body` on the issue / MR / PR the trigger event came from.
  * Uses the REST API through the CLI so it works for issues and PRs alike and on self-hosted hosts.
@@ -64,6 +74,40 @@ export function commentCommand(event: TriggerEvent | undefined, body: string): {
   };
 }
 
+/**
+ * Irreversible steps (MEOW delivery): run under the run's delivery lock — a pause or Stop waits for them instead of
+ * cutting them in half — and remember what they did in the journal (per execution of the node), so a continued run
+ * never posts, pushes or opens an MR twice.
+ */
+function delivery(ctx: RunContext, node: FlowNode) {
+  const ns = ctx.nodeState?.(node.id);
+  const exec = ns?.executions ?? 0;
+  return {
+    /** What this execution already delivered (a continued, interrupted attempt). */
+    done: ns?.delivery?.exec === exec ? ns.delivery : undefined,
+    save(patch: Omit<NodeDelivery, "exec">) {
+      if (!ns) return;
+      ns.delivery = { ...(ns.delivery?.exec === exec ? ns.delivery : {}), ...patch, exec };
+      ctx.journal?.();
+    },
+    run: <T>(fn: () => Promise<T>): Promise<T> => (ctx.deliver ? ctx.deliver(fn) : fn()),
+  };
+}
+
+/** URL of an open MR / PR for `branch`, if the provider already has one (so Create MR reuses it). */
+async function openMrUrl(provider: string, branch: string, repo: string, signal: AbortSignal): Promise<string | undefined> {
+  try {
+    const out =
+      provider === "github"
+        ? await run("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"], repo, signal)
+        : await run("glab", ["mr", "list", "--source-branch", branch], repo, signal);
+    return /https?:\/\/\S+/.exec(out)?.[0];
+  } catch (e) {
+    if ((e as Error).message === "Run cancelled") throw e;
+    return undefined; // can't tell: create it
+  }
+}
+
 /** Merge a Box Stack task's branch into the parent run's branch, in the parent's worktree, one task at a time. */
 async function mergeIntoParent(ctx: RunContext, node: FlowNode, inputs: NodeIO): Promise<NodeResult> {
   const branch = ctx.run.stack?.branch;
@@ -74,18 +118,25 @@ async function mergeIntoParent(ctx: RunContext, node: FlowNode, inputs: NodeIO):
   const worktree = (parent.sandbox as { worktreePath?: string } | undefined)?.worktreePath;
   if (!worktree) throw new Error("The parent run has no worktree to merge into yet");
   const target = parent.run.branch ?? "the parent branch";
-  return withMergeLock(ctx.run.stack.groupId, async () => {
+  const d = delivery(ctx, node);
+  const merged = `Merged ${branch} into ${target}`;
+  const result = (): NodeResult => ({ outputs: { artifact: inputs.artifact?.trim() ? `${inputs.artifact}\n\n${merged}` : merged, steer: inputs.steer } });
+  if (d.done?.merged) {
+    ctx.log("info", `${merged} already (before the run was interrupted) — not merging again`, node.id);
+    return result();
+  }
+  return d.run(() => withMergeLock(ctx.run.stack!.groupId, async () => {
     try {
       await run("git", ["-c", "user.name=Sandflow", "-c", "user.email=sandflow@localhost", "merge", "--no-edit", branch], worktree, ctx.abort.signal);
     } catch (e) {
       await run("git", ["merge", "--abort"], worktree).catch(() => {});
       throw new Error(`Merge conflict merging ${branch} into ${target} — merge aborted. ${(e as Error).message}`);
     }
-    ctx.log("info", `Merged ${branch} into ${target}`, node.id);
+    ctx.log("info", merged, node.id);
+    d.save({ merged: true });
     // Hand the task's own result on, so the stack's combine step still sees what the task did.
-    const merged = `Merged ${branch} into ${target}`;
-    return { outputs: { artifact: inputs.artifact?.trim() ? `${inputs.artifact}\n\n${merged}` : merged, steer: inputs.steer } };
-  });
+    return result();
+  }));
 }
 
 export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
@@ -94,15 +145,18 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
 
   if (cfg.autoAction === "post-comment") {
     const { cmd, args } = commentCommand(ctx.run.trigger, inputs.artifact ?? "");
-    // e.g. GH_TOKEN / GITLAB_TOKEN if the block declares them
-    const out = await run(cmd, args, process.cwd(), signal, { ...process.env, ...env });
-    let url: string | undefined;
-    try {
-      const j = JSON.parse(out) as { html_url?: string; id?: number };
-      url = j.html_url ?? (j.id !== undefined ? `${ctx.run.trigger?.url ?? ""}#note_${j.id}` : undefined);
-    } catch {
-      /* non-JSON output */
+    const d = delivery(ctx, node);
+    if (d.done?.commentUrl) {
+      ctx.log("info", `Comment already posted (${d.done.commentUrl}) before the run was interrupted — not posting it twice`, node.id);
+      return { outputs: { artifact: d.done.commentUrl } };
     }
+    // e.g. GH_TOKEN / GITLAB_TOKEN if the block declares them
+    const out = await d.run(async () => {
+      const o = await run(cmd, args, process.cwd(), signal, { ...process.env, ...env });
+      d.save({ commentUrl: commentUrlOf(o, ctx.run.trigger) ?? (o.trim() || "posted") });
+      return o;
+    });
+    const url = commentUrlOf(out, ctx.run.trigger);
     ctx.log("info", `Posted comment on ${ctx.run.trigger?.repo} ${ctx.run.trigger?.target === "merge_request" ? "MR" : "issue"} ${ctx.run.trigger?.number}`, node.id);
     return { outputs: { artifact: url ?? out.trim() } };
   }
@@ -152,24 +206,41 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
         })
         .join("\n");
       const body = `${inputs.artifact?.trim() ?? ""}\n\n---\n_Created by Sandflow run \`${ctx.run.id}\`_\n\n${summary}`.trim();
-
-      await run("git", ["push", "-u", "origin", branch], repo, signal);
-      ctx.log("info", `Pushed ${branch}`, node.id);
-      let out: string;
-      if (provider === "github") {
-        out = await run("gh", ["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body], repo, signal);
-      } else if (provider === "gitlab") {
-        out = await run(
-          "glab",
-          ["mr", "create", "--source-branch", branch, "--target-branch", base, "--title", title, "--description", body, "--yes"],
-          repo,
-          signal,
-        );
-      } else {
-        throw new Error(`Unknown MR_PROVIDER "${provider}" (use github or gitlab)`);
+      if (provider !== "github" && provider !== "gitlab") throw new Error(`Unknown MR_PROVIDER "${provider}" (use github or gitlab)`);
+      const d = delivery(ctx, node);
+      if (d.done?.mrUrl) {
+        ctx.log("info", `MR already created (${d.done.mrUrl}) before the run was interrupted — reusing it`, node.id);
+        return { outputs: { artifact: d.done.mrUrl } };
       }
-      ctx.log("info", out, node.id);
-      return { outputs: { artifact: out } };
+      return d.run(async () => {
+        // Skip the push when origin already has this commit (an interrupted attempt got that far).
+        const local = await run("git", ["rev-parse", branch], repo, signal);
+        const remote = (await run("git", ["ls-remote", "origin", `refs/heads/${branch}`], repo, signal).catch(() => "")).split(/\s/)[0];
+        if (remote && remote === local) ctx.log("info", `${branch} is already pushed (origin has ${local.slice(0, 7)}) — not pushing again`, node.id);
+        else {
+          await run("git", ["push", "-u", "origin", branch], repo, signal);
+          ctx.log("info", `Pushed ${branch}`, node.id);
+        }
+        d.save({ pushed: true });
+        const existing = await openMrUrl(provider, branch, repo, signal);
+        let out: string;
+        if (existing) {
+          ctx.log("info", `An open ${provider === "github" ? "PR" : "MR"} for ${branch} already exists — reusing it: ${existing}`, node.id);
+          out = existing;
+        } else if (provider === "github") {
+          out = await run("gh", ["pr", "create", "--head", branch, "--base", base, "--title", title, "--body", body], repo, signal);
+        } else {
+          out = await run(
+            "glab",
+            ["mr", "create", "--source-branch", branch, "--target-branch", base, "--title", title, "--description", body, "--yes"],
+            repo,
+            signal,
+          );
+        }
+        d.save({ mrUrl: /https?:\/\/\S+/.exec(out)?.[0] ?? out.trim() });
+        ctx.log("info", out, node.id);
+        return { outputs: { artifact: out } };
+      });
     }
 
     case "shell": {

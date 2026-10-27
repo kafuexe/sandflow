@@ -101,3 +101,43 @@ describe("auto runner", () => {
     expect(mrTitle("")).toBe("Sandflow changes");
   });
 });
+
+describe("auto runner: idempotent delivery (continuing an interrupted run)", () => {
+  const withNode = (c: RunContext, ns: RunContext["run"]["nodes"][string], logs: string[] = []) =>
+    Object.assign(c, { nodeState: () => ns, journal: () => {}, log: (_l: string, m: string) => logs.push(m) });
+
+  it("Create MR reuses the MR it already created in this execution — nothing is pushed or created again", async () => {
+    const ns = { status: "running" as const, executions: 2, delivery: { exec: 2, pushed: true, mrUrl: "https://github.com/a/b/pull/7" } };
+    const c = withNode(ctx({ REPO_PATH: path.join(os.tmpdir(), "no-such-repo-xyz"), BRANCH_NAME: "feat/x", MR_PROVIDER: "github" }), ns);
+    const res = await runAuto(c, { ...node, data: { blockId: "create-mr" } }, resolveBlock("create-mr", BUILTIN_BLOCKS), { artifact: "x" });
+    expect(res.outputs.artifact).toBe("https://github.com/a/b/pull/7");
+  });
+
+  it("Post comment never posts the same execution's comment twice", async () => {
+    const event = { source: "github" as const, type: "issue.comment", repo: "a/b", number: 1, target: "issue" as const, firedAt: 0 };
+    const ns = { status: "running" as const, executions: 1, delivery: { exec: 1, commentUrl: "https://github.com/a/b/issues/1#c1" } };
+    const c = withNode(ctx({}), ns);
+    c.run.trigger = event;
+    const cfg = resolveBlock("post-comment", BUILTIN_BLOCKS);
+    const res = await runAuto(c, { ...node, data: { blockId: "post-comment" } }, cfg, { artifact: "hello" });
+    expect(res.outputs.artifact).toBe("https://github.com/a/b/issues/1#c1");
+  });
+
+  it("Create MR skips the push when origin already has the branch's commit", async () => {
+    const { d, git } = repo();
+    const origin = fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-origin-"));
+    dirs.push(origin);
+    execFileSync("git", ["init", "-q", "--bare"], { cwd: origin });
+    git("branch", "feat/x");
+    git("remote", "add", "origin", origin);
+    git("push", "-q", "origin", "feat/x");
+    const logs: string[] = [];
+    const ns = { status: "running" as const, executions: 1 } as RunContext["run"]["nodes"][string];
+    const c = withNode(ctx({ REPO_PATH: d, BRANCH_NAME: "feat/x", MR_PROVIDER: "gitlab", PATH: process.env.PATH ?? "" }), ns, logs);
+    // glab isn't set up here: creating the MR fails, after the push was skipped.
+    await runAuto(c, { ...node, data: { blockId: "create-mr" } }, resolveBlock("create-mr", BUILTIN_BLOCKS), { artifact: "x" }).catch(() => {});
+    expect(logs.some((m) => /already pushed/.test(m))).toBe(true);
+    expect(logs.some((m) => /^Pushed/.test(m))).toBe(false);
+    expect(ns.delivery).toMatchObject({ exec: 1, pushed: true });
+  });
+});

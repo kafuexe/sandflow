@@ -763,6 +763,24 @@ export function startRun(opts: StartRunOptions): RunHandle {
               result = { outputs: r.outputs ?? {}, exit: r.exit };
             } else if (cfg.kind === "stack") {
               if (depth + 1 > MAX_SUBFLOW_DEPTH) throw new Error(`Subflows nested more than ${MAX_SUBFLOW_DEPTH} deep — does a flow contain itself?`);
+              /** A task's run: one more level down, in this run's sandbox (shared) or a worktree cut from its branch. */
+              const childOptions = (child: Flow, o: { shared: boolean; branch?: string; baseBranch?: string }): StartRunOptions => ({
+                ...opts,
+                flow: child,
+                trigger: run.trigger,
+                startNodeId: undefined,
+                prompt: undefined,
+                resume: undefined,
+                continueFrom: undefined,
+                settings,
+                depth: depth + 1,
+                parent: { runId: run.id, nodeKey: k },
+                share: o.shared ? ctx : undefined,
+                branch: o.branch,
+                baseBranch: o.baseBranch,
+                parentContext: o.shared ? undefined : ctx,
+                onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
+              });
               result = await runStack(
                 {
                   ctx,
@@ -772,25 +790,22 @@ export function startRun(opts: StartRunOptions): RunHandle {
                   ai: runners.ai,
                   spawn: (child, o) => {
                     const h = startRun({
-                      ...opts,
-                      flow: child,
-                      trigger: run.trigger,
-                      startNodeId: undefined,
-                      prompt: undefined,
-                      settings,
+                      ...childOptions(child, o),
                       entry: o.entry,
-                      depth: depth + 1,
-                      parent: { runId: run.id, nodeKey: k },
                       stack: o.stack,
-                      share: o.shared ? ctx : undefined,
-                      branch: o.branch,
-                      baseBranch: o.baseBranch,
-                      parentContext: o.shared ? undefined : ctx,
-                      onFlag: (r, f) => void ctx.flag(f.severity, f.message, { nodeKey: k, details: f.details, fromRunId: f.fromRunId ?? r.id }),
                     });
                     opts.onSpawn?.(h);
                     return h;
                   },
+                  resumeChild: (id, child, o) => {
+                    const saved = opts.loadRun?.(id);
+                    if (!saved || saved.parent?.runId !== run.id) return undefined;
+                    if (saved.finishedAt) return saved;
+                    const h = startRun({ ...childOptions(child, o), continueFrom: saved });
+                    opts.onSpawn?.(h);
+                    return h;
+                  },
+                  halted,
                   settled: (h) => opts.onChange?.(h.state),
                 },
                 node,
@@ -924,10 +939,10 @@ export function startRun(opts: StartRunOptions): RunHandle {
   let paused = false;
   const done = (async () => {
     try {
-      const r = await runGraph(flow, "", opts.depth ?? 0, opts.entry);
+      const r = await runGraph(flow, "", opts.depth ?? 0, opts.entry ?? cont?.input);
       if (pausing) paused = true;
       else {
-        if (opts.entry) run.result = r;
+        if (opts.entry ?? cont?.input) run.result = r;
         run.status = ctx.abort.signal.aborted || stopping ? "cancelled" : "done";
       }
     } catch (e) {

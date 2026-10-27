@@ -228,7 +228,14 @@ export const CONTAINER_ID_RE = /^[0-9a-f]{12,64}$/;
  *  - docker / podman: the container is removed (`rm -f`) when the run is stopped, which kills everything in it.
  * After the run is stopped no new command starts in the sandbox.
  */
-export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "podman", signal: AbortSignal, exec: Exec = execCli): P {
+export interface SandboxNotes {
+  /** The container's id, once known (the run journals it). */
+  container?(id: string): void;
+  /** An agent command started / ended on this computer (pid + when it started: its identity). */
+  process?(pid: number, startedAt: number, running: boolean): void;
+}
+
+export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "podman", signal: AbortSignal, exec: Exec = execCli, notes: SandboxNotes = {}): P {
   const p = provider as unknown as ProviderLike;
   const create: ProviderLike["create"] = async (options) => {
     const handle = await p.create(options);
@@ -245,7 +252,12 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
         const { command, env: agentEnv, token } = takeAgentEnv(cmd);
         // An agent's command can also be stopped on its own (steering), not only with the whole run.
         const turn = token ? new AbortController() : undefined;
+        let spawned: { pid: number; at: number } | undefined;
         const p = runTree(win ? "cmd.exe" : "sh", win ? ["/d", "/s", "/c", command] : ["-c", command], {
+          onSpawn: (pid) => {
+            spawned = { pid, at: Date.now() };
+            notes.process?.(pid, spawned.at, true);
+          },
           cwd: o?.cwd ?? worktree,
           env: agentEnv ? { ...env, ...agentEnv } : env,
           stdin: o?.stdin,
@@ -255,7 +267,7 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
           windowsVerbatimArguments: win,
         });
         if (token && turn) trackInFlight(token, () => turn.abort(), p);
-        const r = await p;
+        const r = await p.finally(() => spawned && notes.process?.(spawned.pid, spawned.at, false));
         return { stdout: r.stdout, stderr: r.stderr, exitCode: r.killed ? 137 : r.code };
       };
       kill = () => {}; // runTree kills its own trees on abort
@@ -285,6 +297,7 @@ export function stoppableProvider<P>(provider: P, kind: "none" | "docker" | "pod
       // The container's hostname is its (short) id. Read it now, before anything of the agent's runs in there: by
       // the time Stop comes, whatever is inside could have rewritten /etc/hostname (e.g. to another run's container).
       const id = signal.aborted ? "" : await handle.exec("cat /etc/hostname").then((r) => r.stdout.trim(), () => "");
+      if (CONTAINER_ID_RE.test(id)) notes.container?.(id);
       kill = () => {
         // Remove the container: everything in it dies and the `docker exec` clients return. Only ever a container
         // id (hex) — never something that could be read as an option — and passed as one argv entry, no shell.

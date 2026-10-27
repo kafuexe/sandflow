@@ -82,6 +82,19 @@ export function killTree(child: ChildProcess): void {
   }
 }
 
+/** Kill a process tree by pid (a process left over by an earlier Sandflow — its own process group on POSIX). */
+export function killPidTree(pid: number): void {
+  if (isWindows) {
+    spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => {});
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    process.kill(pid, "SIGKILL");
+  }
+}
+
 /** spawn() (stdio piped) in its own process group (POSIX) so `killTree` reaches every descendant. */
 export function spawnTree(cmd: string, args: string[] | null, opts: Omit<SpawnOptions, "stdio" | "detached"> = {}): ChildProcessWithoutNullStreams {
   const o: SpawnOptions = { windowsHide: true, ...opts, stdio: "pipe", detached: !isWindows };
@@ -115,6 +128,8 @@ export interface RunTreeOptions {
   onLine?: (line: string) => void;
   /** Called once when the command is killed (e.g. to also remove a container it started). */
   onKill?: (why: string) => void;
+  /** Called with the pid once the command started (a run journals it, so a crash's leftovers can be found). */
+  onSpawn?: (pid: number) => void;
 }
 
 /** How long to wait for the pipes to close after a kill before giving up on them (a descendant may have escaped). */
@@ -135,6 +150,13 @@ export function runTree(cmd: string, args: string[] | null, o: RunTreeOptions = 
     } catch (e) {
       reject(e as Error);
       return;
+    }
+    if (child.pid) {
+      try {
+        o.onSpawn?.(child.pid);
+      } catch {
+        /* informational */
+      }
     }
     let stdout = "";
     let stderr = "";

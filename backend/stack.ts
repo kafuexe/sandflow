@@ -3,7 +3,8 @@
 
 import { randomUUID } from "node:crypto";
 import { normaliseTasks, parseSplit, SPLIT_PROTOCOL } from "../shared/stack";
-import type { Flow, FlowNode, NodeIO, ResolvedConfig, RunState, StackRunInfo } from "../shared/types";
+import { isPaused } from "../shared/journal";
+import type { Flow, FlowNode, NodeIO, ResolvedConfig, RunState, StackJournal, StackRunInfo } from "../shared/types";
 import type { NodeResult, NodeRunner, RunContext, RunHandle } from "./engine";
 
 /** Extra tries when the orchestrator's split can't be used. */
@@ -23,6 +24,13 @@ export interface StackDeps {
   spawn(child: Flow, o: { entry: NodeIO; stack: StackRunInfo; shared: boolean; branch?: string; baseBranch?: string }): RunHandle;
   /** A child's `stack.outcome` changed after it finished (so it can be saved again). */
   settled(h: RunHandle): void;
+  /**
+   * Continuing the run: pick a task's child run up again (it continues as the same run), or its final state when it
+   * had already finished. Undefined when it can't be found.
+   */
+  resumeChild?(runId: string, child: Flow, o: { shared: boolean; branch?: string; baseBranch?: string }): RunHandle | RunState | undefined;
+  /** The parent run stopped or is pausing: start nothing new. */
+  halted?(): boolean;
 }
 
 type Outcome =
@@ -77,6 +85,13 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
     allowQuestions: false,
     maxIterations: 1,
   });
+  // Continuing after an interruption: the tasks journaled last time (finished ones aren't redone).
+  const ns = ctx.run.nodes[nodeKey];
+  const saved = ctx.takeInterrupted?.(nodeKey) && ns?.stack?.tasks.length ? ns.stack : undefined;
+  const journal = (j: StackJournal) => {
+    if (ns) ns.stack = j;
+    ctx.journal?.();
+  };
   const failed = (message: string, details?: string): NodeResult => {
     ctx.flag("error", message, { nodeKey, details });
     return { outputs: { artifact: details ? `${message}\n\n${details}` : message }, exit: "failed" };
@@ -84,8 +99,9 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
 
   // ---- split ----
   const original = inputs.artifact ?? "";
-  let tasks: ReturnType<typeof normaliseTasks> | undefined;
+  let tasks: ReturnType<typeof normaliseTasks> | undefined = saved?.tasks.map((t) => ({ name: t.name, slug: t.slug, input: t.input }));
   let problem = "";
+  if (saved) ctx.log("info", `Continuing the Box Stack: ${saved.tasks.filter((t) => t.status === "done").length} of ${saved.tasks.length} task(s) already finished`, nodeKey);
   for (let attempt = 0; attempt <= SPLIT_RETRIES && !tasks; attempt++) {
     if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
     const artifact = problem ? `${original}\n\n---\nYour previous answer couldn't be used: ${problem} Answer again.` : original;
@@ -100,32 +116,69 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
   ctx.log("info", `Split into ${tasks.length} task(s): ${tasks.map((t) => t.name).join(", ")}`, nodeKey);
 
   // ---- children ----
-  const groupId = randomUUID();
+  const groupId = saved?.groupId ?? randomUUID();
   const isolated = s.workspace === "isolated";
   const base = isolated ? parentBranch(ctx) : undefined;
   const live = new Set<RunHandle>();
-  const stopAll = () => live.forEach((h) => h.cancel());
+  // Pausing the run pauses its tasks' runs (they continue with it); stopping it stops them.
+  const stopAll = () =>
+    live.forEach((h) => ((ctx.abort.signal.reason as Error | undefined)?.message === "Run paused" ? void h.pause(ctx.run.pauseReason === "update" ? "update" : "quit") : h.cancel()));
   ctx.abort.signal.addEventListener("abort", stopAll);
   const outcomes: Outcome[] = new Array(tasks.length);
   const maxAttempts = s.maxRetries + 1;
+  const halted = () => ctx.abort.signal.aborted || !!deps.halted?.();
+  const state: StackJournal = {
+    groupId,
+    tasks: tasks.map((t, i) => saved?.tasks[i] ?? { name: t.name, slug: t.slug, input: t.input, status: "pending", attempt: 0 }),
+  };
+  journal(state);
 
   async function runTask(index: number) {
     const t = tasks![index];
-    let reason = "";
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (ctx.abort.signal.aborted) return;
+    const js = state.tasks[index];
+    if (js.status === "done") {
+      outcomes[index] = { ok: true, name: t.name, outputs: js.outputs ?? {}, branch: js.branch };
+      return;
+    }
+    if (js.status === "dropped") {
+      outcomes[index] = { ok: false, name: t.name, reason: js.reason ?? "dropped", attempts: js.attempt };
+      return;
+    }
+    let reason = js.reason ?? "";
+    // A task whose run was going when the stack was interrupted: that run continues (same run, same attempt).
+    let carryOn = js.status === "running" && js.runId ? js.runId : undefined;
+    for (let attempt = carryOn ? js.attempt : js.attempt + 1; attempt <= maxAttempts; attempt++) {
+      if (halted()) return;
       const branch = isolated ? `${base}-${groupId.slice(0, 4)}-${index + 1}-${t.slug}${attempt > 1 ? `-try${attempt}` : ""}` : undefined;
-      const stack: StackRunInfo = { groupId, name: deps.label, index, total: tasks!.length, task: t.name, attempt, maxAttempts, ...(branch ? { branch } : {}) };
-      const artifact = reason ? `The previous attempt at this task was rejected:\n${reason}\n\nTry again.\n\n---\n\n${t.input}` : t.input;
-      const h = deps.spawn(child, { entry: { artifact, steer: inputs.steer }, stack, shared: !isolated, branch, baseBranch: base });
-      live.add(h);
-      const final = await h.done;
-      live.delete(h);
+      let h: RunHandle | undefined;
+      let final: RunState;
+      const resumed = carryOn ? deps.resumeChild?.(carryOn, child, { shared: !isolated, branch, baseBranch: base }) : undefined;
+      carryOn = undefined;
+      if (resumed && !("done" in resumed)) final = resumed;
+      else {
+        h = (resumed as RunHandle | undefined) ?? deps.spawn(child, {
+          entry: { artifact: reason ? `The previous attempt at this task was rejected:\n${reason}\n\nTry again.\n\n---\n\n${t.input}` : t.input, steer: inputs.steer },
+          stack: { groupId, name: deps.label, index, total: tasks!.length, task: t.name, attempt, maxAttempts, ...(branch ? { branch } : {}) },
+          shared: !isolated,
+          branch,
+          baseBranch: base,
+        });
+        Object.assign(js, { status: "running", runId: h.state.id, attempt, branch });
+        journal(state);
+        live.add(h);
+        final = await h.done;
+        live.delete(h);
+      }
+      // Paused with the run: it stays "running" in the journal and continues when the run does.
+      if (isPaused(final)) return;
+      const stack = final.stack ?? h?.state.stack;
       const why = rejection(final, s.successExits);
       if (!why) {
-        stack.outcome = "succeeded";
-        deps.settled(h);
+        if (stack) stack.outcome = "succeeded";
+        if (h) deps.settled(h);
         outcomes[index] = { ok: true, name: t.name, outputs: final.result?.outputs ?? {}, branch };
+        Object.assign(js, { status: "done", outputs: final.result?.outputs ?? {} });
+        journal(state);
         ctx.log("info", `✓ task "${t.name}"`, nodeKey);
         return;
       }
@@ -133,9 +186,11 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
       // Stopped by hand (the stack itself is still going): that's a decision, not a failure to retry.
       const stopped = final.status === "cancelled";
       reason = stopped ? "stopped by you" : why;
-      stack.outcome = attempt < maxAttempts && !stopped ? "rejected" : "dropped";
-      deps.settled(h);
+      if (stack) stack.outcome = attempt < maxAttempts && !stopped ? "rejected" : "dropped";
+      if (h) deps.settled(h);
       ctx.log("warn", `Task "${t.name}" attempt ${attempt}/${maxAttempts} ${stopped ? "stopped" : `rejected: ${clip(why, 300)}`}`, nodeKey);
+      Object.assign(js, { reason, status: stopped || attempt >= maxAttempts ? "dropped" : "pending" });
+      journal(state);
       if (stopped) {
         outcomes[index] = { ok: false, name: t.name, reason, attempts: attempt };
         return;
@@ -147,7 +202,7 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
   // A fixed pool: each worker takes the next task and keeps its slot through the task's retries.
   let next = 0;
   const worker = async () => {
-    while (next < tasks!.length && !ctx.abort.signal.aborted) await runTask(next++);
+    while (next < tasks!.length && !halted()) await runTask(next++);
   };
   try {
     await Promise.all(Array.from({ length: Math.min(Math.max(1, s.maxConcurrent), tasks.length) }, worker));
@@ -155,6 +210,7 @@ export async function runStack(deps: StackDeps, node: FlowNode, cfg: ResolvedCon
     ctx.abort.signal.removeEventListener("abort", stopAll);
   }
   if (ctx.abort.signal.aborted) throw new Error("Run cancelled");
+  if (halted()) throw new Error("Run paused");
 
   const done = outcomes.filter((o): o is Extract<Outcome, { ok: true }> => o.ok);
   const dropped = outcomes.filter((o): o is Extract<Outcome, { ok: false }> => !o.ok);

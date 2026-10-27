@@ -214,3 +214,48 @@ describe("durable runs: pause", () => {
     expect(final.nodes.c.executions).toBe(0);
   });
 });
+
+describe("durable runs: Box Stack", () => {
+  it("continuing doesn't redo finished tasks; the interrupted task's run continues as itself; pending tasks start", async () => {
+    const { parentWith, area } = await import("./stackFixtures");
+    const { SPLIT_PROTOCOL } = await import("../shared/stack");
+    const big = parentWith({ maxConcurrent: 1 });
+    const journals = new Map<string, RunState>();
+    const calls: string[] = [];
+    const runner = (hang: boolean): NodeRunner => async (_ctx, node, cfg, inputs) => {
+      if (node.id === "s" && cfg.instructions.includes(SPLIT_PROTOCOL)) {
+        calls.push("split");
+        return { outputs: { artifact: JSON.stringify({ tasks: ["a", "b", "c"].map((x) => ({ name: x, input: x })) }) } };
+      }
+      if (node.id === "s") return calls.push(`combine:${inputs.artifact}`), { outputs: { artifact: "combined" } };
+      if (node.id === "work") {
+        calls.push(`work:${inputs.artifact}`);
+        if (hang && inputs.artifact === "b") return never();
+        return { outputs: { artifact: `did ${inputs.artifact}` } };
+      }
+      return { outputs: { artifact: `${node.id}-out` } };
+    };
+    const go = (hang: boolean, o: Partial<StartRunOptions> = {}) =>
+      startRun({
+        flow: big, flows: [big, area], blocks, env: {}, settings, runners: { auto: runner(hang), ai: runner(hang) },
+        onJournal: (s) => journals.set(s.id, structuredClone(s)),
+        loadRun: (id) => structuredClone(journals.get(id)),
+        ...o,
+      });
+    const first = go(true);
+    await until(() => calls.includes("work:b"));
+    const crashed = structuredClone(journals.get(first.state.id)!);
+    expect(crashed.nodes.s.stack?.tasks.map((t) => t.status)).toEqual(["done", "running", "pending"]);
+    const bRun = crashed.nodes.s.stack!.tasks[1].runId!;
+
+    calls.length = 0;
+    const children: string[] = [];
+    const final = await go(false, { continueFrom: crashed, onSpawn: (h) => children.push(h.state.id) }).done;
+    expect(final.status).toBe("done");
+    expect(calls.filter((c) => c.startsWith("work:"))).toEqual(["work:b", "work:c"]);
+    expect(calls).not.toContain("split");
+    expect(children[0]).toBe(bRun); // the same run, continued
+    expect(journals.get(bRun)?.attempt).toBe(2);
+    expect(calls.find((c) => c.startsWith("combine:"))).toMatch(/did a[\s\S]*did b[\s\S]*did c/);
+  });
+});

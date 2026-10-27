@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { auxModelEnv, ENDPOINT_ENV, GATEWAY_ENV } from "../../shared/agents";
+import { INTERRUPTED_PROMPT } from "../../shared/journal";
 import { CORE_PACK } from "../../shared/packs";
 import { agentOrigin, nodeLabel, PROJECT_ENV, resolveNode } from "../../shared/resolve";
 import { hostAgentEnv, resolveRunOn } from "../../shared/runOn";
@@ -15,7 +16,7 @@ import { buildPrompt, parseOutput, tail, type RouteOption } from "../prompt";
 import { ensureSandboxReady, execCli, sandboxProviderOptions, stoppableProvider, withAgentEnv } from "../sandbox";
 import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
 import { agentStreamHandler, type StreamEvent } from "./activity";
-import { resumingAgent, Steering, steerPrompt } from "./steer";
+import { canResumeSessions, resumingAgent, Steering, steerPrompt } from "./steer";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
 
 /** Where installed packs are mounted (read-only) inside the run's sandbox. */
@@ -194,7 +195,11 @@ async function createRunSandbox(ctx: RunContext, kind: SandboxKind): Promise<San
         ? (await import("@ai-hero/sandcastle/sandboxes/podman")).podman(sandboxProviderOptions(settings, packMounts))
         : (await import("@ai-hero/sandcastle/sandboxes/no-sandbox")).noSandbox();
   // Stopping the run kills the agent's processes / container, not just the wait for them.
-  const provider = stoppableProvider(baseProvider, kind, signal);
+  // Container ids and agent pids go into the journal: what a crash leaves behind is removed before the run continues.
+  const provider = stoppableProvider(baseProvider, kind, signal, undefined, {
+    container: (id) => kind !== "none" && ctx.noteContainer?.(kind, id),
+    process: (pid, startedAt, running) => ctx.noteProcess?.(pid, startedAt, running),
+  });
   const scratch = usesScratchWorkspace(ctx);
   const repo = scratch ? await scratchWorkspace(ctx, kind === "none") : ctx.env[PROJECT_ENV]!.trim();
   const branch = sandboxBranch(ctx);
@@ -347,6 +352,8 @@ function logUsage(ctx: RunContext, nodeId: string, res: RunResultLike) {
     (a, i) => ({ in: a.in + (i.usage?.inputTokens ?? 0), out: a.out + (i.usage?.outputTokens ?? 0) }),
     { in: 0, out: 0 },
   );
+  // Journaled per result when the agent reports usage (sandcastle doesn't report cost).
+  if (res.iterations.some((i) => i.usage)) ctx.noteUsage?.(nodeId, { inputTokens: usage.in, outputTokens: usage.out });
   ctx.log(
     "info",
     `Agent finished: ${res.iterations.length} iteration(s), ${res.commits.length} commit(s), tokens in ${usage.in} / out ${usage.out}`,
@@ -440,6 +447,8 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   if (Object.keys(aux).length) ctx.log("info", `Gateway with a non-Claude model: Claude Code's other models (${Object.keys(aux).join(", ")}) use ${cfg.agent.model} too`, node.id);
   if (endpoint) ctx.log("info", `Agent endpoint: ${endpoint}`, node.id);
   const routes = cfg.kind === "manager" ? routesFor(ctx, node) : undefined;
+  /** Where this agent's session lives: this computer, or the run's current container of its kind. */
+  const where = onHost ? "host" : (ctx.run.sandboxes?.filter((c) => c.kind === kind).at(-1)?.containerId ?? kind);
   const qa: QaPair[] = [];
   const stream = agentStreamHandler(ctx, node.id, cfg.agent.provider);
   const baseOptions = {
@@ -452,8 +461,11 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
             path: path.join(ctx.logDir, `${node.id.replace(/[^\w-]/g, "_")}.log`),
             onAgentStreamEvent: (ev: StreamEvent & { iteration?: number }) => {
               stream(ev);
-              // The agent's session id, so a steering message can resume it.
-              if (ev.type === "raw" && typeof ev.line === "string") steering.seeLine(ev.line, ev.iteration);
+              // The agent's session id, so a steering message can resume it — and a continued run, after a crash.
+              if (ev.type === "raw" && typeof ev.line === "string") {
+                steering.seeLine(ev.line, ev.iteration);
+                if (steering.session) ctx.noteSession?.(node.id, { id: steering.session, where });
+              }
             },
           },
         }
@@ -461,12 +473,12 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   };
 
   type Start = (signal: AbortSignal) => Promise<RunResultLike>;
-  const runFresh = (signal: AbortSignal, maxIterations = cfg.maxIterations) =>
+  const runFresh = (signal: AbortSignal, maxIterations = cfg.maxIterations, preface?: string) =>
     sandbox.run({
       ...baseOptions,
       signal,
       agent,
-      prompt: buildPrompt({
+      prompt: (preface ? `${preface}\n\n---\n\n` : "") + buildPrompt({
         cfg,
         inputs,
         startingPrompt: ctx.settings.startingPrompt,
@@ -540,6 +552,37 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
       return done;
     }
   };
+  /**
+   * The first call of the attempt. After an interruption (pause / crash) the agent first continues its own session
+   * with "you were interrupted…" (MEOW resumes a session on its first query only); when that session can't be
+   * continued (its container is gone, it was never saved, the resume fails) it starts fresh with that message plus
+   * its original task.
+   */
+  function firstCall(interrupted: { session?: { id: string; where: string } } | undefined): Start {
+    if (!interrupted) return (signal) => runFresh(signal);
+    const recap = (signal: AbortSignal) => runFresh(signal, cfg.maxIterations, INTERRUPTED_PROMPT);
+    const s = interrupted.session;
+    const why =
+      !s ? "its session was never saved"
+      : !canResumeSessions(agent) ? `${cfg.agent.provider} can't continue a session`
+      : s.where !== where ? (s.where === "host" ? "it ran on this computer, now it runs in a container" : "its container is gone")
+      : undefined;
+    if (why) {
+      ctx.log("warn", `This step was interrupted; its agent session can't be continued (${why}) — starting it again with its task and a note to check what's already done`, node.id);
+      return recap;
+    }
+    return async (signal) => {
+      ctx.log("info", `This step was interrupted — continuing the agent's own session ${s!.id}`, node.id);
+      try {
+        return await sandbox.run({ ...baseOptions, signal, agent: resumingAgent(agent, s!.id), prompt: INTERRUPTED_PROMPT, maxIterations: 1 });
+      } catch (e) {
+        if (signal.aborted) throw e;
+        ctx.log("warn", `Couldn't continue the agent's session ${s!.id} (${tail((e as Error).message, 300)}) — starting it again with its task and a note to check what's already done`, node.id);
+        return recap(signal);
+      }
+    };
+  }
+
   /** Steering messages that arrived when the agent couldn't take them mid-turn: one more turn with them. */
   const settle = async (res: RunResultLike): Promise<RunResultLike> => {
     for (let i = 0; i < MAX_STEER_TURNS && steering.pending().length; i++) {
@@ -552,7 +595,7 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
 
   // Messages sent while the sandbox was being prepared are part of the first prompt.
   steering.take("next-turn");
-  let res = await settle(await turn((signal) => runFresh(signal), cfg.maxIterations));
+  let res = await settle(await turn(firstCall(ctx.takeInterrupted?.(node.id)), cfg.maxIterations));
   let parsed = parseOutput(res.stdout);
 
   if (cfg.allowQuestions) {
