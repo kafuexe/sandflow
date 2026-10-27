@@ -146,5 +146,8 @@ describe("validateSettings", () => {
     });
     expect(() => validateSettings({ ...base, updates: { mode: "url", url: "ftp://x" } })).toThrow(/update/i);
     expect(validateSettings({ ...base, agentToolsDir: "  " }).agentToolsDir).toBeUndefined();
+    expect(validateSettings({ ...base, claudeCode: { enabled: false } }).claudeCode).toEqual({ enabled: false });
+    expect(validateSettings({ ...base, claudeCode: {} as never }).claudeCode).toEqual({ enabled: true });
+    expect(validateSettings(base).claudeCode).toBeUndefined();
   });
 });

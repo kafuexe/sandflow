@@ -224,6 +224,41 @@ export function WebhookSettingsField({ settings }: { settings: Settings }) {
   );
 }
 
+/** Desktop app: register Sandflow's MCP server and skills with Claude Code (off removes them). */
+export function ClaudeCodeSettingsField({ settings }: { settings: Settings }) {
+  const updateSettings = useStore((s) => s.updateSettings);
+  const enabled = settings.claudeCode?.enabled !== false;
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof api.claudeCodeStatus>>>();
+  useEffect(() => {
+    // The setting is saved shortly after the switch flips; the status call waits for the sync it starts.
+    const t = setTimeout(() => void api.claudeCodeStatus().then(setStatus, () => setStatus(undefined)), 1200);
+    return () => clearTimeout(t);
+  }, [enabled]);
+  if (!status?.available) return null;
+  return (
+    <div className="space-y-1.5 rounded-lg border p-3">
+      <label className="flex items-center justify-between text-sm">
+        <span>Claude Code integration</span>
+        <Switch checked={enabled} onCheckedChange={(v) => updateSettings({ claudeCode: { enabled: v } })} />
+      </label>
+      <p className="text-[11px] text-muted-foreground">
+        {!status.present
+          ? "Claude Code isn't installed on this computer. Install it, then restart Sandflow."
+          : enabled
+            ? "Claude Code can design, start and watch your flows: the sandflow MCP server and the sandflow-flows / sandflow-runs skills are installed for your user."
+            : "Off: Sandflow's MCP server and skills are removed from Claude Code (skills you edited are kept)."}
+      </p>
+      {status.present && status.notes.length > 0 && (
+        <ul className="list-disc pl-4 text-[11px] text-muted-foreground">
+          {status.notes.map((n) => (
+            <li key={n}>{n}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function UpdateSettingsField({ settings }: { settings: Settings }) {
   const updateSettings = useStore((s) => s.updateSettings);
   const updates: UpdateSettings = settings.updates ?? { mode: "github" };
