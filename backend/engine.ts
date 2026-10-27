@@ -940,7 +940,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
               pausing = "blocked";
               run.pauseReason = "blocked";
               run.hold = { reason: "blocked", guard: next.guard, nodeKey: k, problems: [next.reason], at: Date.now() };
-              ctx.flag("error", `Held at ${label(nodeId)} — ${GUARD_TEXT[next.guard]}: ${next.reason}`, { nodeKey: k });
+              // Like the server's holds (`hold-<reason>`): dismissed when the run is continued.
+              ctx.flag("error", `Held at ${label(nodeId)} — ${GUARD_TEXT[next.guard]}: ${next.reason}`, { nodeKey: k }).id = "hold-blocked";
               setPhase("pausing");
               return {};
             }

@@ -8,6 +8,7 @@ import path from "node:path";
 import { createApi } from "./api";
 import type { ClaudeCodeOptions } from "./claudeCode";
 import type { NodeRunner } from "./engine";
+import type { TriageRunner } from "./recovery";
 import { createStorage } from "./storage";
 
 export interface AppServerOptions {
@@ -15,7 +16,8 @@ export interface AppServerOptions {
   dataDir: string;
   /** Built UI (vite `dist/`). */
   webRoot: string;
-  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner };
+  /** `triage`: the recovery triage agent (backend/triage.ts); without it a failed step fails the run. */
+  runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner; triage?: TriageRunner };
   bundledSkillsDir?: string;
   /** Packs shipped with the app (`<dir>/base/manifest.json`); installed on first start. */
   bundledPacksDir?: string;
