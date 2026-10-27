@@ -4,7 +4,7 @@ import { nodeLabel } from "../../shared/resolve";
 import type { FlowNode, NodeDelivery, NodeIO, ResolvedConfig, TriggerEvent } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { withMergeLock } from "../stack";
-import { runTree } from "../proc";
+import { exitText, runTree } from "../proc";
 import { codeOwner, trustedOnHost } from "./trust";
 
 const execFileP = promisify(execFile);
@@ -259,7 +259,7 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
       });
       if (r.killed === "cancelled") throw new Error("Run cancelled");
       if (r.killed) throw new Error(`Command ${r.killed}`);
-      if (r.code !== 0) throw new Error(`Command exited with code ${r.code}${r.stderr.trim() ? `: ${r.stderr.trim().slice(-2000)}` : ""}`);
+      if (r.code !== 0) throw new Error(`Command ${exitText(r)}${r.stderr.trim() ? `: ${r.stderr.trim().slice(-2000)}` : ""}`);
       const stdout = r.stdout;
       return { outputs: { artifact: stdout.trim() } };
     }

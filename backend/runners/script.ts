@@ -22,7 +22,7 @@ import type { FlowNode, NodeIO, PackManifest, ResolvedConfig, Settings } from ".
 import type { NodeResult, RunContext } from "../engine";
 import type { PackRuntimeInfo } from "../packs";
 import { tail } from "../prompt";
-import { runTree } from "../proc";
+import { exitText, runTree } from "../proc";
 import { execCli, imageOf } from "../sandbox";
 import { getSandbox, type SandboxLike } from "./ai";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
@@ -242,7 +242,7 @@ async function runOnHost(x: Invocation): Promise<{ stdout: string; output?: stri
       ...(packDir ? { PACK_DIR: packDir, PATH: `${path.join(packDir, ".sandflow-bin")}${path.delimiter}${process.env.PATH ?? ""}` } : {}),
     };
     const r = await spawnCapture(x.command, null, { cwd, env, stdin: x.input, timeoutMs: x.timeoutS * 1000, signal: ctx.abort.signal, onLine: (l) => ctx.log("agent", l, node.id) });
-    if (r.code !== 0) throw new Error(`Script exited with code ${r.code}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
+    if (r.code !== 0) throw new Error(`Script ${exitText(r)}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
     return { stdout: r.stdout, output: fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : undefined };
   } finally {
     fs.rmSync(io, { recursive: true, force: true });
@@ -315,7 +315,7 @@ async function runInContainer(x: Invocation): Promise<{ stdout: string; output?:
     for (const k of Object.keys(x.env)) args.push("-e", k);
     args.push("--entrypoint", "sh", image, "-c", `export PATH="/opt/sandflow/pack/.sandflow-bin:$PATH"\n${x.command}`);
     const r = await cli(ctx, args, node.id, { stdin: x.input, env: { ...process.env, ...x.env }, timeoutMs: x.timeoutS * 1000, container: name });
-    if (r.code !== 0) throw new Error(`Script exited with code ${r.code}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
+    if (r.code !== 0) throw new Error(`Script ${exitText(r)}${r.stderr.trim() ? `: ${tail(r.stderr.trim(), 2000)}` : ""}`);
     const outFile = path.join(io, "output.json");
     return { stdout: r.stdout, output: fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf8") : undefined };
   } finally {

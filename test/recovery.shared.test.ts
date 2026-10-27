@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CORE_BLOCKS, SUBFLOW_BLOCK } from "../shared/core";
+import { exitText } from "../backend/proc";
 import { BUILTIN_BLOCKS } from "../shared/library";
 import {
   classifyFailure,
@@ -29,6 +30,10 @@ describe("classifyFailure (MEOW _looks_like_a_crash / _is_os_failure)", () => {
     expect(classifyFailure(new Error("Command exited with code -9"))).toBe("crash");
     expect(classifyFailure(Object.assign(new Error("Command failed"), { signal: "SIGSEGV" }))).toBe("crash");
     expect(classifyFailure(new Error("Process interrupted due to receipt of signal: SIGKILL"))).toBe("crash");
+    // What the shell / script / integration runners report (backend/proc.ts exitText).
+    expect(exitText({ code: 1, signal: "SIGSEGV" })).toBe("was killed by signal SIGSEGV");
+    expect(classifyFailure(new Error(`Command ${exitText({ code: 1, signal: "SIGSEGV" })}`))).toBe("crash");
+    expect(classifyFailure(new Error(`Script ${exitText({ code: 3221225477 })}`))).toBe("crash");
   });
 
   it("a chosen non-zero exit is the block failing", () => {
