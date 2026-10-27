@@ -90,3 +90,11 @@ export function eventsAfter(run: RunState, cursor?: string): { events: RunEvent[
   const r = collect(run, decode(cursor));
   return { events: r.events, cursor: encode(r.cursor) };
 }
+
+/** Phases in which a run does no more work (durable-runs journals); without a phase, a run is over once it finished. */
+const TERMINAL = new Set(["done", "failed", "cancelled"]);
+
+export function runEnded(run: RunState): boolean {
+  const phase = (run as RunState & { phase?: string }).phase;
+  return phase ? TERMINAL.has(phase) : !!run.finishedAt;
+}

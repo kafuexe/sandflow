@@ -18,6 +18,7 @@ import type {
   QuestionRecord,
   ResolvedConfig,
   RunFlag,
+  RunStartedBy,
   FlagSeverity,
   RunState,
   SandboxKind,
@@ -176,6 +177,8 @@ export interface StartRunOptions {
   cleanupTimeoutMs?: number;
   /** Logged as warnings when the run starts (e.g. it shares a branch with another run). */
   warnings?: string[];
+  /** Recorded on the run: who started it from outside the app (Claude Code). */
+  startedBy?: RunStartedBy;
   /**
    * Resume `from` (a finished run of this flow, see shared/resume.ts): start only at the plan's steps, with the inputs
    * they had, after copying the other steps' states and outputs from it. Its trigger event is reused; pass its
@@ -246,6 +249,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     ...(opts.parent ? { parent: opts.parent } : {}),
     ...(opts.stack ? { stack: opts.stack } : {}),
     ...(opts.entry ? { input: opts.entry } : {}),
+    ...(opts.startedBy ? { startedBy: opts.startedBy } : {}),
   };
   if (!opts.share) {
     // What a resume needs to find this run's work again (see shared/resume.ts).

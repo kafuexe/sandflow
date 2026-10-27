@@ -373,6 +373,8 @@ export interface Settings {
   updates?: UpdateSettings;
   /** Listener for GitHub/GitLab webhooks — separate port that only serves /hooks/*. */
   webhooks?: WebhookSettings;
+  /** Desktop app: register Sandflow's MCP server and skills with Claude Code (default on; off removes them). */
+  claudeCode?: { enabled: boolean };
 }
 
 export interface WebhookSettings {
@@ -705,6 +707,13 @@ export interface RunFlag {
   dismissed?: boolean;
 }
 
+/** Who started a run from outside the app (absent: the UI, a trigger or a stack). */
+export interface RunStartedBy {
+  /** claude-code: through the Claude Code registration (the stdio bridge); mcp: any other MCP client. */
+  kind: "claude-code" | "mcp";
+  label: string;
+}
+
 /** Where a stack child run sits in its stack. */
 export interface StackRunInfo {
   /** One per stack execution (a looping parent gets a new group each time it reaches the stack). */
@@ -762,6 +771,7 @@ export interface RunState {
   unstarted?: { nodeId: string; inputs: NodeIO }[];
   /** This run resumes another one: started from these steps, with the other steps' outputs copied from it. */
   resumedFrom?: { runId: string; nodeIds: string[] };
+  startedBy?: RunStartedBy;
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -843,4 +853,5 @@ export interface RunSummary {
   parent?: { runId: string; nodeKey: string };
   stack?: StackRunInfo;
   resumedFrom?: { runId: string; nodeIds: string[] };
+  startedBy?: RunStartedBy;
 }

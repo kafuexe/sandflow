@@ -5,14 +5,17 @@ import { configProblems, describeBlock, findBlock } from "../shared/blockHelp";
 import { flowRequirements, resolveBlock, startsItself } from "../shared/resolve";
 import { applyOps, autoLayout, describeBlocks, describeFlow, validateFlow, type FlowOp } from "../shared/flowOps";
 import { validateBlocks } from "../shared/validate";
+import { runTools, type McpRuns } from "./mcpRuns";
 import { editablePackBlock } from "./storage";
-import type { AppData, BlockConfig, BlockDef, Flow } from "../shared/types";
+import type { AppData, BlockConfig, BlockDef, Flow, RunStartedBy } from "../shared/types";
 
 export interface McpDeps {
   load(): AppData;
   /** Persist flows; `touched` = node ids the agent added/changed in `flowId` (the UI highlights them). */
   saveFlows(flows: Flow[], change: { flowId: string; touched: string[] }): void;
   saveBlocks(blocks: BlockDef[]): void;
+  /** Start / watch / answer / stop runs (the run tools are offered only with this). */
+  runs?: McpRuns;
 }
 
 interface JsonRpc {
@@ -22,13 +25,13 @@ interface JsonRpc {
   params?: Record<string, unknown>;
 }
 
-interface Tool {
+export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
   /** Hidden when the session is scoped to one flow. */
   unscopedOnly?: boolean;
-  run(args: Record<string, unknown>, ctx: { scope?: string }): string;
+  run(args: Record<string, unknown>, ctx: { scope?: string; client?: RunStartedBy; signal?: AbortSignal }): string | Promise<string>;
 }
 
 const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -163,7 +166,7 @@ export function createMcp(deps: McpDeps) {
     return { ...r, flow: autoLayout(r.flow) };
   }
 
-  const tools: Tool[] = [
+  const tools: McpTool[] = [
     {
       name: "list_blocks",
       description:
@@ -455,18 +458,19 @@ export function createMcp(deps: McpDeps) {
         return `${existing ? "Updated" : "Created"} block "${block.name}" (id: ${id}).\n${describeBlocks([block, ...blocks.filter((b) => b.id !== id)]).split("\n")[0]}`;
       },
     },
+    ...(deps.runs ? runTools(deps.runs) : []),
   ];
 
   const visible = (scope?: string) => tools.filter((t) => !(scope && t.unscopedOnly));
 
   /** Run one tool. `onCall` sees every call (the chat panel shows them). */
-  function callTool(name: string, args: Record<string, unknown>, ctx: CallContext = {}): { text: string; isError: boolean } {
+  async function callTool(name: string, args: Record<string, unknown>, ctx: CallContext = {}): Promise<{ text: string; isError: boolean }> {
     const tool = visible(ctx.scope).find((t) => t.name === name);
     let out: { text: string; isError: boolean };
     if (!tool) out = { text: `Unknown tool "${name}"`, isError: true };
     else {
       try {
-        out = { text: tool.run(args, { scope: ctx.scope }), isError: false };
+        out = { text: await tool.run(args, { scope: ctx.scope, client: ctx.client, signal: ctx.signal }), isError: false };
       } catch (e) {
         out = { text: (e as Error).message, isError: true };
       }
@@ -475,7 +479,7 @@ export function createMcp(deps: McpDeps) {
     return out;
   }
 
-  function call(msg: JsonRpc, ctx: CallContext): unknown {
+  async function call(msg: JsonRpc, ctx: CallContext): Promise<unknown> {
     switch (msg.method) {
       case "initialize": {
         const asked = String(msg.params?.protocolVersion ?? "");
@@ -486,7 +490,10 @@ export function createMcp(deps: McpDeps) {
           instructions:
             "Sandflow flows are graphs of blocks wired by artifact/steer edges. Call list_blocks first (get_block for one block's settings), then get_flow. " +
             "Place and wire blocks with add_node {block, from, overrides} or batch with edit_flow; build from scratch with replace_flow/create_flow. " +
-            "Every edit returns the flow, validation problems and inputs still empty. You can't run flows or set env values.",
+            "Every edit returns the flow, validation problems and inputs still empty. " +
+            (deps.runs && !ctx.scope
+              ? "Run a flow with start_run, then follow it with watch_run (pass back its cursor) until it ends; answer_question, steer_run, stop_run and get_run act on a run. You can't set saved env values."
+              : "You can't run flows or set env values."),
         };
       }
       case "ping":
@@ -494,7 +501,7 @@ export function createMcp(deps: McpDeps) {
       case "tools/list":
         return { tools: visible(ctx.scope).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
       case "tools/call": {
-        const r = callTool(String(msg.params?.name ?? ""), (msg.params?.arguments as Record<string, unknown>) ?? {}, ctx);
+        const r = await callTool(String(msg.params?.name ?? ""), (msg.params?.arguments as Record<string, unknown>) ?? {}, ctx);
         return r.isError ? { content: [{ type: "text", text: r.text }], isError: true } : { content: [{ type: "text", text: r.text }] };
       }
       default:
@@ -503,20 +510,20 @@ export function createMcp(deps: McpDeps) {
   }
 
   /** Handle one POSTed JSON-RPC message or batch. Returns undefined when there's nothing to answer (notifications). */
-  function handle(body: unknown, ctx: CallContext = {}): unknown {
-    const one = (m: JsonRpc) => {
+  async function handle(body: unknown, ctx: CallContext = {}): Promise<unknown> {
+    const one = async (m: JsonRpc) => {
       if (!m || m.jsonrpc !== "2.0" || typeof m.method !== "string") {
         return { jsonrpc: "2.0", id: m?.id ?? null, error: { code: -32600, message: "Invalid request" } };
       }
       if (m.id === undefined || m.id === null) return undefined; // notification
       try {
-        return { jsonrpc: "2.0", id: m.id, result: call(m, ctx) };
+        return { jsonrpc: "2.0", id: m.id, result: await call(m, ctx) };
       } catch (e) {
         return { jsonrpc: "2.0", id: m.id, error: { code: (e as { rpcCode?: number }).rpcCode ?? -32603, message: (e as Error).message } };
       }
     };
     if (Array.isArray(body)) {
-      const out = body.map(one).filter(Boolean);
+      const out = (await Promise.all(body.map(one))).filter(Boolean);
       return out.length ? out : undefined;
     }
     return one(body as JsonRpc);
@@ -530,5 +537,9 @@ export type Mcp = ReturnType<typeof createMcp>;
 export interface CallContext {
   /** Flow this session may edit (the in-app chat). */
   scope?: string;
+  /** Who is calling, recorded on the runs it starts (Claude Code's bridge says so). */
+  client?: RunStartedBy;
+  /** Aborted when the caller goes away (ends a watch_run early). */
+  signal?: AbortSignal;
   onCall?(call: { name: string; input: unknown; text: string; isError: boolean }): void;
 }

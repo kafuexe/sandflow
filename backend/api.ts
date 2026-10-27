@@ -13,7 +13,23 @@ import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
 import { missingInputs, validateBlocks } from "../shared/validate";
 import { planResume, type ResumePlan } from "../shared/resume";
-import type { AppData, AssistantAgent, BlockDef, Chat, DataChange, EnvValues, Flow, IntegrationDef, PackManifest, RunFlag, RunState, Settings, TriggerEvent } from "../shared/types";
+import type {
+  AppData,
+  AssistantAgent,
+  BlockDef,
+  Chat,
+  DataChange,
+  EnvValues,
+  Flow,
+  IntegrationDef,
+  PackManifest,
+  RunFlag,
+  RunStartedBy,
+  RunState,
+  RunSummary,
+  Settings,
+  TriggerEvent,
+} from "../shared/types";
 import { createChatService, type AssistantRunner } from "./chats";
 import { branchConflictWarning, sharedBranchKey, type ActiveRunInfo } from "../shared/runConflicts";
 import { startRun, type NodeRunner, type RunHandle, type RunIntegrations, type RunPacks } from "./engine";
@@ -148,6 +164,39 @@ export function createApi(
       syncTriggers();
       changed({ source: "assistant" });
     },
+    runs: {
+      start: (flowId, o) => {
+        const r = startManual(flowId, o.prompt, o.env, o.startedBy);
+        return { runId: r.state.id, flowName: r.state.flowName, warning: r.warning };
+      },
+      get: getRun,
+      list: listRuns,
+      answer(runId, answer) {
+        const h = runs.get(runId);
+        if (!h || !h.answer(answer)) throw new HttpError(409, `No pending question (run is ${getRun(runId).status})`);
+      },
+      steer(runId, nodeKey, message) {
+        const h = runs.get(runId);
+        if (!h) {
+          getRun(runId);
+          throw new HttpError(409, "This run has ended — there's no agent left to steer");
+        }
+        const r = h.steer(nodeKey, message);
+        if (!r.ok) throw new HttpError(r.status, r.error);
+      },
+      stop(runId) {
+        const h = runs.get(runId);
+        if (!h) return getRun(runId).status;
+        h.cancel();
+        return h.state.status;
+      },
+      onChange(runId, fn) {
+        let set = listeners.get(runId);
+        if (!set) listeners.set(runId, (set = new Set()));
+        set.add(fn);
+        return () => set.delete(fn);
+      },
+    },
   });
   const chats = createChatService({ dir: storage.dir, load: storage.load, mcp, runner: opts.assistant });
 
@@ -190,7 +239,7 @@ export function createApi(
   function launch(
     flow: Flow,
     data: AppData,
-    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan } } = {},
+    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan }; startedBy?: RunStartedBy } = {},
     notes: string[] = [],
   ): RunHandle & { warning?: string } {
     // Runs are independent (own context, sandbox, branch and logs), so any number may run at once — the one thing
@@ -409,6 +458,24 @@ export function createApi(
     return launch(flow, env === data.env ? data : { ...data, env }, { prompt, branch: plan.branch, resume: { from: orig, plan } }, notes);
   }
 
+  /** A manual run (the Run button, or start_run): `env` adds to / overrides the saved inputs for this run only. */
+  function startManual(flowId: string | undefined, prompt?: string, env?: EnvValues, startedBy?: RunStartedBy) {
+    const saved = storage.load();
+    const data = env ? { ...saved, env: { ...saved.env, ...env } } : saved;
+    const flow = data.flows.find((f) => f.id === flowId);
+    if (!flow) throw new HttpError(404, flowId ? `Flow "${flowId}" not found` : "Flow not found");
+    const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt, data.flows);
+    if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
+    return launch(flow, data, { prompt, startedBy });
+  }
+
+  function listRuns(): RunSummary[] {
+    const live = [...runs.values()].map((h) => summarize(h.state));
+    const liveIds = new Set(live.map((r) => r.id));
+    const saved = storage.listRuns(50).filter((r) => !liveIds.has(r.id));
+    return limitRuns([...live, ...saved].sort((a, b) => b.startedAt - a.startedAt), 50);
+  }
+
   function getRun(id: string): RunState {
     const live = runs.get(id)?.state;
     if (live) return live;
@@ -536,8 +603,17 @@ export function createApi(
 
       case "POST /mcp": {
         const chatId = url.searchParams.get("chat");
-        const out = mcp.handle(await readJson<unknown>(req), {
+        // Claude Code's bridge says who it is (and its project folder), so runs it starts show that.
+        const label = url.searchParams.get("label")?.trim().slice(0, 80);
+        const client: RunStartedBy | undefined =
+          url.searchParams.get("client") === "claude-code" ? { kind: "claude-code", label: label ? `Claude Code (${label})` : "Claude Code" } : undefined;
+        // A watch_run long-poll ends early when the caller hangs up.
+        const gone = new AbortController();
+        res.on("close", () => gone.abort());
+        const out = await mcp.handle(await readJson<unknown>(req), {
           scope: url.searchParams.get("flow") || undefined,
+          client,
+          signal: gone.signal,
           // Calls from an in-app chat's agent show up in that chat.
           onCall: chatId ? (c) => chats.record(chatId, c) : undefined,
         });
@@ -655,22 +731,12 @@ export function createApi(
         // `prompt` (optional) is this run's starting prompt; without it the global one is used.
         const body = (await readJson<{ flowId?: string; prompt?: string }>(req)) ?? {};
         const prompt = typeof body.prompt === "string" ? body.prompt.trim() : undefined;
-        const data = storage.load();
-        const flow = data.flows.find((f) => f.id === body.flowId);
-        if (!flow) throw new HttpError(404, "Flow not found");
-        const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt, data.flows);
-        if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
-        const started = launch(flow, data, { prompt });
+        const started = startManual(body.flowId, prompt);
         return send(res, 200, { runId: started.state.id, ...(started.warning ? { warning: started.warning } : {}) });
       }
 
-      case "GET /runs": {
-        const live = [...runs.values()].map((h) => summarize(h.state));
-        const liveIds = new Set(live.map((r) => r.id));
-        const saved = storage.listRuns(50).filter((r) => !liveIds.has(r.id));
-        const all = limitRuns([...live, ...saved].sort((a, b) => b.startedAt - a.startedAt), 50);
-        return send(res, 200, all);
-      }
+      case "GET /runs":
+        return send(res, 200, listRuns());
 
       case "GET /triggers":
         return send(res, 200, {
