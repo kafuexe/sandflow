@@ -39,7 +39,9 @@ import { startRun, type NodeRunner, type RunHandle, type RunIntegrations, type R
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { checkContinue, markCrashed, repairRun, runBranch } from "./continue";
-import { acquireRunLock, cleanupLeftovers, readLock, releaseRunLock } from "./journal";
+import { acquireRunLock, cleanupLeftovers, readLock, releaseRunLock, touchRunLock } from "./journal";
+import { SUPERVISOR_DEFAULTS, supervisorSettings } from "../shared/supervisor";
+import { claudeOverseer, createSupervisor, type Supervisor, type SupervisorDeps } from "./supervisor";
 import { killPidTree } from "./proc";
 import {
   ensureSandboxReady,
@@ -109,6 +111,8 @@ export type Api = Handler & {
   ready: Promise<void>;
   /** Where the server listens ("127.0.0.1:<port>"): writes mcp.json before any request names the host. */
   noteHost(host: string): void;
+  /** The supervisor tick over this API's live runs (see backend/supervisor.ts). */
+  supervisor: Supervisor;
 };
 
 export interface ApiOptions {
@@ -125,6 +129,8 @@ export interface ApiOptions {
   pauseGraceMs?: number;
   /** Desktop app: keep Sandflow registered with Claude Code (Settings → Claude Code integration). */
   claudeCode?: ClaudeCodeOptions;
+  /** The supervisor's clock / overseer / container check (tests); `manual`: don't start its loop (call `tick`). */
+  supervisor?: Partial<Pick<SupervisorDeps, "now" | "sleep" | "overseer" | "containerExists">> & { manual?: boolean };
 }
 
 export function createApi(
@@ -246,6 +252,8 @@ export function createApi(
       /* a stale lock is reclaimed next time */
     }
   };
+  /** A lock not refreshed for this long is stale when its owner can't be checked (the supervisor refreshes it every poll). */
+  const staleLockMs = () => SUPERVISOR_DEFAULTS.staleLockPolls * supervisorSettings(storage.load().settings.supervisor).pollSeconds * 1000;
   /** A journal that's been written immediately (node start / finish, phases, sessions): the throttle starts over. */
   const saveJournal = (s: RunState) => {
     lastSave.set(s.id, Date.now());
@@ -320,7 +328,7 @@ export function createApi(
     const id = handle.state.id;
     if (!locked.has(id)) {
       try {
-        if (acquireRunLock(runsDir, id).ok) locked.add(id);
+        if (acquireRunLock(runsDir, id, staleLockMs()).ok) locked.add(id);
       } catch (e) {
         console.warn(`[runs] couldn't take the lock of run ${id}: ${(e as Error).message}`);
       }
@@ -576,7 +584,7 @@ export function createApi(
       const run = j.run;
       if (run.parent) throw new HttpError(409, "This is a Box Stack task — it continues with the run that started it");
       if (TERMINAL_PHASES.has(run.phase!)) throw new HttpError(409, `This run has ${run.phase === "done" ? "finished" : run.phase === "failed" ? "failed — use Retry" : "been stopped — use Retry"}`);
-      const lock = locked.has(id) ? { ok: true as const } : acquireRunLock(runsDir, id);
+      const lock = locked.has(id) ? { ok: true as const } : acquireRunLock(runsDir, id, staleLockMs());
       if (!lock.ok) throw new HttpError(409, `Another Sandflow${lock.holder ? ` (process ${lock.holder.pid})` : ""} is running this run`);
       if (!locked.has(id)) {
         locked.add(id);
@@ -625,7 +633,7 @@ export function createApi(
     const j = storage.loadJournal(id);
     const run = j.run;
     if (!run || j.legacy || TERMINAL_PHASES.has(run.phase!)) return undefined;
-    const lock = locked.has(id) ? { ok: true as const } : acquireRunLock(runsDir, id);
+    const lock = locked.has(id) ? { ok: true as const } : acquireRunLock(runsDir, id, staleLockMs());
     if (!lock.ok) throw new HttpError(409, "Another Sandflow is running this run — stop it there");
     try {
       run.phase = "cancelled";
@@ -659,7 +667,7 @@ export function createApi(
     const byId = new Map(open.map((r) => [r.id, r]));
     const crashed = new Set<string>();
     for (const run of open.filter((r) => !r.parent && !isPaused(r))) {
-      const lock = acquireRunLock(runsDir, run.id);
+      const lock = acquireRunLock(runsDir, run.id, staleLockMs());
       if (!lock.ok) continue; // another Sandflow on this data folder drives it
       try {
         markCrashed(run, data);
@@ -708,7 +716,7 @@ export function createApi(
   }
   /** Whether a lock left on a paused run is stale (we can take it); taken locks are released again. */
   function acquireAndRelease(id: string): boolean {
-    if (!acquireRunLock(runsDir, id).ok) return false;
+    if (!acquireRunLock(runsDir, id, staleLockMs()).ok) return false;
     releaseRunLock(runsDir, id);
     return true;
   }
@@ -1234,12 +1242,37 @@ export function createApi(
     });
   };
   handler.noteHost = noteHost;
+
+  // ---------- the supervisor tick (backend/supervisor.ts) ----------
+  const supervisor = createSupervisor({
+    runs: () => [...runs.values()].filter((h) => !isSettled(h.state)),
+    load: storage.load,
+    heartbeat(id) {
+      if (!locked.has(id)) return;
+      try {
+        touchRunLock(runsDir, id);
+      } catch (e) {
+        console.warn(`[runs] couldn't refresh the lock of run ${id}: ${(e as Error).message}`);
+      }
+    },
+    // Gone only when Docker / Podman says so — not when it doesn't answer.
+    async containerExists(kind, id) {
+      const r = await exec(kind, ["inspect", "--format", "{{.Id}}", id]);
+      if (r.code === 0) return true;
+      return /no such (object|container)/i.test(`${r.stderr} ${r.stdout}`) ? false : undefined;
+    },
+    overseer: claudeOverseer,
+    ...opts.supervisor,
+  });
+  handler.supervisor = supervisor;
+  if (!opts.supervisor?.manual) supervisor.start();
   /**
    * Pause every active run (they continue when Sandflow starts again; Stop is the way to cancel one) and wait, bounded,
    * for them: running steps get a grace period, irreversible ones finish, sandboxes / containers get closed.
    */
   handler.shutdown = async (timeoutMs = 45_000, reason = "quit") => {
     shuttingDown = true;
+    supervisor.stop();
     offPacks();
     triggers.stop();
     queues.clear();

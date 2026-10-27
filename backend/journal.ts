@@ -166,12 +166,17 @@ export interface LockHolder {
 
 const lockFile = (runsDir: string, id: string) => path.join(runsDir, `${id}.lock`);
 
-/** Whether the lock's owner is alive: its pid exists and is still the same process (or that can't be told). */
-function holderAlive(h: LockHolder): boolean {
-  if (h.host !== os.hostname()) return true; // another machine on a shared folder: never steal it
+/**
+ * Whether the lock's owner is alive: its pid exists and is still the same process. When that can't be told (another
+ * machine on a shared folder, an unknown start time) a lock whose heartbeat (`at`, refreshed by the supervisor every
+ * poll) is older than `staleMs` is dead (MEOW native-lock heartbeat); without `staleMs` it's alive.
+ */
+function holderAlive(h: LockHolder, staleMs?: number): boolean {
+  const fresh = staleMs === undefined || !(typeof h.at === "number") || Date.now() - h.at <= staleMs;
+  if (h.host !== os.hostname()) return fresh;
   if (!pidAlive(h.pid)) return false;
   const t = processStartTime(h.pid);
-  return t === undefined || Math.abs(t - h.startedAt) <= START_TOLERANCE_MS;
+  return t === undefined ? fresh : Math.abs(t - h.startedAt) <= START_TOLERANCE_MS;
 }
 
 export function readLock(runsDir: string, id: string): LockHolder | undefined {
@@ -187,7 +192,7 @@ export function readLock(runsDir: string, id: string): LockHolder | undefined {
  * Take `runs/<id>.lock` for this Sandflow: created exclusively, holding our pid and start time. A lock whose owner
  * is dead (pid gone, or reused by another process) is reclaimed once; a live owner keeps it (`holder` is returned).
  */
-export function acquireRunLock(runsDir: string, id: string): { ok: true } | { ok: false; holder?: LockHolder } {
+export function acquireRunLock(runsDir: string, id: string, staleMs?: number): { ok: true } | { ok: false; holder?: LockHolder } {
   const file = lockFile(runsDir, id);
   const mine: LockHolder = { pid: process.pid, startedAt: OWN_START, host: os.hostname(), at: Date.now() };
   fs.mkdirSync(runsDir, { recursive: true });
@@ -209,10 +214,24 @@ export function acquireRunLock(runsDir: string, id: string): { ok: true } | { ok
     if (!holder) {
       const age = Date.now() - (fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? 0);
       if (age < 60_000) return { ok: false };
-    } else if (holderAlive(holder)) return { ok: false, holder };
+    } else if (holderAlive(holder, staleMs)) return { ok: false, holder };
     if (attempt === 0) fs.rmSync(file, { force: true });
   }
   return { ok: false, holder: readLock(runsDir, id) };
+}
+
+/**
+ * The supervisor's heartbeat: refresh our lock's `at` (temp file + rename, MEOW `_write_over`). Never touches someone
+ * else's lock; false when it isn't ours (any more).
+ */
+export function touchRunLock(runsDir: string, id: string, now = Date.now()): boolean {
+  const h = readLock(runsDir, id);
+  if (!h || h.pid !== process.pid || h.startedAt !== OWN_START) return false;
+  const file = lockFile(runsDir, id);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ ...h, at: now }));
+  fs.renameSync(tmp, file);
+  return true;
 }
 
 /** Release our lock (never someone else's). */

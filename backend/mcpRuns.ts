@@ -96,7 +96,8 @@ export function runTools(runs: McpRuns): McpTool[] {
       name: "watch_run",
       description:
         "Wait until a run has news after the cursor, then return it as JSON: {status, events, cursor, ended}. " +
-        "Events: step finished / failed, a question waiting for an answer, a flag, the run interrupted / paused / continuing / done / failed. " +
+        "Events: step finished / failed, a question waiting for an answer, a flag, the run interrupted / paused / continuing / done / failed, " +
+        "and supervisor events (a step silent / stuck / over its time limit / looping / its container gone, a reminder of an unanswered question, the overseer's verdicts). " +
         "Pass the returned cursor as `after` next time (omit it to get everything from the start). Returns after ~9 minutes with timedOut " +
         "and no events if nothing happened — just call it again. Events are kept in the run, so nothing is missed between calls.",
       unscopedOnly: true,

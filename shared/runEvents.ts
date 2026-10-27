@@ -15,6 +15,8 @@ export type RunEvent =
   | { type: "node"; node: string; status: "done" | "failed"; execution: number; error?: string }
   | { type: "question"; node: string; question: string; answer?: string; pending?: true }
   | { type: "flag"; severity: string; message: string; node?: string }
+  /** What the supervisor noticed / did (silent, stuck, timeout, loop, reminder, sandbox, overseer). */
+  | { type: "supervisor"; kind: string; detail: string; at: number; node?: string; action?: string }
   | { type: "end"; status: RunStatus; error?: string };
 
 /** The journal fields of durable runs; optional so runs saved before them still work. */
@@ -25,12 +27,14 @@ interface Cursor {
   t: number;
   q: number;
   f: number;
+  /** Supervision entries seen (counting ones since cut off the front). */
+  s: number;
   /** Finished executions seen, per node key. */
   n: Record<string, number>;
   e: number;
 }
 
-const START: Cursor = { t: 0, q: 0, f: 0, n: {}, e: 0 };
+const START: Cursor = { t: 0, q: 0, f: 0, s: 0, n: {}, e: 0 };
 
 /** Executions of a node that have finished (a running node's current one hasn't). Copied steps don't count. */
 function finished(ns: RunState["nodes"][string]): number {
@@ -61,9 +65,14 @@ function collect(run: Journal, from: Cursor): { events: RunEvent[]; cursor: Curs
   }
   const flags = run.flags ?? [];
   for (const f of flags.slice(from.f)) events.push({ type: "flag", severity: f.severity, message: f.message, ...(f.nodeKey ? { node: f.nodeKey } : {}) });
+  const supervision = run.supervision ?? [];
+  const dropped = run.supervisionDropped ?? 0;
+  for (const x of supervision.slice(Math.max(0, from.s - dropped))) {
+    events.push({ type: "supervisor", kind: x.kind, detail: x.detail, at: x.at, ...(x.node ? { node: x.node } : {}), ...(x.action ? { action: x.action } : {}) });
+  }
   const ended = runEnded(run);
   if (ended && !from.e) events.push({ type: "end", status: run.status, ...(run.error ? { error: run.error } : {}) });
-  return { events, cursor: { t: transitions.length, q: questions.length, f: flags.length, n, e: ended ? 1 : from.e } };
+  return { events, cursor: { t: transitions.length, q: questions.length, f: flags.length, s: dropped + supervision.length, n, e: ended ? 1 : from.e } };
 }
 
 /** Every event of the run so far, oldest source first. */
@@ -79,7 +88,7 @@ function decode(s: string | undefined): Cursor {
     const c = JSON.parse(Buffer.from(s, "base64url").toString("utf8")) as Partial<Cursor>;
     const num = (v: unknown) => (typeof v === "number" && v >= 0 ? v : 0);
     const n = c.n && typeof c.n === "object" ? Object.fromEntries(Object.entries(c.n).map(([k, v]) => [k, num(v)])) : {};
-    return { t: num(c.t), q: num(c.q), f: num(c.f), n, e: num(c.e) };
+    return { t: num(c.t), q: num(c.q), f: num(c.f), s: num(c.s), n, e: num(c.e) };
   } catch {
     return START;
   }
