@@ -354,7 +354,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
       resumeQueues.set(p, q);
       interruptedNodes.set(k, { session: ns.session });
     }
-    if (!resumeQueues.has("")) resumeQueues.set("", []);
+    // No queues journaled at all (it died before its first journal write): it starts from the beginning again.
+    if (cont.queues && !resumeQueues.has("")) resumeQueues.set("", []);
     for (const ns of Object.values(run.nodes)) if (ns.status === "queued" || ns.status === "running" || ns.status === "waiting") ns.status = "idle";
   }
   const resume = opts.resume;
