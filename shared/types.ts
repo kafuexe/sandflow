@@ -350,6 +350,8 @@ export interface Flow {
   pack?: string;
   /** Optional label colour shown in the flow switcher (one of `FLOW_COLORS`). Absent = no colour. */
   color?: FlowColor;
+  /** Continue this flow's interrupted runs by themselves when Sandflow starts again (default on). */
+  continueAutomatically?: boolean;
 }
 
 /** The curated palette a flow can be tagged with. */
@@ -363,6 +365,8 @@ export interface Settings {
   sandbox: SandboxKind;
   /** Safety valve for loops (e.g. CR → CR fix → CR …). */
   maxSteps: number;
+  /** A run continued this many times without a step finishing isn't continued automatically again (default 5). */
+  maxContinues?: number;
   /** Local image for Docker/Podman sandboxes (never pulled). Default: sandflow-agent:<app version>. */
   sandboxImage?: string;
   /** Host folder with agent CLIs (e.g. a Linux `claude` binary), mounted read-only at /opt/sandflow/tools. */
@@ -609,7 +613,85 @@ export interface PackPreview {
 // ---------- Runs ----------
 
 export type NodeRunStatus = "idle" | "queued" | "running" | "waiting" | "done" | "failed";
-export type RunStatus = "running" | "waiting" | "done" | "failed" | "cancelled";
+/** `paused`: the run stopped working without ending (quit, update, crash) — it can be continued (see shared/journal.ts). */
+export type RunStatus = "running" | "waiting" | "paused" | "done" | "failed" | "cancelled";
+
+/** Where a run is in its life (journaled with every change, see shared/journal.ts). */
+export type RunPhase = "running" | "waiting" | "pausing" | "paused" | "interrupted" | "continuing" | "done" | "failed" | "cancelled";
+/** Why a run paused: Sandflow quit, updated, or stopped without saying (crash, power loss…). */
+export type PauseReason = "quit" | "update" | "crash";
+
+export interface RunTransition {
+  phase: RunPhase;
+  at: number;
+  attempt: number;
+}
+
+/** A step waiting in a graph's queue, with the inputs it will receive. */
+export interface QueuedStep {
+  nodeId: string;
+  inputs: NodeIO;
+}
+
+/** What a run must still match to be continued: stamped at its first start, checked before every continue. */
+export interface RunFingerprints {
+  /** sha256 of the flow and every block / flow it reaches (layout left out). */
+  flow: string;
+  /** sha256 of the settings that change how it runs. */
+  settings: string;
+  workspace: { repo?: string; branch: string; commit?: string };
+}
+
+/** An agent's own session (e.g. Claude Code's), so an interrupted agent can carry on where it was. */
+export interface AgentSessionRef {
+  id: string;
+  /** `host` = this computer; otherwise the container id it ran in. */
+  where: string;
+}
+
+export interface NodeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  costUsd?: number;
+  at: number;
+}
+
+/** What an irreversible step (Create MR, Post comment, Merge into parent) already did, so it's never done twice. */
+export interface NodeDelivery {
+  /** Execution of the node this belongs to. */
+  exec: number;
+  pushed?: boolean;
+  mrUrl?: string;
+  commentUrl?: string;
+  merged?: boolean;
+}
+
+/** A Box Stack node's tasks, journaled so continuing doesn't redo finished ones. */
+export interface StackJournal {
+  groupId: string;
+  tasks: {
+    name: string;
+    slug: string;
+    input: string;
+    status: "pending" | "running" | "done" | "dropped";
+    /** The current attempt's child run. */
+    runId?: string;
+    attempt: number;
+    outputs?: NodeIO;
+    branch?: string;
+    reason?: string;
+  }[];
+}
+
+/** Why a paused run waits for you instead of continuing by itself. */
+export interface RunHold {
+  /** validation: something it needs changed (Repair adopts it); manual: the flow's switch is off; loop: continued too often. */
+  reason: "validation" | "manual" | "loop" | "corrupt";
+  problems: string[];
+  /** Repair can adopt the current state. */
+  repairable?: boolean;
+  at: number;
+}
 
 export interface NodeIO {
   artifact?: string;
@@ -630,6 +712,16 @@ export interface NodeRunState {
   exit?: string;
   /** Resumed run: this step didn't run again — its state and outputs were copied from the original run. */
   restored?: boolean;
+  /** When the current attempt started / finished (journal: started and not finished = active). */
+  startedAt?: number;
+  finishedAt?: number;
+  /** The attempt was cut off by a pause or crash; `mutation` = it could have been changing files. */
+  interrupted?: "mutation" | "plain";
+  /** Agent nodes: the agent's session, journaled the moment it's known. */
+  session?: AgentSessionRef;
+  usage?: NodeUsage[];
+  delivery?: NodeDelivery;
+  stack?: StackJournal;
 }
 
 /** Where a run's agents worked — recorded so the run can be resumed on the same branch. */
@@ -762,6 +854,28 @@ export interface RunState {
   unstarted?: { nodeId: string; inputs: NodeIO }[];
   /** This run resumes another one: started from these steps, with the other steps' outputs copied from it. */
   resumedFrom?: { runId: string; nodeIds: string[] };
+
+  // ---- journal (see shared/journal.ts): enough on its own to continue the run as the same run ----
+  schemaVersion?: number;
+  phase?: RunPhase;
+  transitions?: RunTransition[];
+  /** 1 = first start; +1 per continue. */
+  attempt?: number;
+  pauseReason?: PauseReason;
+  /** Set while a paused run waits for you (Continue / Repair) instead of continuing by itself. */
+  hold?: RunHold;
+  fingerprints?: RunFingerprints;
+  /** Each graph's queue, by node-key prefix (`""` top level, `sub/` inside subflow node `sub`). */
+  queues?: Record<string, QueuedStep[]>;
+  /** Steps taken so far (counted against Settings → max steps). */
+  steps?: number;
+  /** Continues since a step last finished (a run that keeps dying isn't continued automatically forever). */
+  stalls?: number;
+  /** Containers the run's sandboxes ran in, and agent processes on this computer — removed if left over by a crash. */
+  sandboxes?: { kind: "docker" | "podman"; containerId: string }[];
+  processes?: { pid: number; startedAt: number }[];
+  /** What each Repair adopted. */
+  repairs?: { at: number; changes: string[] }[];
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -843,4 +957,7 @@ export interface RunSummary {
   parent?: { runId: string; nodeKey: string };
   stack?: StackRunInfo;
   resumedFrom?: { runId: string; nodeIds: string[] };
+  phase?: RunPhase;
+  pauseReason?: PauseReason;
+  hold?: RunHold;
 }

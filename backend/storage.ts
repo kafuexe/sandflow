@@ -4,20 +4,36 @@ import { CORE_BLOCKS } from "../shared/core";
 import { BUILTIN_BLOCKS, DEFAULT_FLOW, SKILL_CATALOG } from "../shared/library";
 import { sanitizeFlowColor } from "../shared/flows";
 import { BASE_PACK, CORE_PACK } from "../shared/packs";
+import { journalProblem } from "../shared/journal";
 import { summarize } from "../shared/runs";
 import type { AppData, BlockDef, EnvValues, Flow, RunState, RunSummary, Settings } from "../shared/types";
 import { createIntegrationStore } from "./integrations";
+import { redactJournal, secretValues } from "./journal";
 import { createPackStore, qualifyFlow, type PackStore, type PackStoreOptions } from "./packs";
 
 export const DEFAULT_SETTINGS: Settings = { startingPrompt: "", sandbox: "docker", maxSteps: 40 };
 
 const RUN_ID_RE = /^[\w-]+$/;
 
-function writeAtomic(file: string, content: string) {
+let tmpSeq = 0;
+
+/** Temp file in the same folder → write → fsync → rename (MEOW `_write`): a crash leaves the old file or the new one. */
+export function writeAtomic(file: string, content: string) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, file);
+  const tmp = `${file}.${process.pid}.${Date.now()}.${tmpSeq++}.tmp`;
+  try {
+    const fd = fs.openSync(tmp, "w");
+    try {
+      fs.writeSync(fd, content);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
 }
 
 function readJson<T>(file: string): T | undefined {
@@ -102,7 +118,8 @@ const INTERRUPTED_FLAG = "interrupted";
  * ever finish it, so report it as cancelled instead of forever "running".
  */
 export function settleInterrupted(r: RunState): RunState {
-  if (r.finishedAt) return r;
+  // A journal says itself where it is (its phase); the continue pass deals with ones Sandflow was running.
+  if (r.finishedAt || r.schemaVersion !== undefined) return r;
   const last = r.logs.at(-1)?.ts ?? r.startedAt;
   const error = r.error ?? "Interrupted — Sandflow stopped while this run was active";
   const flags = r.flags ?? [];
@@ -142,6 +159,20 @@ export function limitRuns(runs: RunSummary[], limit: number): RunSummary[] {
 
 export { summarize };
 
+/** A run file that can't be read or isn't a valid journal: never continued, left as it is, listed with a flag. */
+export function corruptSummary(id: string, file: string, problem: string): RunSummary {
+  const at = Date.parse(id.slice(0, 24).replace(/^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z/, "$1:$2:$3.$4Z"));
+  return {
+    id,
+    flowId: "",
+    flowName: "Unreadable run",
+    status: "failed",
+    startedAt: Number.isFinite(at) ? at : 0,
+    flags: { warning: 0, error: 1 },
+    hold: { reason: "corrupt", problems: [`Journal corrupt (${problem}) — preserved at ${file}`], at: Date.now() },
+  };
+}
+
 export interface StorageOptions extends PackStoreOptions {
   /** Use this pack store instead of creating one over `<dir>/packs`. */
   packs?: PackStore;
@@ -161,6 +192,13 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
   const integrations = createIntegrationStore(dir, packs);
   let baseChecked = false;
   const write = (name: string, value: unknown) => writeAtomic(file(name), JSON.stringify(value, null, 2));
+  /** Secret values to keep out of journals: from Inputs (re-read when env.json changes) and this process's env. */
+  let secretCache: { mtimeMs: number; values: string[] } | undefined;
+  const secrets = () => {
+    const mtimeMs = fs.statSync(file("env.json"), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+    if (secretCache?.mtimeMs !== mtimeMs) secretCache = { mtimeMs, values: secretValues(readJson<EnvValues>(file("env.json")) ?? {}, process.env) };
+    return secretCache.values;
+  };
   /** Run summaries by file name, with the file's mtime/size when it was read. */
   const summaryCache = new Map<string, { mtimeMs: number; size: number; summary: RunSummary }>();
   const runFile = (id: string) => {
@@ -229,8 +267,36 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
     saveFlows: (flows: Flow[]) => write("flows.json", flows.filter((f) => !f.pack)),
     saveSettings: (settings: Settings) => write("settings.json", settings),
     saveEnv: (env: EnvValues) => write("env.json", env),
-    saveRun: (run: RunState) => writeAtomic(runFile(run.id), JSON.stringify(run, null, 2)),
+    /** Writes the run's journal: atomic + fsynced, secrets redacted (from Inputs and this process's env). */
+    saveRun: (run: RunState) => writeAtomic(runFile(run.id), JSON.stringify(redactJournal(run, secrets()), null, 2)),
     loadRun: (id: string) => (RUN_ID_RE.test(id) ? readJson<RunState>(runFile(id)) : undefined),
+    runFile,
+    /**
+     * Strict load of a journal (fail closed): `problem` says why it can't be trusted; the file is left untouched.
+     * `legacy`: a run saved before journals existed (no schemaVersion) — readable, never continued.
+     */
+    loadJournal(id: string): { run?: RunState; problem?: string; legacy?: boolean; file: string } {
+      const f = runFile(id);
+      let raw: unknown;
+      try {
+        raw = JSON.parse(fs.readFileSync(f, "utf8"));
+      } catch (e) {
+        return { file: f, problem: (e as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : `unreadable: ${(e as Error).message}` };
+      }
+      if (raw && typeof raw === "object" && (raw as RunState).schemaVersion === undefined && typeof (raw as RunState).id === "string") {
+        return { file: f, run: raw as RunState, legacy: true };
+      }
+      const problem = journalProblem(raw, id);
+      return problem ? { file: f, problem } : { file: f, run: raw as RunState };
+    },
+    /** Ids of every saved run, oldest first. */
+    runIds(): string[] {
+      try {
+        return fs.readdirSync(path.join(dir, "runs")).filter((n) => n.endsWith(".json")).map((n) => n.slice(0, -5)).filter((id) => RUN_ID_RE.test(id)).sort();
+      } catch {
+        return [];
+      }
+    },
 
     /** Most recent saved runs (ids start with an ISO timestamp, so name order = time order). */
     listRuns(limit = 50): RunSummary[] {
@@ -250,13 +316,21 @@ export function createStorage(dir = path.resolve(".sandflow"), opts: StorageOpti
           const st = fs.statSync(file);
           let s = summaryCache.get(n);
           if (!s || s.mtimeMs !== st.mtimeMs || s.size !== st.size) {
-            s = { mtimeMs: st.mtimeMs, size: st.size, summary: summarize(settleInterrupted(JSON.parse(fs.readFileSync(file, "utf8")) as RunState)) };
+            let summary: RunSummary;
+            try {
+              const raw = JSON.parse(fs.readFileSync(file, "utf8")) as RunState;
+              const problem = raw?.schemaVersion === undefined ? undefined : journalProblem(raw, n.slice(0, -5));
+              summary = problem ? corruptSummary(n.slice(0, -5), file, problem) : summarize(settleInterrupted(raw));
+            } catch (e) {
+              summary = corruptSummary(n.slice(0, -5), file, (e as Error).message);
+            }
+            s = { mtimeMs: st.mtimeMs, size: st.size, summary };
             summaryCache.set(n, s);
           }
           out.push(s.summary);
           if (!s.summary.parent && ++roots >= limit) break;
         } catch {
-          /* unreadable run file */
+          /* vanished meanwhile */
         }
       }
       return limitRuns(out, limit);

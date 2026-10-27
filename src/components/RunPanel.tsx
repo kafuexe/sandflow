@@ -25,6 +25,7 @@ const STATUS_ICON: Record<NodeRunStatus, React.ReactNode> = {
 export const RUN_BADGE: Record<RunStatus, string> = {
   running: "bg-sky-500/20 text-sky-300",
   waiting: "bg-amber-500/20 text-amber-300",
+  paused: "bg-violet-500/20 text-violet-300",
   done: "bg-emerald-500/20 text-emerald-300",
   failed: "bg-red-500/20 text-red-300",
   cancelled: "bg-muted text-muted-foreground",

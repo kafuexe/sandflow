@@ -35,6 +35,7 @@ export function validateSettings(s: Settings): Settings {
     if (!IMAGE_RE.test(image)) throw new Error(`Invalid sandbox image "${image}"`);
     out.sandboxImage = image;
   }
+  if (s.maxContinues !== undefined) out.maxContinues = Math.max(0, Math.min(100, Math.floor(Number(s.maxContinues) || 0)));
   const tools = s.agentToolsDir?.trim();
   if (tools) out.agentToolsDir = tools;
   if (s.assistantAgent) out.assistantAgent = validateAssistantAgent(s.assistantAgent);

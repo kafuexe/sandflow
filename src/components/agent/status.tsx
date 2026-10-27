@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, CircleDashed, CircleSlash, Flag, Loader2, MessageCircleQuestion, X } from "lucide-react";
+import { Check, CircleDashed, CircleSlash, Flag, Loader2, MessageCircleQuestion, PauseCircle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RunStatus } from "../../../shared/types";
 
@@ -7,6 +7,7 @@ import type { RunStatus } from "../../../shared/types";
 export const RUN_TONE: Record<RunStatus, { text: string; bar: string; label: string }> = {
   waiting: { text: "text-amber-300", bar: "bg-amber-400", label: "Needs your answer" },
   running: { text: "text-sky-300", bar: "bg-sky-400", label: "Running" },
+  paused: { text: "text-violet-300", bar: "bg-violet-400", label: "Paused" },
   done: { text: "text-emerald-300", bar: "bg-emerald-400", label: "Finished" },
   failed: { text: "text-red-300", bar: "bg-red-400", label: "Failed" },
   cancelled: { text: "text-muted-foreground", bar: "bg-muted-foreground/50", label: "Stopped" },
@@ -33,6 +34,7 @@ export function RunStatusIcon({ status, className }: { status: RunStatus; classN
   if (status === "waiting") return <MessageCircleQuestion className={c} aria-label="Needs your answer" />;
   if (status === "running") return <Loader2 className={cn(c, "animate-spin motion-reduce:animate-none")} aria-label="Running" />;
   if (status === "done") return <Check className={c} aria-label="Finished" />;
+  if (status === "paused") return <PauseCircle className={c} aria-label="Paused" />;
   if (status === "failed") return <X className={c} aria-label="Failed" />;
   return <CircleSlash className={c} aria-label="Stopped" />;
 }

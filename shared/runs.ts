@@ -24,5 +24,8 @@ export function summarize(r: RunState): RunSummary {
     parent: r.parent,
     stack: r.stack,
     ...(r.resumedFrom ? { resumedFrom: r.resumedFrom } : {}),
+    ...(r.phase ? { phase: r.phase } : {}),
+    ...(r.pauseReason ? { pauseReason: r.pauseReason } : {}),
+    ...(r.hold ? { hold: r.hold } : {}),
   };
 }
