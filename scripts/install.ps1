@@ -73,16 +73,6 @@ param([switch]$NoPlugin, [switch]$NoMcp, [switch]$Checker)
         throw 'npm was not found next to node or on PATH. Reinstall Node.js (it includes npm).'
     }
 
-    function Get-Release([string]$repo, [string]$tag) {
-        $api = "https://api.github.com/repos/$repo/releases/latest"
-        if ($tag) { $api = "https://api.github.com/repos/$repo/releases/tags/$tag" }
-        try {
-            return Invoke-RestMethod -Uri $api -UseBasicParsing -Headers @{ 'User-Agent' = 'sandflow-installer'; 'Accept' = 'application/vnd.github+json' }
-        } catch {
-            return $null
-        }
-    }
-
     # The folder holding package.json inside an extracted tarball (`npm pack` puts everything under package/).
     function Find-PackageRoot([string]$dir) {
         if (Test-Path -LiteralPath (Join-Path $dir 'package.json')) { return $dir }
@@ -189,20 +179,19 @@ else console.log("foreign");
         } else {
             $tag = $env:SANDFLOW_VERSION
             if ($tag -and -not $tag.StartsWith('v')) { $tag = "v$tag" }
-            if ($tag) { Write-Step "Looking up Sandflow $tag..." } else { Write-Step 'Looking up the latest Sandflow release...' }
-            $release = Get-Release $repo $tag
-            $asset = $null
-            $sumAsset = $null
-            if ($release) {
-                $asset = @($release.assets | Where-Object { $_.name -eq 'sandflow-cli.tgz' }) | Select-Object -First 1
-                $sumAsset = @($release.assets | Where-Object { $_.name -eq 'sandflow-cli.tgz.sha256' }) | Select-Object -First 1
-            }
-            if ($asset) {
-                Write-Step "Downloading sandflow-cli.tgz from $($release.tag_name)..."
-                Get-Download $asset.browser_download_url $tarball
-                if ($sumAsset) {
-                    $sumFile = Join-Path $temporary 'sandflow-cli.tgz.sha256'
-                    Get-Download $sumAsset.browser_download_url $sumFile
+            # Release download URLs, not the GitHub API: the API allows 60 anonymous requests an hour per IP, which
+            # shared networks and CI run out of. `latest/download` redirects to the newest release's asset.
+            $base = "https://github.com/$repo/releases/latest/download"
+            $which = 'the latest release'
+            if ($tag) { $base = "https://github.com/$repo/releases/download/$tag"; $which = $tag }
+            Write-Step "Downloading sandflow-cli.tgz from $which..."
+            $downloaded = $true
+            try { Get-Download "$base/sandflow-cli.tgz" $tarball } catch { $downloaded = $false }
+            if ($downloaded) {
+                $sumFile = Join-Path $temporary 'sandflow-cli.tgz.sha256'
+                $hasSum = $true
+                try { Get-Download "$base/sandflow-cli.tgz.sha256" $sumFile } catch { $hasSum = $false }
+                if ($hasSum) {
                     $expected = ((Get-Content -LiteralPath $sumFile -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
                     if ((Get-Sha256 $tarball) -ne $expected) { throw 'The downloaded sandflow-cli.tgz does not match its published sha256; nothing was installed.' }
                     Write-Host 'Checksum OK.'
@@ -210,8 +199,7 @@ else console.log("foreign");
                     Write-Warn 'The release has no sandflow-cli.tgz.sha256; installing without a checksum check.'
                 }
             } else {
-                $what = 'No published release has a sandflow-cli.tgz'
-                if ($release) { $what = "Release $($release.tag_name) has no sandflow-cli.tgz" }
+                $what = "Couldn't download sandflow-cli.tgz from $which"
                 Write-Warn "$what; building the CLI from source instead (needs git; takes a few minutes)."
                 $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
                 if (-not $git) { throw 'Building from source needs git: winget install Git.Git, then rerun.' }

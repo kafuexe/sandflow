@@ -116,27 +116,16 @@ if [ -n "${SANDFLOW_CLI_URL:-}" ]; then
 else
     tag=${SANDFLOW_VERSION:-}
     case "$tag" in ''|v*) ;; *) tag="v$tag" ;; esac
+    # Release download URLs, not the GitHub API: the API allows 60 anonymous requests an hour per IP, which
+    # shared networks and CI run out of. `latest/download` redirects to the newest release's asset.
     if [ -n "$tag" ]; then
-        step "Looking up Sandflow $tag..."
-        api="https://api.github.com/repos/$repo/releases/tags/$tag"
+        base="https://github.com/$repo/releases/download/$tag"; which=$tag
     else
-        step 'Looking up the latest Sandflow release...'
-        api="https://api.github.com/repos/$repo/releases/latest"
+        base="https://github.com/$repo/releases/latest/download"; which='the latest release'
     fi
-    release_tag=; asset_url=; sum_url=
-    if fetch "$api" "$temporary/release.json" 2>/dev/null; then
-        # tag, tarball URL, checksum URL: one per line (empty when missing).
-        {
-            IFS= read -r release_tag || true
-            IFS= read -r asset_url || true
-            IFS= read -r sum_url || true
-        } < <("$node" -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const a=(n)=>((r.assets||[]).find((x)=>x.name===n)||{}).browser_download_url||"";console.log(r.tag_name||"");console.log(a("sandflow-cli.tgz"));console.log(a("sandflow-cli.tgz.sha256"))' "$temporary/release.json")
-    fi
-    if [ -n "$asset_url" ]; then
-        step "Downloading sandflow-cli.tgz from $release_tag..."
-        fetch "$asset_url" "$tarball" || die "couldn't download $asset_url"
-        if [ -n "$sum_url" ]; then
-            fetch "$sum_url" "$temporary/sandflow-cli.tgz.sha256" || die "couldn't download $sum_url"
+    step "Downloading sandflow-cli.tgz from $which..."
+    if fetch "$base/sandflow-cli.tgz" "$tarball" 2>/dev/null; then
+        if fetch "$base/sandflow-cli.tgz.sha256" "$temporary/sandflow-cli.tgz.sha256" 2>/dev/null; then
             expected=$(awk '{print tolower($1); exit}' "$temporary/sandflow-cli.tgz.sha256")
             [ "$(sha256 "$tarball")" = "$expected" ] \
                 || die 'the downloaded sandflow-cli.tgz does not match its published sha256; nothing was installed.'
@@ -145,7 +134,7 @@ else
             warn 'the release has no sandflow-cli.tgz.sha256; installing without a checksum check.'
         fi
     else
-        if [ -n "$release_tag" ]; then what="Release $release_tag has no sandflow-cli.tgz"; else what='No published release has a sandflow-cli.tgz'; fi
+        what="couldn't download sandflow-cli.tgz from $which"
         warn "$what; building the CLI from source instead (needs git; takes a few minutes)."
         command -v git >/dev/null 2>&1 || die 'building from source needs git (apt install git / brew install git), then rerun.'
         clone_args=(clone --depth 1)
