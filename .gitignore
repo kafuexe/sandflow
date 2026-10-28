@@ -6,5 +6,6 @@ dist
 .superpowers
 .sandflow
 dist-electron
+dist-cli
 release
 build/sandbox
