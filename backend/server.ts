@@ -5,7 +5,7 @@ import fs from "node:fs";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
-import { createApi } from "./api";
+import { createApi, type ApiOptions } from "./api";
 import type { ClaudeCodeOptions } from "./claudeCode";
 import type { NodeRunner } from "./engine";
 import type { TriageRunner } from "./recovery";
@@ -31,6 +31,10 @@ export interface AppServerOptions {
   pauseGraceMs?: number;
   /** Register Sandflow with Claude Code (desktop app; Settings can turn it off). */
   claudeCode?: ClaudeCodeOptions;
+  /** Record runs in ~/.sandflow/history.jsonl, marked with where they ran (see backend/history.ts). */
+  history?: ApiOptions["history"];
+  /** The CLI daemon: `POST /api/shutdown` calls this (`sandflow shutdown`) — signals can't stop it cleanly on Windows. */
+  onShutdownRequest?: () => void;
 }
 
 export interface AppServer {
@@ -60,6 +64,7 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
     bundledSandboxImage: opts.bundledSandboxImage,
     pauseGraceMs: opts.pauseGraceMs,
     claudeCode: opts.claudeCode,
+    history: opts.history,
   });
   const root = path.resolve(opts.webRoot);
   let allowedHosts = new Set<string>();
@@ -92,6 +97,12 @@ export async function startAppServer(opts: AppServerOptions): Promise<AppServer>
     if (!allowedHosts.has((req.headers.host ?? "").toLowerCase())) {
       res.statusCode = 403;
       return res.end("Forbidden");
+    }
+    // JSON only, like every API write: a cross-site page can't send that without a CORS preflight.
+    if (opts.onShutdownRequest && req.method === "POST" && req.url === "/api/shutdown" && req.headers["content-type"]?.startsWith("application/json")) {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }), () => opts.onShutdownRequest!());
+      return;
     }
     api(req, res, () => serveStatic(req, res));
   });

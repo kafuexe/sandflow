@@ -228,6 +228,8 @@ export interface StartRunOptions {
   warnings?: string[];
   /** Recorded on the run: who started it from outside the app (Claude Code). */
   startedBy?: RunStartedBy;
+  /** Recorded on the run (RunState.envOverrides). */
+  envOverrides?: Record<string, string>;
   /**
    * Resume `from` (a finished run of this flow, see shared/resume.ts): start only at the plan's steps, with the inputs
    * they had, after copying the other steps' states and outputs from it. Its trigger event is reused; pass its
@@ -367,6 +369,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     transitions: [{ phase: "running", at: Date.now(), attempt: 1 }],
     steps: 0,
     ...(opts.startedBy ? { startedBy: opts.startedBy } : {}),
+    ...(opts.envOverrides && Object.keys(opts.envOverrides).length ? { envOverrides: opts.envOverrides } : {}),
   };
   if (cont) {
     // The same run, again: what was going when it stopped runs again (see `continuing` below).

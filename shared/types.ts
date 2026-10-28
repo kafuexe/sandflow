@@ -1097,6 +1097,11 @@ export interface RunState {
   /** What recovery did after steps failed, by node key (see shared/recovery.ts). */
   recovery?: Record<string, NodeRecovery>;
   startedBy?: RunStartedBy;
+  /**
+   * Inputs given for this run only (start_run's env, the CLI's --env / --repo), used again when it's continued or
+   * retried. Secret-named ones aren't kept (they'd be in the journal): those come from Inputs on a continue.
+   */
+  envOverrides?: Record<string, string>;
   /** What the supervisor noticed / did, oldest first (capped; `supervisionDropped` counts what was cut off the front). */
   supervision?: SupervisionEntry[];
   supervisionDropped?: number;

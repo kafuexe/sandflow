@@ -79,6 +79,13 @@ function writeAtomic(file: string, content: string) {
 
 const isOurs = (e: ServerEntry | undefined) => !!e && (e.args ?? []).some((a) => String(a).includes(BRIDGE_FILE));
 
+/**
+ * The `sandflow` CLI's registration (`claude mcp add sandflow -- sandflow mcp`, written by its installer). Left as it
+ * is: Claude Code then uses the CLI's own background Sandflow instead of this app.
+ */
+export const isCliEntry = (e: ServerEntry | undefined) =>
+  !!e && /(^|[\\/])sandflow(\.cmd|\.ps1|\.exe)?$/i.test(e.command ?? "") && (e.args ?? []).includes("mcp");
+
 const sameServer = (a: ServerEntry | undefined, b: ServerEntry) =>
   !!a && a.command === b.command && JSON.stringify(a.args ?? []) === JSON.stringify(b.args ?? []) && JSON.stringify(a.env ?? {}) === JSON.stringify(b.env ?? {});
 
@@ -138,7 +145,11 @@ async function syncServer(o: ClaudeCodeOptions, enabled: boolean, notes: string[
     env: o.node.env ?? {},
   };
   if (current && !isOurs(current)) {
-    notes.push(`Left your own "${SERVER_NAME}" MCP server in Claude Code as it is`);
+    notes.push(
+      isCliEntry(current)
+        ? `Claude Code uses the sandflow CLI's MCP server ("sandflow mcp") — left as it is; remove it with "claude mcp remove ${SERVER_NAME} --scope user" to use this app instead`
+        : `Left your own "${SERVER_NAME}" MCP server in Claude Code as it is`,
+    );
     return;
   }
   if (sameServer(current, want)) {

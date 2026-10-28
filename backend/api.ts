@@ -7,7 +7,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { CORE_BLOCKS } from "../shared/core";
 import { eventMarkdown } from "../shared/events";
-import { ENV_NAME_RE, resolveNode } from "../shared/resolve";
+import { ENV_NAME_RE, flowRequirements, resolveNode } from "../shared/resolve";
 import { validateSettings } from "../shared/settings";
 import { sanitizeFlowColor } from "../shared/flows";
 import { subflowCycle } from "../shared/subflow";
@@ -40,7 +40,7 @@ import type { TriageRunner } from "./recovery";
 import { buildPack, writePackFolder, zipFiles } from "./packs";
 import { createMcp } from "./mcp";
 import { checkContinue, markCrashed, repairRun, runBranch } from "./continue";
-import { acquireRunLock, cleanupLeftovers, readLock, releaseRunLock, touchRunLock } from "./journal";
+import { acquireRunLock, cleanupLeftovers, readLock, releaseRunLock, SECRET_NAME_RE, touchRunLock } from "./journal";
 import { SUPERVISOR_DEFAULTS, supervisorSettings } from "../shared/supervisor";
 import { claudeOverseer, createSupervisor, type Supervisor, type SupervisorDeps } from "./supervisor";
 import { killPidTree } from "./proc";
@@ -54,6 +54,7 @@ import {
   type Exec,
 } from "./sandbox";
 import { applyCleanup, planCleanup } from "./cleanup";
+import { createHistoryRecorder, type HistorySource } from "./history";
 import { createNotifier } from "./notify";
 import { createSkillStore, type SkillFile } from "./skills";
 import { applyPackEdits, dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
@@ -101,6 +102,9 @@ async function readJson<T>(req: IncomingMessage, max = MAX_BODY): Promise<T> {
   }
 }
 
+/** The saved data with the inputs a run was given for itself on top (RunState.envOverrides) — to continue / retry it. */
+const withRunEnv = (data: AppData, run: RunState): AppData => (run.envOverrides ? { ...data, env: { ...data.env, ...run.envOverrides } } : data);
+
 function send(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader("content-type", "application/json");
@@ -132,6 +136,8 @@ export interface ApiOptions {
   pauseGraceMs?: number;
   /** Desktop app: keep Sandflow registered with Claude Code (Settings → Claude Code integration). */
   claudeCode?: ClaudeCodeOptions;
+  /** Record run starts / status changes in ~/.sandflow/history.jsonl (see backend/history.ts). */
+  history?: { file: string; source: HistorySource };
   /** The supervisor's clock / overseer / container check (tests); `manual`: don't start its loop (call `tick`). */
   supervisor?: Partial<Pick<SupervisorDeps, "now" | "sleep" | "overseer" | "containerExists">> & { manual?: boolean };
 }
@@ -141,6 +147,12 @@ export function createApi(
   runners: { auto: NodeRunner; ai: NodeRunner; script?: NodeRunner; integration?: NodeRunner; triage?: TriageRunner },
   opts: ApiOptions = {},
 ): Api {
+  if (opts.history) {
+    // Every run save goes through here, so this sees each start and status change.
+    const record = createHistoryRecorder({ ...opts.history, dataDir: storage.dir });
+    const save = storage.saveRun;
+    storage = { ...storage, saveRun: (run) => (save(run), record(run)) };
+  }
   const skills = createSkillStore(storage.dir, opts.bundledSkillsDir, storage.packs);
   const runPacks: RunPacks = {
     runtime: (id) => storage.packs.runtime(id),
@@ -298,7 +310,7 @@ export function createApi(
   function launch(
     flow: Flow,
     data: AppData,
-    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan }; continueFrom?: RunState; startedBy?: RunStartedBy } = {},
+    extra: { trigger?: TriggerEvent; startNodeId?: string; prompt?: string; branch?: string; resume?: { from: RunState; plan: ResumePlan }; continueFrom?: RunState; startedBy?: RunStartedBy; envOverrides?: EnvValues } = {},
     notes: string[] = [],
   ): RunHandle & { warning?: string } {
     // Runs are independent (own context, sandbox, branch and logs), so any number may run at once — the one thing
@@ -522,7 +534,7 @@ export function createApi(
     if (runs.get(id) && !orig.finishedAt) throw new HttpError(409, "The run is still going — stop it first");
     const already = [...runs.values()].find((h) => !h.state.finishedAt && h.state.resumedFrom?.runId === id);
     if (already) throw new HttpError(409, `This run is already being resumed (run ${already.state.id})`, { runId: already.state.id });
-    const data = storage.load();
+    const data = withRunEnv(storage.load(), orig);
     const flow = data.flows.find((f) => f.id === orig.flowId);
     if (!flow) throw new HttpError(404, `Flow "${orig.flowName}" no longer exists`);
     const planned = planResume(orig, flow, data.blocks, fromNodeIds);
@@ -561,7 +573,7 @@ export function createApi(
         throw new HttpError(409, `Can't resume: ${problem}`, { problems: [problem] });
       }
     }
-    return launch(flow, env === data.env ? data : { ...data, env }, { prompt, branch: plan.branch, resume: { from: orig, plan } }, notes);
+    return launch(flow, env === data.env ? data : { ...data, env }, { prompt, branch: plan.branch, resume: { from: orig, plan }, envOverrides: orig.envOverrides }, notes);
   }
 
   // ---------- continuing paused / interrupted runs (see shared/journal.ts, backend/continue.ts) ----------
@@ -606,7 +618,7 @@ export function createApi(
         locked.add(id);
         mine = true;
       }
-      const data = storage.load();
+      const data = withRunEnv(storage.load(), run);
       // Not paused: its driver died without saying (we hold the lock now) — a crash.
       if (!isPaused(run)) markCrashed(run, data);
       let changes: string[] | undefined;
@@ -748,7 +760,8 @@ export function createApi(
     if (!flow) throw new HttpError(404, flowId ? `Flow "${flowId}" not found` : "Flow not found");
     const missing = missingInputs(flow, data.blocks, data.env, prompt ?? data.settings.startingPrompt, data.flows);
     if (missing.length) throw new HttpError(400, `Missing inputs: ${missing.join(", ")}`, { missing });
-    return launch(flow, data, { prompt, startedBy });
+    const envOverrides = env && Object.fromEntries(Object.entries(env).filter(([k]) => !SECRET_NAME_RE.test(k)));
+    return launch(flow, data, { prompt, startedBy, envOverrides });
   }
 
   function listRuns(): RunSummary[] {
@@ -1049,15 +1062,43 @@ export function createApi(
       }
 
       case "POST /runs": {
-        // `prompt` (optional) is this run's starting prompt; without it the global one is used.
-        const body = (await readJson<{ flowId?: string; prompt?: string }>(req)) ?? {};
+        // `prompt` (optional) is this run's starting prompt; without it the global one is used. `env` (optional) adds to /
+        // overrides the saved inputs for this run only (the CLI's --env / --repo).
+        const body = (await readJson<{ flowId?: string; prompt?: string; env?: unknown }>(req)) ?? {};
         const prompt = typeof body.prompt === "string" ? body.prompt.trim() : undefined;
-        const started = startManual(body.flowId, prompt);
+        let env: EnvValues | undefined;
+        if (body.env !== undefined) {
+          if (!body.env || typeof body.env !== "object" || Array.isArray(body.env)) throw new HttpError(400, "env must be an object");
+          const bad = Object.keys(body.env).filter((k) => !ENV_NAME_RE.test(k));
+          if (bad.length) throw new HttpError(400, `Invalid env var name: ${bad.join(", ")}`);
+          env = Object.fromEntries(Object.entries(body.env).map(([k, v]) => [k, String(v)]));
+        }
+        const started = startManual(body.flowId, prompt, env);
         return send(res, 200, { runId: started.state.id, ...(started.warning ? { warning: started.warning } : {}) });
       }
 
       case "GET /runs":
         return send(res, 200, listRuns());
+
+      case "GET /health":
+        return send(res, 200, { ok: true, dataDir: storage.dir });
+
+      // Flows with what they need to start (the CLI's `sandflow flows`) — input names and whether they're set, never values.
+      case "GET /flows": {
+        const data = storage.load();
+        const flows = data.flows.map((f) => {
+          const r = flowRequirements(f, data.blocks, data.flows);
+          return {
+            id: f.id,
+            name: f.name,
+            ...(f.description ? { description: f.description } : {}),
+            ...(f.pack ? { pack: f.pack } : {}),
+            inputs: r.env.map((e) => ({ name: e.name, optional: !!e.optional, set: !!data.env[e.name]?.trim() })),
+            prompt: r.startingPromptNodes.length ? (data.settings.startingPrompt.trim() ? "set" : "needed") : "unused",
+          };
+        });
+        return send(res, 200, flows);
+      }
 
       case "GET /triggers":
         return send(res, 200, {

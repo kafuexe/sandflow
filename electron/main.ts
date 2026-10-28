@@ -10,6 +10,7 @@ import { runAi } from "../backend/runners/ai";
 import { runAuto } from "../backend/runners/auto";
 import { runIntegration } from "../backend/runners/integration";
 import { runScript } from "../backend/runners/script";
+import { homePaths } from "../backend/cli/home";
 import { startAppServer, type AppServer } from "../backend/server";
 import { claudeTriage } from "../backend/triage";
 import type { UpdateSettings } from "../shared/types";
@@ -135,6 +136,8 @@ async function start() {
       ? path.join(process.resourcesPath, "sandbox", "sandflow-agent.tar.gz")
       : path.join(appRoot, "build", "sandbox", "sandflow-agent.tar.gz"),
     runners: { auto: runAuto, ai: runAi, script: runScript, integration: runIntegration, triage: claudeTriage },
+    // The run history shared with the `sandflow` CLI (`sandflow -r` lists and continues the app's runs too).
+    history: { file: homePaths().history, source: "desktop" },
     // Done on every start rather than by the installer: the app starts right after an install and after every
     // (silent) update, runs as the user whose ~/.claude it is, and knows its data folder.
     claudeCode: {
