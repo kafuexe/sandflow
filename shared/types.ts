@@ -39,6 +39,13 @@ export interface StackConfig {
 
 export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment" | "merge-parent" | "checks";
 
+/**
+ * What a gate's failure does (see shared/gates.ts): `note` = reported, counted as PASS; `retry` = leave through `fail`
+ * (the default); `block` = leave through `fail` (or `pass` when nothing is wired to fail) and Create MR refuses until
+ * the gate passes; `stop` = the run fails at once.
+ */
+export type GateFailLevel = "note" | "retry" | "block" | "stop";
+
 /** One command of a Checks block (lint, tests, build…), run in the run's worktree. */
 export interface CheckCommand {
   name: string;
@@ -46,6 +53,8 @@ export interface CheckCommand {
   run: string;
   /** A required check that fails makes the block leave through `fail`; an advisory one is only reported (default true). */
   required?: boolean;
+  /** What this check failing does (default: the block's `onFail`). Advisory checks are always `note`. */
+  onFail?: GateFailLevel;
   /** Default 600. */
   timeoutSeconds?: number;
 }
@@ -306,6 +315,8 @@ export interface BlockConfig {
   devServer?: DevServerConfig;
   /** ai blocks with a verdict: when the branch only changed docs (Markdown, docs/, README, CHANGELOG, LICENSE), skip the agent and pass. */
   skipDocsOnly?: boolean;
+  /** Gates (Checks, agents with a verdict): what a failure does (default `retry`); a check's own `onFail` overrides it. */
+  onFail?: GateFailLevel;
   /**
    * Longest a node may run (every kind; inherited like the rest). Unset = no limit, except Shell command (30 min);
    * 0 = no limit (turns that default off). The supervisor stops a node that exceeds it (failure cause `timeout`).
@@ -357,6 +368,7 @@ export interface ResolvedConfig {
   verdict: boolean;
   devServer: { command: string; readyUrl: string; startupTimeoutSeconds: number };
   skipDocsOnly: boolean;
+  onFail: GateFailLevel;
   timeoutSeconds?: number;
 }
 
@@ -798,7 +810,8 @@ export interface ChecksEvidence {
   /** sha256 of the commands and the worktree (HEAD + uncommitted changes) they ran on. */
   fingerprint: string;
   passed: boolean;
-  results: { name: string; required: boolean; ok: boolean; code: number | null; seconds: number; output: string }[];
+  /** `onFail` = the check's level when it isn't `retry`. */
+  results: { name: string; required: boolean; ok: boolean; code: number | null; seconds: number; output: string; onFail?: GateFailLevel }[];
   at: number;
 }
 
@@ -896,6 +909,8 @@ export interface NodeRunState {
   stack?: StackJournal;
   /** Why the last attempt failed (see FailureCause). */
   failure?: { cause: FailureCause; message: string; at: number };
+  /** Gates: a `block`-level failure, kept until this gate passes — while any node has one, Create MR refuses. */
+  gateBlock?: { message: string; at: number };
   /** Its latest sign of life (log line, agent activity) — what the supervisor's liveness check reads. */
   lastActivityAt?: number;
   /** Executions in a row that produced exactly the previous execution's output (a loop going nowhere). */

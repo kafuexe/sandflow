@@ -499,7 +499,9 @@ export function BlockEditor() {
                   </SelectContent>
                 </Select>
               </Field>
-              {cfg.autoAction === "checks" && <ChecksEditor own={c.checks} cfg={cfg.checks} onChange={(checks) => setCfg({ checks })} />}
+              {cfg.autoAction === "checks" && (
+                <ChecksEditor own={c.checks} cfg={cfg.checks} onChange={(checks) => setCfg({ checks })} ownOnFail={c.onFail} onFail={cfg.onFail} setOnFail={(onFail) => setCfg({ onFail })} />
+              )}
               {cfg.autoAction === "shell" && (
                 <Field label="Shell command (runs on the host in REPO_PATH; $SANDFLOW_ARTIFACT / $SANDFLOW_STEER available)" overridden={c.shellCommand !== undefined} onReset={() => setCfg({ shellCommand: undefined })} inheritable>
                   <Textarea

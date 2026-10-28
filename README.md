@@ -237,6 +237,19 @@ A **gate** leaves through one of two exits, **pass** or **fail**; wire **fail** 
   started in the worktree before the agent, polled until the URL answers (default wait 60 s), and stopped afterwards. In a
   container the URL is the container's own `localhost`.
 
+**On failure** (block editor, per gate; per check for Checks) sets what a failure — a FAIL verdict, no valid verdict, or a
+failed required check — does:
+
+| Level | What happens |
+| --- | --- |
+| `note` | Reported in the artifact and the log; the gate leaves through **pass**. |
+| `retry` (default) | Leaves through **fail**. |
+| `block` | Leaves through **fail** (through **pass** when nothing is wired to fail, so the flow goes on) and is recorded on the gate's step. While any gate has a recorded blocking failure, **Create MR** fails the run instead of pushing; the record is cleared only when that same gate passes again. |
+| `stop` | The run fails at once, with an error naming the gate and what failed; recovery doesn't retry it. |
+
+A Checks block takes the most severe level among its failed checks; advisory checks are always `note`. A gate that leaves
+through **fail** with nothing connected to it ends that path (the run can still finish *done*) and raises a warning flag.
+
 ### What runs cost
 
 Agent steps record their tokens (in, out, cache read, cache write). Steps with a Claude model set are priced at Anthropic's

@@ -3,7 +3,7 @@ import path from "node:path";
 import { appendActivity, capRunActivity, type ActivityDraft, type AgentActivity } from "../shared/activity";
 import { describeCondition, evaluateCondition } from "../shared/conditions";
 import { eventMarkdown } from "../shared/events";
-import { GATE_EXITS, isGate } from "../shared/gates";
+import { FinalError, GATE_EXITS, isGate } from "../shared/gates";
 import { formatUsd, usageCost } from "../shared/pricing";
 import { nodeLabel, resolveNode } from "../shared/resolve";
 import { DEFAULT_EXIT, MAX_SUBFLOW_DEPTH, exitHandle, isExitHandle } from "../shared/subflow";
@@ -999,9 +999,9 @@ export function startRun(opts: StartRunOptions): RunHandle {
             ns.failure = { cause: failureCause(k, e), message: stop?.message ?? message, at: Date.now() };
             ns.error = stop?.message ?? message;
             // What happens next is decided in one place (backend/recovery.ts). A subflow's own steps were already
-            // through recovery; a run being stopped or paused is never retried.
+            // through recovery; a run being stopped or paused is never retried, nor is a final failure (a gate's `stop`).
             let next: AfterFailure = { kind: "fail" };
-            if (recovery && cfg.kind !== "subflow" && !halted()) {
+            if (recovery && cfg.kind !== "subflow" && !halted() && !(e instanceof FinalError)) {
               journal();
               // Journaled once recovery did something (recovery off leaves no trace).
               const history = run.recovery?.[k] ?? { cycles: 0, history: [] };

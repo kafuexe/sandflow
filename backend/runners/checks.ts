@@ -3,11 +3,13 @@
 // When the worktree and the commands haven't changed since the last passing execution, its results are reused.
 
 import { createHash } from "node:crypto";
-import type { ChecksEvidence, FlowNode, NodeIO, ResolvedConfig } from "../../shared/types";
+import { worstLevel } from "../../shared/gates";
+import type { ChecksEvidence, FlowNode, GateFailLevel, NodeIO, ResolvedConfig } from "../../shared/types";
 import type { NodeResult, RunContext } from "../engine";
 import { tail } from "../prompt";
 import { exitText, runTree } from "../proc";
 import { getSandbox, type SandboxLike } from "./ai";
+import { gateResult } from "./gate";
 import { shQuote } from "./script";
 import { codeOwner, trustedOnHost } from "./trust";
 
@@ -24,26 +26,35 @@ async function worktreeState(sandbox: SandboxLike): Promise<string | undefined> 
 }
 
 export const checksFingerprint = (commands: ResolvedConfig["checks"]["commands"], state: string) =>
-  createHash("sha256").update(JSON.stringify(commands.map((c) => [c.name, c.run, c.required !== false]))).update("\0").update(state).digest("hex");
+  createHash("sha256")
+    // The level only when it isn't the default, so results journaled before levels existed stay reusable.
+    .update(JSON.stringify(commands.map((c) => [c.name, c.run, c.required !== false, ...(c.onFail && c.onFail !== "retry" ? [c.onFail] : [])])))
+    .update("\0")
+    .update(state)
+    .digest("hex");
 
-/** The report (artifact) and, when it failed, what to fix (steer). */
-export function checksReport(results: Result[], reused: boolean): { artifact: string; steer?: string; passed: boolean } {
-  const failedRequired = results.filter((r) => !r.ok && r.required);
+/** A failed check's level: advisory ones only report (`note`). */
+const levelOf = (r: Result): GateFailLevel => (r.required ? r.onFail ?? "retry" : "note");
+
+/** The report (artifact) and, when it failed, what to fix (steer) and how bad it is (the most severe failed check). */
+export function checksReport(results: Result[], reused: boolean): { artifact: string; steer?: string; passed: boolean; level?: GateFailLevel; failures?: string } {
+  const failedRequired = results.filter((r) => !r.ok && levelOf(r) !== "note");
   const passed = failedRequired.length === 0;
-  const line = (r: Result) => `- ${r.ok ? "✓" : r.required ? "✗" : "⚠"} ${r.name}${r.ok ? "" : r.required ? " — failed" : " — failed (advisory)"} (${r.seconds}s)`;
+  const tag = (r: Result) => (!r.required ? " (advisory)" : levelOf(r) === "retry" ? "" : ` (${levelOf(r)})`);
+  const line = (r: Result) => `- ${r.ok ? "✓" : levelOf(r) === "note" ? "⚠" : "✗"} ${r.name}${r.ok ? "" : ` — failed${tag(r)}`} (${r.seconds}s)`;
   const head = `# Checks: ${passed ? "PASS" : "FAIL"}${reused ? " (unchanged since the last run — results reused)" : ""}`;
   const details = results
     .filter((r) => !r.ok)
-    .map((r) => `## ${r.name}${r.required ? "" : " (advisory)"} — ${r.code === null ? "timed out" : `exit ${r.code}`}\n\n\`\`\`\n${r.output.trim()}\n\`\`\``);
+    .map((r) => `## ${r.name}${tag(r)} — ${r.code === null ? "timed out" : `exit ${r.code}`}\n\n\`\`\`\n${r.output.trim()}\n\`\`\``);
   const artifact = [head, results.map(line).join("\n"), ...details].join("\n\n");
-  const steer = passed
-    ? undefined
-    : `These required checks fail — fix them:\n${failedRequired.map((r, i) => `${i + 1}. ${r.name}:\n${r.output.trim()}`).join("\n\n")}`;
-  return { artifact, steer, passed };
+  if (passed) return { artifact, passed };
+  const steer = `These required checks fail — fix them:\n${failedRequired.map((r, i) => `${i + 1}. ${r.name}:\n${r.output.trim()}`).join("\n\n")}`;
+  return { artifact, steer, passed, level: worstLevel(failedRequired.map(levelOf)), failures: failedRequired.map((r) => r.name).join(", ") };
 }
 
 export async function runChecks(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
-  const commands = cfg.checks.commands.filter((c) => c.run?.trim());
+  // Each check's own level, else the block's.
+  const commands = cfg.checks.commands.filter((c) => c.run?.trim()).map((c) => ({ ...c, onFail: c.onFail ?? cfg.onFail }));
   if (!commands.length) throw new Error("Checks block has no commands (add them under Checks)");
   const onHost = ctx.settings.sandbox === "none";
   if (onHost) {
@@ -59,8 +70,7 @@ export async function runChecks(ctx: RunContext, node: FlowNode, cfg: ResolvedCo
   const prev = ns?.checks;
   if (cfg.checks.reuse && fingerprint && prev?.passed && prev.fingerprint === fingerprint) {
     ctx.log("info", "Nothing changed since these checks last passed — reusing their results", node.id);
-    const report = checksReport(prev.results, true);
-    return { exit: "pass", outputs: { artifact: report.artifact, steer: inputs.steer } };
+    return gateResult(ctx, node, { artifact: checksReport(prev.results, true).artifact, passSteer: inputs.steer });
   }
 
   const results: Result[] = [];
@@ -95,6 +105,7 @@ export async function runChecks(ctx: RunContext, node: FlowNode, cfg: ResolvedCo
     }
     const ok = code === 0;
     const result: Result = { name, required: c.required !== false, ok, code, seconds: Math.round((Date.now() - started) / 1000), output: tail(output.trim(), OUTPUT_CHARS) };
+    if (c.onFail !== "retry") result.onFail = c.onFail;
     results.push(result);
     ctx.log(ok ? "info" : result.required ? "warn" : "info", `Check "${name}": ${ok ? "passed" : code === null ? `timed out after ${timeoutS}s` : `failed (exit ${code})`}`, node.id);
   }
@@ -104,5 +115,5 @@ export async function runChecks(ctx: RunContext, node: FlowNode, cfg: ResolvedCo
     ns.checks = { fingerprint, passed: report.passed, results, at: Date.now() };
     ctx.journal?.();
   }
-  return { exit: report.passed ? "pass" : "fail", outputs: { artifact: report.artifact, steer: report.steer ?? inputs.steer } };
+  return gateResult(ctx, node, { level: report.level, failures: report.failures, artifact: report.artifact, passSteer: inputs.steer, failSteer: report.steer });
 }

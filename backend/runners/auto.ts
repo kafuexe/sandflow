@@ -6,6 +6,8 @@ import type { NodeResult, RunContext } from "../engine";
 import { withMergeLock } from "../stack";
 import { exitText, runTree } from "../proc";
 import { runChecks } from "./checks";
+import { blockingGates } from "./gate";
+import { FinalError } from "../../shared/gates";
 import { codeOwner, trustedOnHost } from "./trust";
 
 const execFileP = promisify(execFile);
@@ -197,6 +199,12 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
     }
 
     case "create-mr": {
+      // A gate failed at level `block` and hasn't passed since: never ship (final, so recovery doesn't retry it).
+      const blocked = blockingGates(ctx.run, (k) => {
+        const n = ctx.flow.nodes.find((x) => x.id === k);
+        return n ? nodeLabel(n, ctx.blocks) : k;
+      });
+      if (blocked.length) throw new FinalError(`Not creating the MR: blocked by failed gate${blocked.length > 1 ? "s" : ""} ${blocked.join("; ")}`);
       const branch = ctx.branch ?? requireEnv(env, "BRANCH_NAME");
       const base = env.BASE_BRANCH?.trim() || "main";
       const provider = (env.MR_PROVIDER?.trim() || "github").toLowerCase();

@@ -5,10 +5,11 @@
 import { AGENT_PROVIDERS } from "./agents";
 import { CONDITION_OPS, validateCondition } from "./conditions";
 import { GIT_EVENTS } from "./events";
+import { GATE_LEVELS } from "./gates";
 import { ENV_NAME_RE, resolveBlock, templateChain } from "./resolve";
 import { skillProblem } from "./skills";
 import { EXIT_NAME_RE } from "./subflow";
-import type { BlockConfig, BlockDef, BlockKind, ResolvedConfig } from "./types";
+import type { BlockConfig, BlockDef, BlockKind, GateFailLevel, ResolvedConfig } from "./types";
 import { validateTrigger } from "./validate";
 
 type FieldType = "string" | "boolean" | "number" | "string[]" | "object" | "array";
@@ -120,6 +121,15 @@ export const CONFIG_FIELDS: Record<keyof BlockConfig, FieldDoc> = {
     kinds: ["ai"],
     doc: "With verdict: when the branch only changed docs (Markdown, docs/, README…), pass without running the agent",
     example: true,
+  },
+  onFail: {
+    type: "string",
+    kinds: ["ai", "auto"],
+    doc:
+      "Gates (Checks, verdict agents): what a failure does — note (reported, counts as PASS) | retry (default: exit 'fail') | " +
+      "block (exit 'fail', or 'pass' when nothing is wired to fail; Create MR refuses until this gate passes) | stop (the run fails). " +
+      "A check's own onFail overrides it; a Checks block takes the most severe level among its failed checks",
+    example: "block",
   },
 };
 
@@ -251,6 +261,8 @@ export function configProblems(cfg: unknown, kind: BlockKind, forNode = true): s
   return out;
 }
 
+const levelProblem = (v: unknown) => (GATE_LEVELS.includes(v as GateFailLevel) ? undefined : `unknown level "${v}". Use one of: ${GATE_LEVELS.join(", ")}`);
+
 function valueProblem(key: keyof BlockConfig, v: unknown): string | undefined {
   switch (key) {
     case "kind": {
@@ -271,6 +283,13 @@ function valueProblem(key: keyof BlockConfig, v: unknown): string | undefined {
       return Number.isInteger(v) && (v as number) > 0 ? undefined : "must be a positive whole number";
     case "timeoutSeconds":
       return typeof v === "number" && Number.isFinite(v) && v >= 0 ? undefined : "must be a number of seconds (0 = no limit)";
+    case "onFail":
+      return levelProblem(v);
+    case "checks": {
+      const cmds = (v as { commands?: unknown }).commands;
+      const bad = Array.isArray(cmds) ? cmds.find((c) => isObj(c) && c.onFail !== undefined && levelProblem(c.onFail)) : undefined;
+      return bad ? `commands[].onFail: ${levelProblem((bad as Record<string, unknown>).onFail)}` : undefined;
+    }
     case "agent": {
       const a = v as Record<string, unknown>;
       if (a.provider !== undefined && !AGENT_PROVIDERS.includes(a.provider as never)) return `unknown provider "${a.provider}". Use one of: ${AGENT_PROVIDERS.join(", ")}`;

@@ -1,9 +1,21 @@
 // Gates (from MEOW): blocks that leave through `pass` or `fail` — a Checks block (lint / tests / build commands) and
 // an agent with a verdict (a reviewer or tester that must answer PASS or FAIL; a missing answer counts as FAIL).
 
-import type { ResolvedConfig } from "./types";
+import type { GateFailLevel, ResolvedConfig } from "./types";
 
 export const GATE_EXITS = ["pass", "fail"] as const;
+
+/** Failure levels, least severe first. */
+export const GATE_LEVELS: readonly GateFailLevel[] = ["note", "retry", "block", "stop"];
+
+/** The most severe of these levels (undefined for none). */
+export const worstLevel = (levels: GateFailLevel[]): GateFailLevel | undefined =>
+  levels.reduce<GateFailLevel | undefined>((w, l) => (w === undefined || GATE_LEVELS.indexOf(l) > GATE_LEVELS.indexOf(w) ? l : w), undefined);
+
+/** A failure that ends the run as it is: the engine doesn't hand it to recovery (no retry, triage or skip). */
+export class FinalError extends Error {
+  readonly final = true;
+}
 
 /** A Checks block, or an agent block with `verdict` on. */
 export const isGate = (cfg: Pick<ResolvedConfig, "kind" | "autoAction" | "verdict">): boolean =>

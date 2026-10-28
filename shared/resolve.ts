@@ -50,6 +50,7 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
   verdict: false,
   devServer: { command: "", readyUrl: "", startupTimeoutSeconds: 60 },
   skipDocsOnly: false,
+  onFail: "retry",
 };
 
 const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
@@ -107,6 +108,7 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
     verdict: def(patch.verdict, base.verdict),
     devServer: { ...base.devServer, ...stripUndef(patch.devServer) },
     skipDocsOnly: def(patch.skipDocsOnly, base.skipDocsOnly),
+    onFail: def(patch.onFail, base.onFail),
     timeoutSeconds: def(patch.timeoutSeconds, base.timeoutSeconds),
   };
 }

@@ -4,8 +4,49 @@ import { Plus, RotateCcw, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import type { BlockConfig, CheckCommand, ResolvedConfig } from "../../shared/types";
+import { GATE_LEVELS } from "../../shared/gates";
+import type { BlockConfig, CheckCommand, GateFailLevel, ResolvedConfig } from "../../shared/types";
+
+const LEVEL_TEXT: Record<GateFailLevel, string> = {
+  note: "note — report it, count as pass",
+  retry: "retry — leave through fail",
+  block: "block — fail, and no MR until it passes",
+  stop: "stop — fail the run",
+};
+/** The per-check select's "use the block's level". */
+const INHERIT = "__block";
+
+/** A failure level; `inherit` adds an entry for "the block's level" (undefined). */
+function LevelSelect({ value, onChange, inherit, className }: { value?: GateFailLevel; onChange: (v: GateFailLevel | undefined) => void; inherit?: GateFailLevel; className?: string }) {
+  return (
+    <Select value={value ?? INHERIT} onValueChange={(v) => onChange(v === INHERIT ? undefined : (v as GateFailLevel))}>
+      <SelectTrigger className={className} title="What a failure does">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {inherit && <SelectItem value={INHERIT}>block&apos;s ({inherit})</SelectItem>}
+        {GATE_LEVELS.map((l) => (
+          <SelectItem key={l} value={l}>
+            {inherit ? l : LEVEL_TEXT[l]}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+/** The gate's own "On failure" level. */
+function OnFailField({ own, value, set }: { own?: GateFailLevel; value: GateFailLevel; set: (v: GateFailLevel | undefined) => void }) {
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      <span>On failure</span>
+      <LevelSelect className="h-8 w-72 text-xs" value={value} onChange={(v) => set(v ?? "retry")} />
+      <Reset shown={own !== undefined} onReset={() => set(undefined)} />
+    </div>
+  );
+}
 
 function Reset({ shown, onReset }: { shown: boolean; onReset: () => void }) {
   return shown ? (
@@ -18,7 +59,21 @@ function Reset({ shown, onReset }: { shown: boolean; onReset: () => void }) {
 }
 
 /** The command list of a Checks block (replaced as a whole when edited). */
-export function ChecksEditor({ own, cfg, onChange }: { own: BlockConfig["checks"]; cfg: ResolvedConfig["checks"]; onChange: (checks: BlockConfig["checks"]) => void }) {
+export function ChecksEditor({
+  own,
+  cfg,
+  onChange,
+  ownOnFail,
+  onFail,
+  setOnFail,
+}: {
+  own: BlockConfig["checks"];
+  cfg: ResolvedConfig["checks"];
+  onChange: (checks: BlockConfig["checks"]) => void;
+  ownOnFail?: GateFailLevel;
+  onFail: GateFailLevel;
+  setOnFail: (v: GateFailLevel | undefined) => void;
+}) {
   const commands = cfg.commands;
   const setCommands = (next: CheckCommand[]) => onChange({ ...own, commands: next });
   const update = (i: number, patch: Partial<CheckCommand>) => setCommands(commands.map((c, j) => (j === i ? { ...c, ...patch } : c)));
@@ -29,7 +84,7 @@ export function ChecksEditor({ own, cfg, onChange }: { own: BlockConfig["checks"
         <Reset shown={own?.commands !== undefined} onReset={() => onChange(own?.reuse === undefined ? undefined : { reuse: own.reuse })} />
       </div>
       {commands.map((c, i) => (
-        <div key={i} className="grid grid-cols-[8rem_1fr_6rem_auto_auto] items-center gap-2">
+        <div key={i} className="grid grid-cols-[8rem_1fr_6rem_auto_7rem_auto] items-center gap-2">
           <Input className="h-8 text-xs" value={c.name} placeholder="name" onChange={(e) => update(i, { name: e.target.value })} aria-label="Check name" />
           <Input className="h-8 font-mono text-xs" value={c.run} placeholder="npm test" onChange={(e) => update(i, { run: e.target.value })} aria-label="Command" />
           <Input
@@ -45,6 +100,13 @@ export function ChecksEditor({ own, cfg, onChange }: { own: BlockConfig["checks"
             <Switch checked={c.required !== false} onCheckedChange={(v) => update(i, { required: v ? undefined : false })} />
             required
           </label>
+          {c.required !== false ? (
+            <LevelSelect className="h-8 text-xs" value={c.onFail} inherit={onFail} onChange={(v) => update(i, { onFail: v })} />
+          ) : (
+            <span className="text-[11px] text-muted-foreground" title="An advisory check is only reported">
+              note
+            </span>
+          )}
           <Button size="icon" variant="ghost" className="size-8" title="Remove" onClick={() => setCommands(commands.filter((_, j) => j !== i))}>
             <Trash2 />
           </Button>
@@ -58,9 +120,11 @@ export function ChecksEditor({ own, cfg, onChange }: { own: BlockConfig["checks"
         Reuse the last results when nothing changed
         <Reset shown={own?.reuse !== undefined} onReset={() => onChange(own?.commands === undefined ? undefined : { commands: own.commands })} />
       </label>
+      <OnFailField own={ownOnFail} value={onFail} set={setOnFail} />
       <p className="text-[11px] text-muted-foreground">
         The block leaves through <b>pass</b> when every required check passes, else <b>fail</b> — wire <b>fail</b> to a fix step: it gets the
-        failing checks&apos; output as its steer. Commands run in the run&apos;s sandbox (on this machine with Sandbox: None).
+        failing checks&apos; output as its steer. A check can override the block&apos;s level; the most severe failed one decides. Commands run
+        in the run&apos;s sandbox (on this machine with Sandbox: None).
       </p>
     </div>
   );
@@ -87,6 +151,7 @@ export function AgentGateFields({ c, cfg, setCfg }: { c: BlockConfig; cfg: Resol
             <code>&lt;verdict&gt;PASS&lt;/verdict&gt;</code> or <code>&lt;verdict&gt;FAIL&lt;/verdict&gt;</code>; it&apos;s asked once more when it
             doesn&apos;t, and no verdict counts as FAIL.
           </p>
+          <OnFailField own={c.onFail} value={cfg.onFail} set={(onFail) => setCfg({ onFail })} />
           <label className="flex items-center gap-2 text-sm">
             <Switch checked={cfg.skipDocsOnly} onCheckedChange={(v) => setCfg({ skipDocsOnly: v })} />
             Pass without running when only docs changed

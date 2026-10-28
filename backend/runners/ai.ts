@@ -21,6 +21,7 @@ import { canResumeSessions, resumingAgent, Steering, steerPrompt } from "./steer
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
 import { onlyDocsChanged, parseVerdict } from "../../shared/gates";
 import { startDevServer } from "./devServer";
+import { gateResult } from "./gate";
 import { shQuote } from "./script";
 
 /** Where installed packs are mounted (read-only) inside the run's sandbox. */
@@ -431,10 +432,10 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     const files = await changedFiles(ctx, sandbox);
     if (files && onlyDocsChanged(files)) {
       ctx.log("info", `Only docs changed (${files.join(", ")}) — skipped, counted as PASS`, node.id);
-      return {
-        exit: "pass",
-        outputs: { artifact: `Skipped: this branch only changes documentation (${files.join(", ")}), so there was nothing to test.`, steer: inputs.steer },
-      };
+      return gateResult(ctx, node, {
+        artifact: `Skipped: this branch only changes documentation (${files.join(", ")}), so there was nothing to test.`,
+        passSteer: inputs.steer,
+      });
     }
   }
 
@@ -695,10 +696,15 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     if (!verdict) ctx.log("warn", "Still no valid verdict — counted as FAIL", node.id);
     ctx.log("info", `Verdict: ${verdict ? verdict.toUpperCase() : "missing (FAIL)"}`, node.id);
     const artifact = parsed.artifact ?? tail(res.stdout.trim());
-    return {
-      exit: verdict ?? "fail",
-      outputs: { artifact: verdict ? artifact : `${artifact}\n\n(No valid verdict was given, so this counts as FAIL.)`, steer: parsed.steer ?? inputs.steer },
-    };
+    const steer = parsed.steer ?? inputs.steer;
+    // FAIL and no verdict both get the block's failure level.
+    return gateResult(ctx, node, {
+      level: verdict === "pass" ? undefined : cfg.onFail,
+      failures: verdict ? "verdict FAIL" : "no valid verdict",
+      artifact: verdict ? artifact : `${artifact}\n\n(No valid verdict was given, so this counts as FAIL.)`,
+      passSteer: steer,
+      failSteer: steer,
+    });
   }
 
   const outputs: NodeIO = {};
