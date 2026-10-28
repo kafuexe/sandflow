@@ -255,6 +255,21 @@ remote, its worktree (if any) has no uncommitted changes and isn't your main che
 the rest are listed with the reason they're kept. Branches you named are never touched and nothing is force-removed.
 A removed branch's runs can no longer be resumed. API: `GET /api/cleanup`, `POST /api/cleanup` with `{ "ids": [...] }`.
 
+### Notifications
+
+**Settings → Notifications** tells you when a run **finished**, **failed**, was **stopped**, or **needs attention** (an
+agent asked a question, or the run is held waiting for you) — pick the events, then any of:
+
+- **Desktop notification**, shown by the app window (click it to open the run).
+- **Run a command** on this computer, e.g. `say "$SANDFLOW_FLOW $SANDFLOW_STATUS"`. It gets `SANDFLOW_EVENT`,
+  `SANDFLOW_RUN_ID`, `SANDFLOW_FLOW`, `SANDFLOW_FLOW_ID`, `SANDFLOW_STATUS`, `SANDFLOW_COST_USD` and `SANDFLOW_ERROR`,
+  and is stopped after 30 s. It runs outside any sandbox, so it only ever comes from your settings — never a flow or pack.
+- **Webhook**: a `POST` of `{ event, runId, flowId, flowName, status, error?, costUsd?, startedAt, endedAt? }` (JSON).
+
+Only top-level runs notify (not Box Stack tasks), once per event. A run never waits on a notification: a command or
+webhook that fails is noted in the run's log. **Send test** sends a sample through the saved channels
+(`POST /api/notifications/test`).
+
 ## Triggers & logic
 
 Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar) — no

@@ -14,6 +14,7 @@ import type {
   IntegrationDef,
   IntegrationInfo,
   IntegrationStatus,
+  NotifyEvent,
   PackInfo,
   PackManifest,
   PackPreview,
@@ -86,6 +87,8 @@ export const api = {
   sendChat: (id: string, text: string) => request("POST", `/chats/${encodeURIComponent(id)}/messages`, { text }),
   cancelChat: (id: string) => request("POST", `/chats/${encodeURIComponent(id)}/cancel`, {}),
   saveSettings: (settings: Settings) => request("PUT", "/settings", settings),
+  /** A sample notification through the saved channels; what went wrong, if anything. */
+  testNotifications: () => request<{ problems: string[] }>("POST", "/notifications/test", {}),
   saveEnv: (env: EnvValues) => request("PUT", "/env", env),
   /** `prompt` overrides the global starting prompt for this run only. */
   startRun: (flowId: string, prompt?: string) => request<{ runId: string; warning?: string }>("POST", "/runs", { flowId, prompt }),
@@ -174,6 +177,19 @@ export function subscribeFlags(onFlag: (e: FlagEvent) => void, onDismissed: (e: 
     flag: (ev) => onFlag(JSON.parse(ev.data) as FlagEvent),
     "flag-dismissed": (ev) => onDismissed(JSON.parse(ev.data) as { runId: string; flagId: string }),
   });
+}
+
+/** Settings → Notifications: a desktop notification the server asks the window to show (see backend/notify.ts). */
+export interface RunNoticeEvent {
+  event: NotifyEvent;
+  runId: string;
+  flowName: string;
+  title: string;
+  body: string;
+}
+
+export function subscribeRunNotices(fn: (e: RunNoticeEvent) => void): () => void {
+  return onDataEvents({ "run-notice": (ev) => fn(JSON.parse(ev.data) as RunNoticeEvent) });
 }
 
 /**

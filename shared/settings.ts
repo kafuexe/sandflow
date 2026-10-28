@@ -1,7 +1,25 @@
 import pkg from "../package.json";
 import { AGENT_PROVIDERS } from "./agents";
 import { validateSupervisorSettings } from "./supervisor";
-import type { AssistantAgent, Settings } from "./types";
+import type { AssistantAgent, NotificationSettings, NotifyEvent, Settings } from "./types";
+
+export const NOTIFY_EVENTS: NotifyEvent[] = ["done", "failed", "stopped", "attention"];
+
+/** Settings → Notifications, normalised (empty fields dropped). */
+export function validateNotificationSettings(n: NotificationSettings): NotificationSettings {
+  const out: NotificationSettings = {};
+  const events = Array.isArray(n.events) ? NOTIFY_EVENTS.filter((e) => n.events!.includes(e)) : [];
+  if (events.length) out.events = events;
+  if (n.os) out.os = true;
+  const command = n.command?.trim();
+  if (command) out.command = command;
+  const url = n.webhookUrl?.trim();
+  if (url) {
+    if (!/^https?:\/\/\S+$/i.test(url)) throw new Error("Notification webhook must be an http(s) URL");
+    out.webhookUrl = url;
+  }
+  return out;
+}
 
 export const APP_VERSION: string = pkg.version;
 
@@ -54,6 +72,10 @@ export function validateSettings(s: Settings): Settings {
   if (s.supervisor) {
     const sup = validateSupervisorSettings(s.supervisor);
     if (Object.keys(sup).length) out.supervisor = sup;
+  }
+  if (s.notifications) {
+    const n = validateNotificationSettings(s.notifications);
+    if (Object.keys(n).length) out.notifications = n;
   }
   if (s.updates) {
     const mode = s.updates.mode;

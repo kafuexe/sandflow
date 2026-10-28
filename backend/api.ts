@@ -54,6 +54,7 @@ import {
   type Exec,
 } from "./sandbox";
 import { applyCleanup, planCleanup } from "./cleanup";
+import { createNotifier } from "./notify";
 import { createSkillStore, type SkillFile } from "./skills";
 import { applyPackEdits, dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
@@ -167,11 +168,21 @@ export function createApi(
     dataListeners.forEach((fn) => fn({ rev, ...c }));
   }
   /** Flag events go out on the same stream as data changes, so every view hears about them. */
-  const flagListeners = new Set<(event: "flag" | "flag-dismissed", data: object) => void>();
+  const flagListeners = new Set<(event: "flag" | "flag-dismissed" | "run-notice", data: object) => void>();
   function announceFlag(run: RunState, flag: RunFlag) {
     const runTitle = run.trigger?.title || run.prompt?.split("\n")[0]?.slice(0, 80) || run.flowName;
     flagListeners.forEach((fn) => fn("flag", { runId: run.id, runTitle, flowName: run.flowName, flag }));
   }
+  /** Settings → Notifications. The desktop one goes to the app window on the flags' stream (the window shows it). */
+  const notifier = createNotifier({
+    settings: () => storage.load().settings.notifications,
+    os: (n, title, body) => flagListeners.forEach((fn) => fn("run-notice", { ...n, title, body })),
+    log(run, msg) {
+      run.logs.push({ ts: Date.now(), level: "warn", msg });
+      storage.saveRun(run);
+      listeners.get(run.id)?.forEach((fn) => fn(run));
+    },
+  });
   function checkRev(url: URL) {
     const seen = url.searchParams.get("rev");
     if (seen !== null && Number(seen) !== rev) {
@@ -274,6 +285,7 @@ export function createApi(
     void handle.done.then((s) => {
       branchKeys.delete(s.id);
       storage.saveRun(s);
+      void notifier.onChange(s);
       lastSave.delete(s.id);
       // Paused or finished: nothing here drives it any more.
       unlock(s.id);
@@ -319,6 +331,7 @@ export function createApi(
       ...(opts.pauseGraceMs !== undefined ? { pauseGraceMs: opts.pauseGraceMs } : {}),
       onChange: (s) => {
         listeners.get(s.id)?.forEach((fn) => fn(s));
+        void notifier.onChange(s);
         if (s.finishedAt || Date.now() - (lastSave.get(s.id) ?? 0) > 2000) {
           lastSave.set(s.id, Date.now());
           storage.saveRun(s);
@@ -566,6 +579,7 @@ export function createApi(
       announceFlag(run, f);
     }
     storage.saveRun(run);
+    void notifier.onChange(run);
   }
 
   /**
@@ -646,6 +660,7 @@ export function createApi(
       run.queues = undefined;
       run.logs.push({ ts: Date.now(), level: "warn", msg: "Run stopped while paused — it won't be continued" });
       storage.saveRun(run);
+      void notifier.onChange(run);
       return run;
     } finally {
       if (!locked.has(id)) releaseRunLock(runsDir, id);
@@ -1000,6 +1015,10 @@ export function createApi(
         if (claudeCodeEnabled() !== wasOn) syncClaudeCodeIntegration();
         return send(res, 200, { ok: true });
       }
+
+      case "POST /notifications/test":
+        // Always the saved settings: the command only ever comes from them.
+        return send(res, 200, { problems: await notifier.test() });
 
       case "GET /claude-code":
         await claudeCodeSync;

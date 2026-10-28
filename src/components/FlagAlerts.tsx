@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { Flag, OctagonAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAgent } from "@/lib/agent";
-import type { FlagEvent } from "@/lib/api";
+import { subscribeRunNotices, type FlagEvent, type RunNoticeEvent } from "@/lib/api";
 import { desktop } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
 
@@ -16,6 +16,17 @@ function notifyOs(e: FlagEvent) {
   n.onclick = () => {
     window.focus();
     useAgent.getState().openRun(e.runId);
+  };
+}
+
+/** Settings → Notifications asked for it: shown even with the window in front (there's no popup for these). */
+async function notifyRun(e: RunNoticeEvent) {
+  if (typeof Notification === "undefined" || Notification.permission === "denied") return;
+  if (Notification.permission === "default" && (await Notification.requestPermission()) !== "granted") return;
+  const n = new Notification(e.title, { body: e.body, tag: `run-${e.runId}` });
+  n.onclick = () => {
+    window.focus();
+    if (e.runId !== "test") useAgent.getState().openRun(e.runId);
   };
 }
 
@@ -81,6 +92,7 @@ function Alert({ e }: { e: FlagEvent }) {
 export function FlagAlerts() {
   const alerts = useAgent((s) => s.alerts);
   const seen = useRef(new Set<string>());
+  useEffect(() => subscribeRunNotices((e) => void notifyRun(e)), []);
   useEffect(() => {
     for (const a of alerts) {
       if (seen.current.has(a.flag.id)) continue;
