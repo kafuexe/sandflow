@@ -8,9 +8,9 @@ import { Switch } from "@/components/ui/switch";
 import { api } from "@/lib/api";
 import { desktop } from "@/lib/desktop";
 import { useStore } from "@/lib/store";
-import { AGENT_TOOLS_MOUNT, DEFAULT_SANDBOX_IMAGE } from "../../shared/settings";
+import { AGENT_TOOLS_MOUNT, DEFAULT_SANDBOX_IMAGE, NOTIFY_EVENTS } from "../../shared/settings";
 import { SUPERVISOR_DEFAULTS, supervisorSettings } from "../../shared/supervisor";
-import type { Settings, SupervisorSettings, UpdateSettings } from "../../shared/types";
+import type { NotificationSettings, NotifyEvent, Settings, SupervisorSettings, UpdateSettings } from "../../shared/types";
 
 type Status = Awaited<ReturnType<typeof api.sandboxStatus>>;
 
@@ -346,6 +346,86 @@ export function SupervisorSettingsField({ settings }: { settings: Settings }) {
           {minutes("remindAfterSeconds", "Remind of a question after (min)", String(SUPERVISOR_DEFAULTS.remindAfterSeconds / 60))}
         </div>
       )}
+    </div>
+  );
+}
+
+const NOTIFY_LABELS: Record<NotifyEvent, string> = { done: "Finished", failed: "Failed", stopped: "Stopped", attention: "Needs attention" };
+
+/** Settings → Notifications: when a (top-level) run ends or waits for you — desktop, a command, a webhook. */
+export function NotificationSettingsField({ settings }: { settings: Settings }) {
+  const updateSettings = useStore((s) => s.updateSettings);
+  const n: NotificationSettings = settings.notifications ?? {};
+  const set = (patch: NotificationSettings) => updateSettings({ notifications: { ...n, ...patch } });
+  const events = n.events ?? [];
+  // Saved only once it's a whole URL (the server refuses anything else).
+  const [url, setUrl] = useState(n.webhookUrl ?? "");
+  const [testing, setTesting] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string }>();
+  const test = async () => {
+    setTesting(true);
+    setMsg(undefined);
+    try {
+      await useStore.getState().flushSaves();
+      const { problems } = await api.testNotifications();
+      setMsg(problems.length ? { ok: false, text: problems.join("\n") } : { ok: true, text: "Sent." });
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setTesting(false);
+    }
+  };
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <div className="text-sm">Notifications</div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        {NOTIFY_EVENTS.map((e) => (
+          <label key={e} className="flex items-center gap-1.5 text-xs">
+            <input
+              type="checkbox"
+              className="accent-primary"
+              checked={events.includes(e)}
+              onChange={(ev) => set({ events: ev.target.checked ? [...events, e] : events.filter((x) => x !== e) })}
+            />
+            {NOTIFY_LABELS[e]}
+          </label>
+        ))}
+      </div>
+      <label className="flex items-center justify-between text-xs">
+        <span>Desktop notification</span>
+        <Switch checked={!!n.os} onCheckedChange={(v) => set({ os: v || undefined })} />
+      </label>
+      <div className="space-y-1">
+        <Label className="text-xs">Run a command (on this computer)</Label>
+        <Input
+          className="font-mono text-xs"
+          value={n.command ?? ""}
+          placeholder='say "$SANDFLOW_FLOW $SANDFLOW_STATUS"'
+          onChange={(e) => set({ command: e.target.value || undefined })}
+        />
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Webhook URL (POSTed a JSON summary)</Label>
+        <Input
+          className="font-mono text-xs"
+          value={url}
+          placeholder="https://hooks.example.com/sandflow"
+          onChange={(e) => {
+            setUrl(e.target.value);
+            if (!e.target.value.trim() || /^https?:\/\/\S+$/i.test(e.target.value.trim())) set({ webhookUrl: e.target.value.trim() || undefined });
+          }}
+        />
+      </div>
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="secondary" className="h-7" disabled={testing} onClick={() => void test()}>
+          {testing && <Loader2 className="size-3.5 animate-spin" />} Send test
+        </Button>
+        {msg && <span className={`text-[11px] whitespace-pre-wrap ${msg.ok ? "text-emerald-400" : "text-red-400"}`}>{msg.text}</span>}
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        Only for top-level runs (not Box Stack tasks). The command gets SANDFLOW_EVENT, SANDFLOW_RUN_ID, SANDFLOW_FLOW, SANDFLOW_STATUS,
+        SANDFLOW_COST_USD and SANDFLOW_ERROR; a failing command or webhook is noted in the run's log.
+      </p>
     </div>
   );
 }

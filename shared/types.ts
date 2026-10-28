@@ -472,6 +472,22 @@ export interface Settings {
   claudeCode?: { enabled: boolean };
   /** Settings → Supervisor: the timed check of running runs (defaults: SUPERVISOR_DEFAULTS in shared/supervisor.ts). */
   supervisor?: SupervisorSettings;
+  /** Settings → Notifications: tell you when runs end or need you (see backend/notify.ts). */
+  notifications?: NotificationSettings;
+}
+
+/** A top-level run ended (done / failed / stopped) or is waiting for you (a question, or held). */
+export type NotifyEvent = "done" | "failed" | "stopped" | "attention";
+
+export interface NotificationSettings {
+  /** Which events notify (none: off). */
+  events?: NotifyEvent[];
+  /** A desktop notification (shown by the app window). */
+  os?: boolean;
+  /** Shell command run on this computer with SANDFLOW_* env vars — only ever from these settings, never a flow / pack. */
+  command?: string;
+  /** POSTed a JSON summary of the run. */
+  webhookUrl?: string;
 }
 
 export interface SupervisorSettings {
