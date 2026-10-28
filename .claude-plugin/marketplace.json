@@ -1,0 +1,17 @@
+{
+  "name": "sandflow",
+  "description": "Sandflow: a visual flow builder for sandboxed coding agents, driven from Claude Code.",
+  "owner": {
+    "name": "Ofek Tal",
+    "url": "https://github.com/kafuexe/sandflow"
+  },
+  "plugins": [
+    {
+      "name": "sand",
+      "displayName": "Sandflow",
+      "source": "./claude-plugin",
+      "description": "/sand:flow picks, starts and follows Sandflow runs; /sand:schedule runs them later and keeps paused runs going; /sand:edit designs flows.",
+      "version": "0.0.3"
+    }
+  ]
+}

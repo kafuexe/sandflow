@@ -27,6 +27,87 @@ and asks for your password).
 
 Builds are **not code-signed** yet: Windows SmartScreen shows "Unknown publisher" (More info → Run anyway).
 
+## Command line, Claude Code plugin and install
+
+Sandflow also runs without the desktop app: a `sandflow` command (backend + web UI) and a Claude Code plugin that
+picks, starts and follows flows for you. It needs **Node.js 22+** (plus Git and Docker / Podman for the flows, as
+below). One line installs both, no administrator rights:
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/kafuexe/sandflow/main/scripts/install.ps1 | iex
+```
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/kafuexe/sandflow/main/scripts/install.sh | bash
+```
+
+It downloads `sandflow-cli.tgz` from the latest release (checking its sha256; it builds from source when a release
+has none) and sets up:
+
+| Where | What |
+|---|---|
+| `~/.sandflow/cli/` | The CLI package (replaced atomically on reinstall / update) |
+| `~/.sandflow/bin/` | The `sandflow` launcher (`sandflow.cmd` / `sandflow.ps1` on Windows), added to your user PATH |
+| `~/.sandflow/data/` | Flows, blocks, settings, inputs and runs of the CLI's backend |
+| `~/.sandflow/history.jsonl` | Every run from every Sandflow instance (CLI and desktop app), for `sandflow -r` |
+| `~/.sandflow/schedules/` | Scheduled runs and their logs |
+| Claude Code | The `sand` plugin from this repo's marketplace (`sandflow`), and the `sandflow` MCP server at user scope (`sandflow mcp`; it replaces the desktop app's own `sandflow` entry, never one you added yourself) |
+
+Options: `-NoPlugin` / `--no-plugin`, `-NoMcp` / `--no-mcp`, `-Checker` / `--checker` (also install the hourly
+checker). With `irm | iex` set them as environment variables instead (`$env:SANDFLOW_CHECKER=1`), or run
+`& ([scriptblock]::Create((irm <url>))) -Checker`; with curl: `curl -fsSL <url> | bash -s -- --checker`. Other
+overrides: `SANDFLOW_VERSION` (a release tag), `SANDFLOW_CLI_URL` (a tarball URL or path), `SANDFLOW_HOME`. Without
+Claude Code installed, the installer prints the commands to add the plugin later:
+
+```bash
+claude plugin marketplace add kafuexe/sandflow
+claude plugin install sand@sandflow      # or, in Claude Code: /plugin install sand --marketplace kafuexe/sandflow
+```
+
+**In Claude Code** (restart it after installing):
+
+- `/sand:flow <task>` — picks the flow that fits the task, says why, fills its inputs (repo, branch), starts it and
+  follows it: steps, questions (it asks you and passes the answer on), recoveries and the result. Several
+  independent tasks or repos get one run each (up to 3 at once). Also `/sand:flow continue the last run`, `status`,
+  `stop`.
+- `/sand:schedule <task> at 21:00` — registers a run for later with the OS scheduler (no session kept open), lists,
+  moves and cancels them, and sets up the **hourly checker**: `sandflow checker install` runs
+  `sandflow resume --paused` every hour, so runs paused by a crash, reboot or update continue unattended.
+- `/sand:edit` — designs or changes flows (adds and wires blocks) through the MCP server.
+
+**On the command line:** `sandflow --ui` opens the UI in the browser (starting the backend daemon if needed);
+`sandflow -r` lists recent runs (arrow keys + Enter) and continues the one you pick.
+
+<!-- CLI reference: the sandflow CLI owns this list; refine it with the CLI. -->
+| Command | |
+|---|---|
+| `sandflow --ui [--port N]` | Open the UI (starts the daemon) |
+| `sandflow serve [--port N] [--daemon]` / `sandflow shutdown` | Run / stop the backend |
+| `sandflow flows [--json]` | List flows and their required inputs |
+| `sandflow run <flow> [prompt] [--env K=V] [--repo PATH] [--detach] [--json]` | Start a run (and follow it) |
+| `sandflow runs [--all] [--json]` / `sandflow status <runId> [--json]` | Recent runs / one run |
+| `sandflow -r [runId]`, `sandflow resume [runId]`, `sandflow resume --paused` | Continue a run (picker without an id) / every paused run |
+| `sandflow answer <runId> <text>`, `sandflow stop <runId>`, `sandflow logs <runId> [--follow]` | Act on a run |
+| `sandflow schedule add --at <time> -- run <flow> [prompt]`, `schedule list / edit / cancel` | Scheduled runs |
+| `sandflow checker install / uninstall / status` | The hourly checker |
+| `sandflow mcp` | stdio MCP server for Claude Code |
+
+Exit codes: 0 done, 1 failed, 2 usage error, 3 waiting on a question, 75 paused (can continue later).
+<!-- /CLI reference -->
+
+**Uninstall** (removes the CLI, launcher, PATH entry, checker, pending schedules, the plugin and the MCP entry it
+added; keeps `~/.sandflow/data` and the history unless you purge):
+
+```powershell
+irm https://raw.githubusercontent.com/kafuexe/sandflow/main/scripts/uninstall.ps1 | iex      # $env:SANDFLOW_PURGE=1 to delete ~/.sandflow too
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kafuexe/sandflow/main/scripts/uninstall.sh | bash   # bash -s -- --purge to delete ~/.sandflow too
+```
+
 ## Prerequisites
 
 - Node 22+
