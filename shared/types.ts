@@ -37,7 +37,35 @@ export interface StackConfig {
   combineInstructions: string;
 }
 
-export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment" | "merge-parent";
+export type AutoAction = "create-task" | "create-mr" | "shell" | "post-comment" | "merge-parent" | "checks";
+
+/** One command of a Checks block (lint, tests, build…), run in the run's worktree. */
+export interface CheckCommand {
+  name: string;
+  /** Shell command (`sh -c` in the sandbox; the system shell with Sandbox: None). */
+  run: string;
+  /** A required check that fails makes the block leave through `fail`; an advisory one is only reported (default true). */
+  required?: boolean;
+  /** Default 600. */
+  timeoutSeconds?: number;
+}
+
+/** Checks blocks: the commands, and whether unchanged code reuses the last results. */
+export interface ChecksConfig {
+  commands?: CheckCommand[];
+  /** Skip re-running when the commands and the worktree (commit + uncommitted changes) are what they were at the last passing execution (default true). */
+  reuse?: boolean;
+}
+
+/** An agent block's dev server: started before the agent, stopped after it (an AI tester checking the running app). */
+export interface DevServerConfig {
+  /** Shell command run in the worktree, e.g. `npm run dev`. Empty = no dev server. */
+  command?: string;
+  /** Polled until it answers (any HTTP status below 500), e.g. `http://127.0.0.1:5173/`. Empty = only wait a moment. */
+  readyUrl?: string;
+  /** Longest wait for `readyUrl` (default 60). */
+  startupTimeoutSeconds?: number;
+}
 
 /** Where a condition's result leaves the block. */
 export type BranchHandle = "true" | "false";
@@ -267,6 +295,17 @@ export interface BlockConfig {
   stack?: Partial<StackConfig>;
   /** integration blocks. */
   integration?: IntegrationBlockConfig;
+  /** auto + checks: the commands to run. */
+  checks?: ChecksConfig;
+  /**
+   * ai blocks: a gate. The agent must end with `<verdict>PASS</verdict>` or `<verdict>FAIL</verdict>` and the block
+   * leaves through its `pass` / `fail` exit; a missing or malformed verdict counts as FAIL.
+   */
+  verdict?: boolean;
+  /** ai blocks: a dev server running while the agent works. */
+  devServer?: DevServerConfig;
+  /** ai blocks with a verdict: when the branch only changed docs (Markdown, docs/, README, CHANGELOG, LICENSE), skip the agent and pass. */
+  skipDocsOnly?: boolean;
   /**
    * Longest a node may run (every kind; inherited like the rest). Unset = no limit, except Shell command (30 min);
    * 0 = no limit (turns that default off). The supervisor stops a node that exceeds it (failure cause `timeout`).
@@ -314,6 +353,10 @@ export interface ResolvedConfig {
   flowOutput: { name: string };
   stack: StackConfig;
   integration: { ref: string; action: string; exits: string[]; options: Record<string, IntegrationValue> };
+  checks: { commands: CheckCommand[]; reuse: boolean };
+  verdict: boolean;
+  devServer: { command: string; readyUrl: string; startupTimeoutSeconds: number };
+  skipDocsOnly: boolean;
   timeoutSeconds?: number;
 }
 
@@ -362,6 +405,8 @@ export interface Flow {
   overseer?: OverseerSettings;
   /** What happens when one of its steps fails (see shared/recovery.ts). Absent = the defaults. */
   recovery?: FlowRecovery;
+  /** Most a run of this flow may spend on priced agent steps (USD, Box Stack tasks included). Unset = no limit. */
+  budgetUsd?: number;
 }
 
 /** Per flow: the overseer agent (a short, read-only turn on this machine — Claude Code, `claude -p`, no tools). */
@@ -739,7 +784,21 @@ export interface AgentSessionRef {
 export interface NodeUsage {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** Model the agent was set to (empty: the CLI's default). */
+  model?: string;
+  /** Absent: the model has no known price (see shared/pricing.ts). */
   costUsd?: number;
+  at: number;
+}
+
+/** A Checks block's last results, journaled so an unchanged worktree reuses them. */
+export interface ChecksEvidence {
+  /** sha256 of the commands and the worktree (HEAD + uncommitted changes) they ran on. */
+  fingerprint: string;
+  passed: boolean;
+  results: { name: string; required: boolean; ok: boolean; code: number | null; seconds: number; output: string }[];
   at: number;
 }
 
@@ -841,6 +900,8 @@ export interface NodeRunState {
   lastActivityAt?: number;
   /** Executions in a row that produced exactly the previous execution's output (a loop going nowhere). */
   repeats?: number;
+  /** Checks blocks: the last results. */
+  checks?: ChecksEvidence;
 }
 
 /** Where a run's agents worked — recorded so the run can be resumed on the same branch. */
@@ -1008,6 +1069,8 @@ export interface RunState {
   /** What the supervisor noticed / did, oldest first (capped; `supervisionDropped` counts what was cut off the front). */
   supervision?: SupervisionEntry[];
   supervisionDropped?: number;
+  /** Priced spend so far (USD): its own steps and its Box Stack tasks'. */
+  costUsd?: number;
 }
 
 // ---------- "Edit with AI" chats ----------
@@ -1073,6 +1136,27 @@ export interface DataChange {
   touched?: string[];
 }
 
+/** A branch a finished run left behind (Settings → Clean up, see backend/cleanup.ts). */
+export interface CleanupItem {
+  /** `<repo>\0<branch>` — what the UI sends back to remove. */
+  id: string;
+  repo: string;
+  branch: string;
+  /** Runs that used the branch, newest first. */
+  runIds: string[];
+  /** A worktree still checked out on it (removed with it). */
+  worktree?: string;
+  removable: boolean;
+  /** Why it's kept, or what removing it does. */
+  reason: string;
+}
+
+export interface CleanupResult {
+  id: string;
+  ok: boolean;
+  message: string;
+}
+
 /** Row of the runs list. */
 export interface RunSummary {
   id: string;
@@ -1093,4 +1177,5 @@ export interface RunSummary {
   pauseReason?: PauseReason;
   hold?: RunHold;
   startedBy?: RunStartedBy;
+  costUsd?: number;
 }

@@ -53,6 +53,7 @@ import {
   setBundledSandboxImage,
   type Exec,
 } from "./sandbox";
+import { applyCleanup, planCleanup } from "./cleanup";
 import { createSkillStore, type SkillFile } from "./skills";
 import { applyPackEdits, dismissFlag, limitRuns, settleInterrupted, summarize, type Storage } from "./storage";
 import { createTriggerService, type FireOutcome } from "./triggers";
@@ -742,6 +743,23 @@ export function createApi(
     return limitRuns([...live, ...saved].sort((a, b) => b.startedAt - a.startedAt), 50);
   }
 
+  /** Every saved run (live ones as they are now), and the branches live runs work on. */
+  function cleanupInputs(): { runs: RunState[]; busy: Set<string> } {
+    const byId = new Map<string, RunState>();
+    for (const id of storage.runIds()) {
+      const r = storage.loadRun(id);
+      if (r) byId.set(id, settleInterrupted(r));
+    }
+    const busy = new Set<string>();
+    for (const h of runs.values()) {
+      byId.set(h.state.id, h.state);
+      const repo = h.state.workspace?.repo;
+      const branch = h.state.stack?.branch ?? h.state.workspace?.branch ?? h.state.branch;
+      if (!h.state.finishedAt && repo && branch) busy.add(`${repo}\0${branch}`);
+    }
+    return { runs: [...byId.values()], busy };
+  }
+
   function getRun(id: string): RunState {
     const live = runs.get(id)?.state;
     if (live) return live;
@@ -808,6 +826,18 @@ export function createApi(
     switch (route) {
       case "GET /data":
         return send(res, 200, { ...storage.load(), rev });
+
+      // Branches and worktrees finished runs left behind (see backend/cleanup.ts).
+      case "GET /cleanup": {
+        const c = cleanupInputs();
+        return send(res, 200, { items: await planCleanup(c.runs, c.busy) });
+      }
+      case "POST /cleanup": {
+        const { ids } = (await readJson<{ ids?: unknown }>(req)) ?? {};
+        if (!Array.isArray(ids) || !ids.every((i) => typeof i === "string")) throw new HttpError(400, "Send { ids: string[] }");
+        const c = cleanupInputs();
+        return send(res, 200, { results: await applyCleanup(ids as string[], c.runs, c.busy) });
+      }
 
       case "GET /data/events": {
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });

@@ -19,6 +19,9 @@ import { SKILL_FILE_PATH_RE, type SkillFile } from "../skills";
 import { agentStreamHandler, type StreamEvent } from "./activity";
 import { canResumeSessions, resumingAgent, Steering, steerPrompt } from "./steer";
 import { codeOwner, filesPack, trustedOnHost } from "./trust";
+import { onlyDocsChanged, parseVerdict } from "../../shared/gates";
+import { startDevServer } from "./devServer";
+import { shQuote } from "./script";
 
 /** Where installed packs are mounted (read-only) inside the run's sandbox. */
 export const SANDBOX_PACKS_DIR = "/opt/sandflow/packs";
@@ -349,16 +352,26 @@ function routesFor(ctx: RunContext, node: FlowNode): RouteOption[] {
   });
 }
 
-function logUsage(ctx: RunContext, nodeId: string, res: RunResultLike) {
+function logUsage(ctx: RunContext, nodeId: string, res: RunResultLike, cfg: ResolvedConfig) {
   const usage = res.iterations.reduce(
-    (a, i) => ({ in: a.in + (i.usage?.inputTokens ?? 0), out: a.out + (i.usage?.outputTokens ?? 0) }),
-    { in: 0, out: 0 },
+    (a, i) => ({
+      in: a.in + (i.usage?.inputTokens ?? 0),
+      out: a.out + (i.usage?.outputTokens ?? 0),
+      cacheRead: a.cacheRead + (i.usage?.cacheReadInputTokens ?? 0),
+      cacheWrite: a.cacheWrite + (i.usage?.cacheCreationInputTokens ?? 0),
+    }),
+    { in: 0, out: 0, cacheRead: 0, cacheWrite: 0 },
   );
-  // Journaled per result when the agent reports usage (sandcastle doesn't report cost).
-  if (res.iterations.some((i) => i.usage)) ctx.noteUsage?.(nodeId, { inputTokens: usage.in, outputTokens: usage.out });
+  // Journaled per result when the agent reports usage. sandcastle doesn't report cost: the engine prices it by model
+  // (Claude Code only — other providers' model names aren't in the price table).
+  const model = cfg.agent.provider === "claudeCode" ? cfg.agent.model.trim() : undefined;
+  if (res.iterations.some((i) => i.usage)) {
+    ctx.noteUsage?.(nodeId, { inputTokens: usage.in, outputTokens: usage.out, cacheReadTokens: usage.cacheRead, cacheWriteTokens: usage.cacheWrite, model });
+  }
   ctx.log(
     "info",
-    `Agent finished: ${res.iterations.length} iteration(s), ${res.commits.length} commit(s), tokens in ${usage.in} / out ${usage.out}`,
+    `Agent finished: ${res.iterations.length} iteration(s), ${res.commits.length} commit(s), tokens in ${usage.in} / out ${usage.out}` +
+      (usage.cacheRead || usage.cacheWrite ? ` / cache read ${usage.cacheRead} / cache write ${usage.cacheWrite}` : ""),
     nodeId,
   );
   // When streaming to a log dir the agent text is already in the run log.
@@ -366,15 +379,26 @@ function logUsage(ctx: RunContext, nodeId: string, res: RunResultLike) {
 }
 
 export async function runAi(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO): Promise<NodeResult> {
-  const release: (() => void)[] = [];
+  const release: (() => unknown)[] = [];
   try {
     return await runAgentNode(ctx, node, cfg, inputs, release);
   } finally {
-    for (const fn of release) fn();
+    for (const fn of release) await Promise.resolve().then(fn).catch(() => {});
   }
 }
 
-async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO, release: (() => void)[]): Promise<NodeResult> {
+/** Files the run's branch changed against its base (committed and not), or undefined when that can't be told. */
+async function changedFiles(ctx: RunContext, sandbox: SandboxLike): Promise<string[] | undefined> {
+  const base = ctx.baseBranch || ctx.env.BASE_BRANCH?.trim();
+  if (!base) return undefined;
+  const r = await sandbox.exec(
+    `{ git diff --name-only ${shQuote(`origin/${base}`)}...HEAD 2>/dev/null || git diff --name-only ${shQuote(base)}...HEAD; } && git status --porcelain --untracked-files=all | cut -c4-`,
+  );
+  if (r.exitCode !== 0) return undefined;
+  return [...new Set((r.stdout ?? "").split(/\r?\n/).map((l) => l.trim().replace(/^.* -> /, "")).filter(Boolean))];
+}
+
+async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig, inputs: NodeIO, release: (() => unknown)[]): Promise<NodeResult> {
   // Steering messages are accepted from the start; ones sent while the sandbox is prepared go into the first prompt.
   const steering = new Steering({
     steerable: ctx.steerable ? (onSteer) => ctx.steerable!(node.id, onSteer) : undefined,
@@ -401,6 +425,18 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
   // Talking to a custom endpoint or gateway needs its credentials, even with the local CLI's own login.
   const env = explicitHost ? hostAgentEnv(blockEnv, !!endpoint) : blockEnv;
   const label = nodeLabel(node, ctx.blocks);
+
+  // A tester has nothing to run when only docs changed (MEOW's risk selection): pass without starting the agent.
+  if (cfg.verdict && cfg.skipDocsOnly) {
+    const files = await changedFiles(ctx, sandbox);
+    if (files && onlyDocsChanged(files)) {
+      ctx.log("info", `Only docs changed (${files.join(", ")}) — skipped, counted as PASS`, node.id);
+      return {
+        exit: "pass",
+        outputs: { artifact: `Skipped: this branch only changes documentation (${files.join(", ")}), so there was nothing to test.`, steer: inputs.steer },
+      };
+    }
+  }
 
   for (const skill of cfg.skills) {
     // Container and host have separate homes, so a skill is installed once per place.
@@ -559,7 +595,7 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
         resuming = false;
         continue;
       }
-      logUsage(ctx, node.id, done);
+      logUsage(ctx, node.id, done, cfg);
       return done;
     }
   };
@@ -611,6 +647,13 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     return res;
   };
 
+  if (onHost && cfg.devServer.command.trim()) {
+    const owner = codeOwner(ctx, node, (c) => c.devServer?.command);
+    if (!trustedOnHost(ctx, owner)) throw new Error(`This dev server command comes from pack "${owner}", which isn't allowed to run code on this machine (Packs → ${owner})`);
+  }
+  const server = await startDevServer(ctx, node.id, cfg, sandbox, onHost, env);
+  if (server) release.push(() => server.stop());
+
   // Messages sent while the sandbox was being prepared are part of the first prompt.
   steering.take("next-turn");
   let res = await settle(await turn(firstCall(ctx.takeInterrupted?.(node.id)), cfg.maxIterations));
@@ -636,6 +679,25 @@ async function runAgentNode(ctx: RunContext, node: FlowNode, cfg: ResolvedConfig
     return {
       route: parsed.route,
       outputs: { artifact: inputs.artifact, steer: parsed.steer ?? inputs.steer },
+    };
+  }
+
+  if (cfg.verdict) {
+    // A gate: PASS or FAIL decides the exit. Asked once more when it's missing; still missing = FAIL (MEOW).
+    let verdict = parseVerdict(res.stdout);
+    if (!verdict) {
+      ctx.log("warn", "No verdict in the agent's answer — asking it for one", node.id);
+      res = await settle(await turn(followUp(res, "You didn't give a verdict. Reply with your artifact again, ending with exactly <verdict>PASS</verdict> or <verdict>FAIL</verdict>.")));
+      const retry = parseOutput(res.stdout);
+      parsed = { ...parsed, artifact: retry.artifact ?? parsed.artifact, steer: retry.steer ?? parsed.steer };
+      verdict = parseVerdict(res.stdout);
+    }
+    if (!verdict) ctx.log("warn", "Still no valid verdict — counted as FAIL", node.id);
+    ctx.log("info", `Verdict: ${verdict ? verdict.toUpperCase() : "missing (FAIL)"}`, node.id);
+    const artifact = parsed.artifact ?? tail(res.stdout.trim());
+    return {
+      exit: verdict ?? "fail",
+      outputs: { artifact: verdict ? artifact : `${artifact}\n\n(No valid verdict was given, so this counts as FAIL.)`, steer: parsed.steer ?? inputs.steer },
     };
   }
 

@@ -1,0 +1,28 @@
+{
+  "id": "checks",
+  "name": "Checks",
+  "isTemplate": false,
+  "extends": "tpl-auto-git",
+  "config": {
+    "description": "Runs your lint / test / build commands in the run's worktree; pass or fail (the failures become the steer for a fix step).",
+    "icon": "list-checks",
+    "autoAction": "checks",
+    "inputs": {
+      "artifact": true,
+      "steer": true
+    },
+    "outputs": {
+      "artifact": true,
+      "steer": true
+    },
+    "checks": {
+      "commands": [
+        {
+          "name": "tests",
+          "run": "npm test",
+          "required": true
+        }
+      ]
+    }
+  }
+}

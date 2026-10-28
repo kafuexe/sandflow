@@ -46,6 +46,10 @@ export const DEFAULT_CONFIG: ResolvedConfig = {
     combineInstructions: DEFAULT_COMBINE,
   },
   integration: { ref: "", action: "", exits: [], options: {} },
+  checks: { commands: [], reuse: true },
+  verdict: false,
+  devServer: { command: "", readyUrl: "", startupTimeoutSeconds: 60 },
+  skipDocsOnly: false,
 };
 
 const uniq = (xs: string[]) => Array.from(new Set(xs.filter(Boolean)));
@@ -98,6 +102,11 @@ export function applyConfig(base: ResolvedConfig, patch: BlockConfig | undefined
           options: { ...base.integration.options, ...(stripUndef(patch.integration.options) as Record<string, IntegrationValue>) },
         }
       : base.integration,
+    // A command list is replaced as a whole.
+    checks: { ...base.checks, ...stripUndef(patch.checks) },
+    verdict: def(patch.verdict, base.verdict),
+    devServer: { ...base.devServer, ...stripUndef(patch.devServer) },
+    skipDocsOnly: def(patch.skipDocsOnly, base.skipDocsOnly),
     timeoutSeconds: def(patch.timeoutSeconds, base.timeoutSeconds),
   };
 }

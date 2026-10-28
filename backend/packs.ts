@@ -825,15 +825,20 @@ export function createPackStore(dataDir: string, opts: PackStoreOptions = {}) {
       changed();
     },
 
-    /** First start (and every start while it's still the shipped copy): make sure the base pack is there. */
+    /**
+     * First start (and every start while it's still the shipped copy): make sure the base pack is there, and that a
+     * shipped copy from an older app version is replaced by this version's (so an app update brings its new blocks).
+     */
     ensureBundledBase() {
-      if (readLock().some((e) => e.id === BASE_PACK)) return;
+      const installed = readLock().find((e) => e.id === BASE_PACK);
+      if (installed && installed.source.type !== "bundled") return;
       const dir = path.join(bundledDir, BASE_PACK);
       if (!fs.existsSync(path.join(dir, "manifest.json"))) return;
       const files = readFolder(dir);
+      const manifest = readPack(mapReader(files)).manifest;
+      if (installed && !(semver.valid(manifest.version) && semver.valid(installed.version) && semver.gt(manifest.version, installed.version))) return;
       const target = path.join(stagingDir, `bundled-${randomUUID()}`);
       writeFiles(target, files);
-      const manifest = readPack(mapReader(files)).manifest;
       installEntry({ id: BASE_PACK, version: manifest.version, source: { type: "bundled" }, hash: hashFiles(files), installedAt: Date.now(), trustHost: true }, target);
     },
 

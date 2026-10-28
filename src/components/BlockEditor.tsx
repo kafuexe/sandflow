@@ -18,6 +18,7 @@ import { agentOrigin, applyConfig, ENV_NAME_RE, envOptionalFor, PROJECT_ENV, res
 import type { AgentProvider, AutoAction, BlockConfig, BlockDef, BlockKind, Effort, SkillRef } from "../../shared/types";
 import { validateBlocks } from "../../shared/validate";
 import { ConditionEditor } from "./ConditionEditor";
+import { AgentGateFields, ChecksEditor } from "./GateEditors";
 import { HostWarning, RunOnSelect } from "./RunOnSelect";
 import { nodeTimeoutSeconds } from "../../shared/supervisor";
 import { SkillsEditor } from "./SkillsEditor";
@@ -494,9 +495,11 @@ export function BlockEditor() {
                     <SelectItem value="shell">shell — run a command</SelectItem>
                     <SelectItem value="post-comment">post-comment — reply on the triggering issue / MR</SelectItem>
                     <SelectItem value="merge-parent">merge-parent — merge a Box Stack task into its parent branch</SelectItem>
+                    <SelectItem value="checks">checks — run lint / tests / build, pass or fail</SelectItem>
                   </SelectContent>
                 </Select>
               </Field>
+              {cfg.autoAction === "checks" && <ChecksEditor own={c.checks} cfg={cfg.checks} onChange={(checks) => setCfg({ checks })} />}
               {cfg.autoAction === "shell" && (
                 <Field label="Shell command (runs on the host in REPO_PATH; $SANDFLOW_ARTIFACT / $SANDFLOW_STEER available)" overridden={c.shellCommand !== undefined} onReset={() => setCfg({ shellCommand: undefined })} inheritable>
                   <Textarea
@@ -618,6 +621,7 @@ export function BlockEditor() {
                   onChange={(e) => setCfg({ extraInstructions: e.target.value || undefined })}
                 />
               </Field>
+              {cfg.kind === "ai" && <AgentGateFields c={c} cfg={cfg} setCfg={setCfg} />}
             </div>
           )}
 

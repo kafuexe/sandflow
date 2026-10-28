@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { nodeLabel } from "../../shared/resolve";
 import type { SandboxKind } from "../../shared/types";
+import { CleanupSettingsField } from "./CleanupSettings";
 import { AnswerBox } from "./RunPanel";
 import { ClaudeCodeSettingsField, SandboxImageSettings, SupervisorSettingsField, UpdateSettingsField, WebhookSettingsField } from "./SandboxSettings";
 
@@ -60,6 +61,7 @@ export function SettingsDialog() {
           <WebhookSettingsField settings={settings} />
           <ClaudeCodeSettingsField settings={settings} />
           <UpdateSettingsField settings={settings} />
+          <CleanupSettingsField />
         </div>
       </DialogContent>
     </Dialog>

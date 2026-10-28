@@ -3,6 +3,8 @@ import path from "node:path";
 import { appendActivity, capRunActivity, type ActivityDraft, type AgentActivity } from "../shared/activity";
 import { describeCondition, evaluateCondition } from "../shared/conditions";
 import { eventMarkdown } from "../shared/events";
+import { GATE_EXITS, isGate } from "../shared/gates";
+import { formatUsd, usageCost } from "../shared/pricing";
 import { nodeLabel, resolveNode } from "../shared/resolve";
 import { DEFAULT_EXIT, MAX_SUBFLOW_DEPTH, exitHandle, isExitHandle } from "../shared/subflow";
 import type {
@@ -149,6 +151,8 @@ export interface RunContext {
   /** An agent's session id appeared (journaled right away so a crash can continue it). */
   noteSession?(nodeId: string, session: AgentSessionRef): void;
   noteUsage?(nodeId: string, usage: Omit<NodeUsage, "at">): void;
+  /** Priced spend (USD) of this run or one of its stack tasks: added to the run's total and checked against its flow's budget. */
+  spend?(usd: number): void;
   /** A sandbox container / an agent process on this computer started (removed if a crash leaves it behind). */
   noteContainer?(kind: "docker" | "podman", containerId: string): void;
   noteProcess?(pid: number, startedAt: number, running: boolean): void;
@@ -275,6 +279,8 @@ export const MAX_SUPERVISION = 500;
 /** Agent activity is pushed to the UI at most this often per run. */
 export const ACTIVITY_FLUSH_MS = 300;
 const CLEANUP_TIMEOUT_MS = 20_000;
+/** A run that has spent this share of its flow's budget gets a warning flag. */
+export const BUDGET_WARN_AT = 0.8;
 
 /** A step in a graph's queue; `again` = its attempt was interrupted, it runs again (same execution). */
 type QueueItem = QueuedStep & { again?: boolean };
@@ -507,6 +513,12 @@ export function startRun(opts: StartRunOptions): RunHandle {
     opts.onFlag?.(run, f);
     return f;
   };
+  /** The budget's warning / stop happen once per run (a continued run that was already over it keeps that). */
+  const budgetState = {
+    warned: !!flow.budgetUsd && (run.costUsd ?? 0) >= flow.budgetUsd * BUDGET_WARN_AT,
+    stopped: !!flow.budgetUsd && (run.costUsd ?? 0) >= flow.budgetUsd,
+  };
+  let stopForBudget: (() => void) | undefined;
 
   const ctx: RunContext = {
     run,
@@ -606,8 +618,28 @@ export function startRun(opts: StartRunOptions): RunHandle {
     noteUsage(nodeId, usage) {
       const ns = run.nodes[nodeId];
       if (!ns) return;
-      (ns.usage ??= []).push({ ...usage, at: Date.now() });
+      const costUsd = usage.costUsd ?? usageCost(usage, usage.model);
+      (ns.usage ??= []).push({ ...usage, ...(costUsd !== undefined ? { costUsd } : {}), at: Date.now() });
+      if (costUsd) ctx.spend?.(costUsd);
       journal();
+    },
+    spend(usd) {
+      run.costUsd = Math.round(((run.costUsd ?? 0) + usd) * 1e6) / 1e6;
+      // A stack task's spend counts against its parent run's budget too.
+      (opts.parentContext ?? opts.share)?.spend?.(usd);
+      const budget = flow.budgetUsd;
+      if (!budget || budget <= 0 || opts.parent) return;
+      const spent = run.costUsd;
+      if (spent >= budget && !budgetState.stopped) {
+        budgetState.stopped = true;
+        ctx.flag("error", `Stopped: this run spent ${formatUsd(spent)}, over the flow's ${formatUsd(budget)} budget`, {
+          details: "Raise the budget in the Inputs tab (Budget), then use Retry from failed step to go on from where it stopped.",
+        });
+        stopForBudget?.();
+      } else if (spent >= budget * BUDGET_WARN_AT && !budgetState.warned) {
+        budgetState.warned = true;
+        ctx.flag("warning", `This run has spent ${formatUsd(spent)} of the flow's ${formatUsd(budget)} budget`);
+      }
     },
     noteContainer(kind, containerId) {
       const list = (run.sandboxes ??= []);
@@ -1041,7 +1073,8 @@ export function startRun(opts: StartRunOptions): RunHandle {
 
           // Named exits (Script / integration / subflow): the result leaves through one exit and keeps both artifact and steer.
           const exits =
-            cfg.kind === "script" ? cfg.script.exits.filter(Boolean)
+            isGate(cfg) ? [...GATE_EXITS]
+            : cfg.kind === "script" ? cfg.script.exits.filter(Boolean)
             : cfg.kind === "integration" ? cfg.integration.exits.filter(Boolean)
             : cfg.kind === "subflow" ? null
             : [];
@@ -1204,7 +1237,7 @@ export function startRun(opts: StartRunOptions): RunHandle {
     return run;
   })();
 
-  return {
+  const handle: RunHandle = {
     state: run,
     done,
     answer(a) {
@@ -1300,4 +1333,6 @@ export function startRun(opts: StartRunOptions): RunHandle {
       return done;
     },
   };
+  stopForBudget = () => handle.cancel();
+  return handle;
 }

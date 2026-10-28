@@ -211,6 +211,22 @@ describe("pack store", () => {
     await expect(offline.refreshBaseOnline()).rejects.toThrow(/offline/);
     expect(offline.load().infos[0].version).toBe("1.0.0");
   });
+
+  it("an app update's newer shipped base pack replaces the older shipped one, never one from GitHub", async () => {
+    const bundled = tmp();
+    const data = tmp();
+    writePack(path.join(bundled, "base"), { id: "base", version: "1.0.0" }, { "boxes/a.json": box("a") });
+    createPackStore(data, { bundledDir: bundled }).ensureBundledBase();
+    writePack(path.join(bundled, "base"), { id: "base", version: "1.1.0" }, { "boxes/a.json": box("a"), "boxes/b.json": box("b") });
+    const s = createPackStore(data, { bundledDir: bundled });
+    s.ensureBundledBase();
+    expect(s.load().infos[0]).toMatchObject({ version: "1.1.0", source: { type: "bundled" } });
+    expect(s.load().blocks.map((b) => b.id).sort()).toEqual(["base/a", "base/b"]);
+    // Not downgraded by an older shipped copy.
+    writePack(path.join(bundled, "base"), { id: "base", version: "1.0.5" }, { "boxes/a.json": box("a") });
+    s.ensureBundledBase();
+    expect(s.load().infos[0].version).toBe("1.1.0");
+  });
 });
 
 describe("export", () => {

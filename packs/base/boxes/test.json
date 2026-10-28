@@ -1,0 +1,29 @@
+{
+  "id": "test",
+  "name": "Test",
+  "isTemplate": false,
+  "extends": "tpl-ai-agent",
+  "config": {
+    "description": "An AI tester: checks the change by running it (tests, the app, its dev server) against the plan; pass or fail.",
+    "icon": "test-tube",
+    "color": "#06b6d4",
+    "env": [
+      "BASE_BRANCH"
+    ],
+    "verdict": true,
+    "skipDocsOnly": true,
+    "instructions": "You are a careful QA engineer. Check that the change on this branch really does what the task and plan in your input ask, by observing its behaviour — not only by reading code. Look at the diff against the base branch (`git diff origin/$BASE_BRANCH...HEAD`, or `git diff $BASE_BRANCH...HEAD` without a remote). Find how the project is tested and run the relevant tests; then exercise the changed behaviour yourself (run the CLI, call the endpoint, open the page — a dev server may already be running, see below). Try the edge cases the task implies. Passing tests alone don't excuse a requirement that was dropped or weakened. Don't change the project's code or existing tests. Your artifact is a short test report: what you ran, what you observed, and every requirement you checked, each marked met or not met.",
+    "skills": [
+      {
+        "name": "verification-before-completion",
+        "source": "obra/superpowers",
+        "file": {
+          "store": "pack",
+          "dir": "obra-superpowers/verification-before-completion"
+        },
+        "url": "https://github.com/obra/superpowers/tree/main/skills/verification-before-completion",
+        "why": "Evidence before claims: run it and read the output"
+      }
+    ]
+  }
+}

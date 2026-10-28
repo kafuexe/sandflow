@@ -5,6 +5,8 @@ import type {
   BlockDef,
   Chat,
   ChatSummary,
+  CleanupItem,
+  CleanupResult,
   DataChange,
   EnvValues,
   Flow,
@@ -73,6 +75,8 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
 
 export const api = {
   getData: () => request<AppData & { rev: number }>("GET", "/data"),
+  planCleanup: () => request<{ items: CleanupItem[] }>("GET", "/cleanup"),
+  applyCleanup: (ids: string[]) => request<{ results: CleanupResult[] }>("POST", "/cleanup", { ids }),
   saveBlocks: (blocks: BlockDef[], rev: number) => request<{ rev: number }>("PUT", `/blocks?rev=${rev}`, blocks),
   saveFlows: (flows: Flow[], rev: number) => request<{ rev: number }>("PUT", `/flows?rev=${rev}`, flows),
   listChats: (flowId: string) => request<ChatSummary[]>("GET", `/chats?flowId=${encodeURIComponent(flowId)}`),

@@ -5,6 +5,7 @@ import type { FlowNode, NodeDelivery, NodeIO, ResolvedConfig, TriggerEvent } fro
 import type { NodeResult, RunContext } from "../engine";
 import { withMergeLock } from "../stack";
 import { exitText, runTree } from "../proc";
+import { runChecks } from "./checks";
 import { codeOwner, trustedOnHost } from "./trust";
 
 const execFileP = promisify(execFile);
@@ -162,6 +163,8 @@ export async function runAuto(ctx: RunContext, node: FlowNode, cfg: ResolvedConf
   }
 
   if (cfg.autoAction === "merge-parent") return mergeIntoParent(ctx, node, inputs);
+  // In the run's worktree (a scratch one without REPO_PATH), not REPO_PATH's checkout.
+  if (cfg.autoAction === "checks") return runChecks(ctx, node, cfg, inputs);
 
   const repo = requireEnv(env, "REPO_PATH");
   switch (cfg.autoAction) {

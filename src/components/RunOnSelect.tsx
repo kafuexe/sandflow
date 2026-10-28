@@ -113,6 +113,33 @@ export function FlowRunOn({ flow }: { flow: Flow }) {
   );
 }
 
+/** Inputs tab: the most a run of this flow may spend on its agents (empty = no limit). */
+export function FlowBudget({ flow }: { flow: Flow }) {
+  const { setFlowBudget } = useStore.getState();
+  return (
+    <section className="space-y-1.5">
+      <Label htmlFor="flow-budget">Budget per run (USD)</Label>
+      <Input
+        id="flow-budget"
+        type="number"
+        min={0}
+        step="0.5"
+        className="w-32"
+        value={flow.budgetUsd ?? ""}
+        placeholder="No limit"
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          setFlowBudget(flow.id, e.target.value === "" || !(v > 0) ? undefined : v);
+        }}
+      />
+      <p className="text-[11px] text-muted-foreground">
+        Counts what this flow&apos;s Claude agents spend (Box Stack tasks too), at Anthropic&apos;s list prices — only blocks with a Claude model set
+        are priced. A warning at 80%; at 100% the run is stopped (Retry from failed step goes on after you raise it).
+      </p>
+    </section>
+  );
+}
+
 /** Inputs tab: an overseer agent that looks over this flow's running agents now and then (off by default). */
 export function FlowOverseer({ flow }: { flow: Flow }) {
   const { setFlowOverseer } = useStore.getState();

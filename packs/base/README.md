@@ -9,7 +9,7 @@ It's also the **template for making your own pack**: click **Use this template**
 | | |
 |---|---|
 | **Templates** | AI Agent, Git Automation, Reviewer, Trigger |
-| **Blocks** | Create task, Plan, Implement, CR, CR fix, Manager, Create MR, Shell command, Changed files (Script), Manual start, Schedule, GitHub / GitLab trigger, If, Answer comment, Post comment |
+| **Blocks** | Create task, Plan, Implement, CR, CR fix, Checks, Test, Manager, Create MR, Shell command, Changed files (Script), Manual start, Schedule, GitHub / GitLab trigger, If, Answer comment, Post comment |
 | **Flows** | Feature pipeline · Feature pipeline (review subflow) · Review until approved (a subflow) · MR comment assistant · Daily repo report |
 | **Skills** | [obra/superpowers](https://github.com/obra/superpowers) and [mattpocock/skills](https://github.com/mattpocock/skills) (vendored, with their licenses) |
 

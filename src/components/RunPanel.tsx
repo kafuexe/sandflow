@@ -7,7 +7,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useCurrentFlow, useStore } from "@/lib/store";
 import { cn } from "@/lib/utils";
 import { runNodeLabel } from "../../shared/subflow";
-import type { NodeRunStatus, RunState, RunStatus, TriggerEvent } from "../../shared/types";
+import { formatTokens, formatUsd, nodeUsage, runUsage, tokensOf } from "../../shared/pricing";
+import type { NodeRunState, NodeRunStatus, RunState, RunStatus, TriggerEvent } from "../../shared/types";
 import { ResizablePanel } from "@/components/ui/resizable";
 import { PANELS } from "@/lib/panelSize";
 import { RecoveryHistory } from "./Recovery";
@@ -125,6 +126,7 @@ export function RunPanel() {
             </div>
           )}
           {run.branch && <div className="font-mono text-xs text-muted-foreground">branch: {run.branch}</div>}
+          <RunCost run={run} budget={flows.find((f) => f.id === run.flowId)?.budgetUsd} />
           <ResumedFrom run={run} onOpen={(id) => void watch(id)} />
           {runWarning?.runId === run.id && (
             <div role="status" className="flex gap-1.5 rounded border border-amber-400/40 bg-amber-500/10 p-2 text-xs text-amber-300">
@@ -169,6 +171,7 @@ export function RunPanel() {
                   ↻{run.recovery![id].history.length}
                 </span>
               )}
+              <StepCost usage={s.usage} />
               {s.restored ? (
                 <span className="text-[10px] text-muted-foreground" title="Kept from the run this one resumed (not run again)">kept</span>
               ) : (
@@ -237,6 +240,32 @@ export function RunPanel() {
 const activityCount = (a: RunState["activity"]) => Object.values(a ?? {}).reduce((n, l) => n + l.length, 0);
 
 /** The run's system log; follows new lines unless you scrolled up (also once the log is capped and its length stays put). */
+/** What the run's agents used: priced spend (own steps and Box Stack tasks) and its own steps' tokens. */
+function RunCost({ run, budget }: { run: RunState; budget?: number }) {
+  const t = runUsage(run);
+  const tokens = tokensOf(t);
+  if (!tokens && !run.costUsd) return null;
+  const spent = run.costUsd ?? t.costUsd;
+  const over = !!budget && spent >= budget;
+  return (
+    <div className="text-xs text-muted-foreground" title={`in ${t.inputTokens} · out ${t.outputTokens} · cache read ${t.cacheReadTokens} · cache write ${t.cacheWriteTokens}`}>
+      Spent <span className={cn("font-medium", over ? "text-red-400" : "text-foreground")}>{formatUsd(spent)}</span>
+      {budget ? ` of ${formatUsd(budget)}` : ""} · {formatTokens(tokens)} tokens
+      {t.unpriced > 0 && <span> · {t.unpriced} agent turn{t.unpriced === 1 ? "" : "s"} without a price (no model set, or not a Claude model)</span>}
+    </div>
+  );
+}
+
+function StepCost({ usage }: { usage: NodeRunState["usage"] }) {
+  if (!usage?.length) return null;
+  const t = nodeUsage(usage);
+  return (
+    <span className="shrink-0 text-[10px] text-muted-foreground" title={`${formatTokens(tokensOf(t))} tokens`}>
+      {t.unpriced === usage.length ? formatTokens(tokensOf(t)) : formatUsd(t.costUsd)}
+    </span>
+  );
+}
+
 function LogBox({ run, label }: { run: RunState; label: (id: string) => string }) {
   const { ref, onScroll, away, jump } = useFollow(`${run.id}:${run.logs.length}:${run.logs.at(-1)?.ts}:${run.logs.at(-1)?.msg.length}`);
   return (

@@ -44,7 +44,7 @@ export const CONFIG_FIELDS: Record<keyof BlockConfig, FieldDoc> = {
     doc: "Appended after the block's instructions — the usual way to customise an agent node",
     example: "Focus only on security issues.",
   },
-  autoAction: { type: "string", kinds: ["auto"], doc: "create-task | create-mr | shell | post-comment (pick the matching block instead)" },
+  autoAction: { type: "string", kinds: ["auto"], doc: "create-task | create-mr | shell | post-comment | checks (pick the matching block instead)" },
   shellCommand: { type: "string", kinds: ["auto"], doc: "Shell command run on the host in REPO_PATH; stdout becomes the artifact", example: "npm test" },
   agent: {
     type: "object",
@@ -94,6 +94,32 @@ export const CONFIG_FIELDS: Record<keyof BlockConfig, FieldDoc> = {
     kinds: ["integration"],
     doc: "{options: {<option id>: value}}: values for the harness action's options (merged into the block's); ref/action/exits come with the block",
     example: { options: { workflow: "quick" } },
+  },
+  checks: {
+    type: "object",
+    kinds: ["auto"],
+    doc:
+      "Checks block: {commands: [{name, run, required? (default true), timeoutSeconds? (default 600)}], reuse? (default true)}. Runs each command in the run's worktree; " +
+      "leaves through exit 'pass' (every required check passed) or 'fail' (the failures' output becomes the steer — wire fail to a fix step). Replaces the command list as a whole",
+    example: { commands: [{ name: "lint", run: "npm run lint" }, { name: "tests", run: "npm test" }] },
+  },
+  verdict: {
+    type: "boolean",
+    kinds: ["ai"],
+    doc: "Makes an agent a gate: it must answer <verdict>PASS</verdict> or <verdict>FAIL</verdict> and the node leaves through exit 'pass' or 'fail' (no verdict = fail)",
+    example: true,
+  },
+  devServer: {
+    type: "object",
+    kinds: ["ai"],
+    doc: "{command, readyUrl?, startupTimeoutSeconds? (default 60)}: a dev server started in the worktree before the agent and stopped after it (for an AI tester)",
+    example: { command: "npm run dev", readyUrl: "http://127.0.0.1:5173/" },
+  },
+  skipDocsOnly: {
+    type: "boolean",
+    kinds: ["ai"],
+    doc: "With verdict: when the branch only changed docs (Markdown, docs/, README…), pass without running the agent",
+    example: true,
   },
 };
 

@@ -86,6 +86,8 @@ interface State {
   setFlowContinueAutomatically(id: string, on: boolean): void;
   /** The flow's overseer agent (undefined = off). */
   setFlowOverseer(id: string, overseer: OverseerSettings | undefined): void;
+  /** Most a run of the flow may spend (USD; undefined = no limit). */
+  setFlowBudget(id: string, budgetUsd: number | undefined): void;
   /** Change the flow's Recovery setting (fields set to undefined go back to their defaults). */
   setFlowRecovery(id: string, patch: Partial<FlowRecovery>): void;
   deleteFlow(id: string): void;
@@ -369,6 +371,10 @@ export const useStore = create<State>((set, get) => {
     setFlowOverseer(id, overseer) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;
       patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : overseer ? { ...f, overseer } : (({ overseer: _, ...rest }) => rest)(f))) }), "flows");
+    },
+    setFlowBudget(id, budgetUsd) {
+      if (get().data?.flows.find((f) => f.id === id)?.pack) return;
+      patchData((d) => ({ ...d, flows: d.flows.map((f) => (f.id !== id ? f : budgetUsd ? { ...f, budgetUsd } : (({ budgetUsd: _, ...rest }) => rest)(f))) }), "flows");
     },
     setFlowRecovery(id, patch) {
       if (get().data?.flows.find((f) => f.id === id)?.pack) return;

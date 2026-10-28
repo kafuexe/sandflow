@@ -2,6 +2,7 @@
 // and Flow output blocks (named exits). On the parent's canvas the subflow node gets those inputs and one
 // `exit:<name>` handle per output name.
 
+import { GATE_EXITS, isGate } from "./gates";
 import { resolveNode } from "./resolve";
 import { STACK_EXITS } from "./stack";
 import type { BlockDef, ExitHandle, Flow, FlowNode, ResolvedConfig } from "./types";
@@ -64,6 +65,7 @@ export function resolveNodeIn(node: FlowNode, blocks: BlockDef[], flows: Flow[])
   const cfg = resolveNode(node, blocks);
   if (cfg.kind === "script") return { ...cfg, exits: cfg.script.exits.filter(Boolean) };
   if (cfg.kind === "integration") return { ...cfg, exits: cfg.integration.exits.filter(Boolean) };
+  if (isGate(cfg)) return { ...cfg, exits: [...GATE_EXITS] };
   if (cfg.kind === "stack") return { ...cfg, inputs: { ...cfg.inputs, artifact: true, steer: true }, exits: [...STACK_EXITS] };
   if (cfg.kind !== "subflow") return { ...cfg, exits: [] };
   const child = flows.find((f) => f.id === cfg.subflow.flowId);

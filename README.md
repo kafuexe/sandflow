@@ -219,6 +219,42 @@ Run tab, or a step on the Agent screen) and pick **Re-run from here**.
   whole flow again). Runs from before this feature, and Box Stack tasks, can't be resumed.
 - API: `POST /api/runs/<id>/resume` with `{ "fromNodeIds"?: [...] }` (default: the failed steps).
 
+### Checks and tests (gates)
+
+A **gate** leaves through one of two exits, **pass** or **fail**; wire **fail** back to a fix step to loop until it passes.
+
+- **Checks** (base pack): runs your lint / test / build commands, in order, in the run's worktree (inside its sandbox, or on
+  this machine with *Sandbox: None*). Each command has a name, a time limit (default 10 min) and is **required** or
+  **advisory**: a failed required check makes the block leave through **fail**, with the failures' output as its steer
+  (what the fix step gets); an advisory failure is only reported. When neither the commands nor the worktree (commit,
+  uncommitted changes) changed since the checks last passed, the results are reused instead of run again.
+- **Gate** on any agent block (block editor → *Gate: the agent answers PASS or FAIL*): the agent must end with
+  `<verdict>PASS</verdict>` or `<verdict>FAIL</verdict>`; it's asked once more when it doesn't, and still no verdict counts as
+  FAIL. *Pass without running when only docs changed* skips it when the branch only touches Markdown, `docs/`, README,
+  CHANGELOG or LICENSE.
+- **Test** (base pack): an AI tester gate. It runs the tests and exercises the change itself against the plan, and passes
+  docs-only changes without running. Give it a **dev server** (block editor → *Dev server command* + *Ready URL*): it's
+  started in the worktree before the agent, polled until the URL answers (default wait 60 s), and stopped afterwards. In a
+  container the URL is the container's own `localhost`.
+
+### What runs cost
+
+Agent steps record their tokens (in, out, cache read, cache write). Steps with a Claude model set are priced at Anthropic's
+list prices (`shared/pricing.ts`); a block with no model set (the CLI's default) or another provider's model shows tokens only.
+The Run tab shows the run's spend (Box Stack tasks included) and each step's.
+
+**Budget** (Inputs tab): the most one run of the flow may spend. At 80% the run gets a warning flag; at 100% it's stopped
+with an error flag — raise the budget and use *Retry from failed step* to go on.
+
+### Cleaning up old branches
+
+Each run without `BRANCH_NAME` works on its own `sandflow/<run id>` branch, and isolated Box Stack tasks on their own task
+branches. **Settings → Clean up old run branches** lists those branches of finished runs and removes the ones you pick,
+with any worktree left on them. A branch is only offered when every one of its commits is also on another branch or a
+remote, its worktree (if any) has no uncommitted changes and isn't your main checkout, and no live or paused run uses it;
+the rest are listed with the reason they're kept. Branches you named are never touched and nothing is force-removed.
+A removed branch's runs can no longer be resumed. API: `GET /api/cleanup`, `POST /api/cleanup` with `{ "ids": [...] }`.
+
 ## Triggers & logic
 
 Flows can start themselves. Add a **trigger** block as the first block and switch the flow **Active** (top bar) — no

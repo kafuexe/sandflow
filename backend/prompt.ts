@@ -41,6 +41,11 @@ export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, 
         "Don't look for existing code — put everything the next step needs in your output.",
     );
   }
+  if (cfg.devServer.command.trim()) {
+    sections.push(
+      `# Dev server\nThe app's dev server is already running (\`${cfg.devServer.command.trim()}\`${cfg.devServer.readyUrl.trim() ? `, at ${cfg.devServer.readyUrl.trim()}` : ""}) and is stopped after you finish. Don't start another one.`,
+    );
+  }
   if (cfg.inputs.startingPrompt && startingPrompt.trim()) {
     sections.push(`# Task (starting prompt)\n${startingPrompt.trim()}`);
   }
@@ -67,8 +72,16 @@ export function buildPrompt({ cfg, inputs, startingPrompt, qa, routes, packDir, 
   }
 
   const protocol: string[] = [];
-  if (cfg.outputs.artifact) protocol.push("- Put your main deliverable inside <artifact>…</artifact>.");
-  if (cfg.outputs.steer) protocol.push("- Put instructions for the next step inside <steer>…</steer>.");
+  // A gate leaves through pass / fail with both outputs.
+  if (cfg.outputs.artifact || cfg.verdict) protocol.push("- Put your main deliverable inside <artifact>…</artifact>.");
+  if (cfg.outputs.steer || cfg.verdict) {
+    protocol.push(cfg.verdict ? "- On FAIL, put a numbered list of what must be fixed inside <steer>…</steer>." : "- Put instructions for the next step inside <steer>…</steer>.");
+  }
+  if (cfg.verdict) {
+    protocol.push(
+      "- End with your verdict: <verdict>PASS</verdict> only if every requirement is met and you checked it yourself, otherwise <verdict>FAIL</verdict>. A missing verdict counts as FAIL.",
+    );
+  }
   if (routes?.length) protocol.push("- Put the id of the chosen route inside <route>…</route>.");
   if (cfg.allowQuestions) {
     protocol.push("- If you truly need information from the user, output ONLY <question>…</question> and stop.");
