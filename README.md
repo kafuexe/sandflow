@@ -95,6 +95,10 @@ claude plugin install sand@sandflow      # or, in Claude Code: /plugin install s
 | `sandflow mcp` | stdio MCP server for Claude Code |
 
 Exit codes: 0 done, 1 failed, 2 usage error, 3 waiting on a question, 75 paused (can continue later).
+`--env` / `--repo` apply to that run only and are kept for continuing it — except secret-named values (token, key,
+password…), which are never saved: set those in Inputs. In `run`, Ctrl+C detaches (the run goes on in the
+background); questions are asked in the terminal. Runs of the desktop app show up in `runs` / `-r` and are continued
+through the app while it's open.
 <!-- /CLI reference -->
 
 **Uninstall** (removes the CLI, launcher, PATH entry, checker, pending schedules, the plugin and the MCP entry it
