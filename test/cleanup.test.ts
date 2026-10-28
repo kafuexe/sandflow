@@ -6,8 +6,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { applyCleanup, ownedBranch, planCleanup } from "../backend/cleanup";
 import type { RunState } from "../shared/types";
 
+// Real git, a dozen-plus calls per test: slow on Windows when the whole suite runs in parallel.
+const GIT_TIMEOUT = 30_000;
+
 const dirs: string[] = [];
-afterEach(() => dirs.splice(0).forEach((d) => fs.rmSync(d, { recursive: true, force: true })));
+afterEach(() => dirs.splice(0).forEach((d) => fs.rmSync(d, { recursive: true, force: true, maxRetries: 5 })));
 
 function repo() {
   const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sandflow-clean-")));
@@ -50,7 +53,7 @@ describe("cleanup", () => {
     expect(results[1]).toMatchObject({ ok: false });
     expect(git("branch", "--list", "sandflow/*")).not.toContain("sandflow/merged");
     expect(git("branch", "--list", "sandflow/*")).toContain("sandflow/unique");
-  });
+  }, GIT_TIMEOUT);
 
   it("removes a clean leftover worktree with its branch; keeps a dirty one", async () => {
     const { d, git } = repo();
@@ -68,5 +71,5 @@ describe("cleanup", () => {
     expect(r.ok).toBe(true);
     expect(fs.existsSync(clean)).toBe(false);
     expect(fs.existsSync(dirty)).toBe(true);
-  });
+  }, GIT_TIMEOUT);
 });
