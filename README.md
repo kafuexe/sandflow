@@ -31,7 +31,19 @@ Builds are **not code-signed** yet: Windows SmartScreen shows "Unknown publisher
 
 Sandflow also runs without the desktop app: a `sandflow` command (backend + web UI) and a Claude Code plugin that
 picks, starts and follows flows for you. It needs **Node.js 22+** (plus Git and Docker / Podman for the flows, as
-below). One line installs both, no administrator rights:
+below). The quickest way is npm:
+
+```bash
+npm install -g sandflow
+sandflow ui        # start the backend and open the UI in your browser
+sandflow setup     # optional: add the Claude Code plugin and the sandflow MCP server
+```
+
+The npm package has no sandbox image (Sandflow never pulls one); it ships the Dockerfile instead, so build it once
+per version: `docker build -t "sandflow-agent:$(sandflow --version)" "$(npm root -g)/sandflow/sandbox"`. Update with
+`sandflow shutdown && npm update -g sandflow`; flows, settings and runs stay in `~/.sandflow`.
+
+Or use the one-line installers, which install both into `~/.sandflow` (no administrator rights):
 
 ```powershell
 # Windows (PowerShell)
@@ -77,13 +89,14 @@ claude plugin install sand@sandflow      # or, in Claude Code: /plugin install s
   `sandflow resume --paused` every hour, so runs paused by a crash, reboot or update continue unattended.
 - `/sand:edit` — designs or changes flows (adds and wires blocks) through the MCP server.
 
-**On the command line:** `sandflow --ui` opens the UI in the browser (starting the backend daemon if needed);
+**On the command line:** `sandflow ui` (or `sandflow --ui`) opens the UI in the browser (starting the backend daemon if needed);
 `sandflow -r` lists recent runs (arrow keys + Enter) and continues the one you pick.
 
 <!-- CLI reference: the sandflow CLI owns this list; refine it with the CLI. -->
 | Command | |
 |---|---|
-| `sandflow --ui [--port N]` | Open the UI (starts the daemon) |
+| `sandflow ui [--port N]` | Open the UI (starts the daemon); `--ui` works too |
+| `sandflow setup [--no-plugin] [--no-mcp]` | Add the Claude Code plugin and MCP server (after `npm i -g sandflow`) |
 | `sandflow serve [--port N] [--daemon]` / `sandflow shutdown` | Run / stop the backend |
 | `sandflow flows [--json]` | List flows and their required inputs |
 | `sandflow run <flow> [prompt] [--env K=V] [--repo PATH] [--detach] [--json]` | Start a run (and follow it) |
@@ -481,6 +494,10 @@ git push --follow-tags
 download table, builds the sandbox image once, packs it into the Windows `.exe` and the Linux `.deb` / `.AppImage`,
 uploads them, and publishes the release — which is what installed apps auto-update from. macOS isn't built for now
 (the `mac` section of `electron-builder.yml` is kept for later).
+
+**npm.** The same workflow publishes the `sandflow` npm package (`npm run build:cli` → `dist-cli/`: CLI, web UI,
+packs, skills) once every platform built. Add an npm automation token as the `NPM_TOKEN` repository secret; without it
+the step is skipped with a warning. To publish by hand: `npm login`, then `npm run publish:npm`.
 
 **Auto-update needs public releases.** While the repo is private the app can't read its releases (it logs a 404 and
 keeps working). Make the repo public, or publish releases to a separate public repo (change `publish` in

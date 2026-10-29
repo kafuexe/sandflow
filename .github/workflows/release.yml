@@ -52,6 +52,8 @@ jobs:
           Each installer is self-contained: the sandbox image is inside, so there's nothing else to download and it
           works offline. The other files here (\`latest*.yml\`, \`.blockmap\`) are used by auto-update.
 
+          **npm** (needs Node.js 22+): \`npm install -g sandflow\`, then \`sandflow ui\` (and \`sandflow setup\` for Claude Code).
+
           **Command line + Claude Code plugin** (needs Node.js 22+): installs [sandflow-cli.tgz](${URL}/sandflow-cli.tgz)
           into \`~/.sandflow\` and adds \`/sand:flow\`, \`/sand:schedule\`, \`/sand:edit\` to Claude Code.
 
@@ -128,14 +130,15 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build:cli
-      # release/sandflow-cli-<version>.tgz, attached as is and as sandflow-cli.tgz (what the installers download).
+      # release/sandflow-<version>.tgz (the `sandflow` npm package), attached as is and as sandflow-cli.tgz (what the
+      # installers download).
       - run: npm run pack:cli
       - name: Name the tarball and write its checksum
         run: |
           V="${GITHUB_REF_NAME#v}"
           cd release
-          test -f "sandflow-cli-${V}.tgz"
-          cp "sandflow-cli-${V}.tgz" sandflow-cli.tgz
+          test -f "sandflow-${V}.tgz"
+          cmp "sandflow-${V}.tgz" sandflow-cli.tgz
           sha256sum sandflow-cli.tgz > sandflow-cli.tgz.sha256
           cat sandflow-cli.tgz.sha256
       - name: Smoke test the installer with it
@@ -145,12 +148,40 @@ jobs:
           SANDFLOW_CLI_URL="$PWD/release/sandflow-cli.tgz" SANDFLOW_CLI_SHA256="$(cut -d' ' -f1 release/sandflow-cli.tgz.sha256)" \
             bash scripts/install.sh --no-plugin --no-mcp
           "$HOME/.sandflow/bin/sandflow" --version
+      - name: Smoke test npm install -g with it
+        run: |
+          export HOME="$RUNNER_TEMP/npm-home"
+          mkdir -p "$HOME"
+          npm install -g --prefix "$RUNNER_TEMP/npm-global" "./release/sandflow-${GITHUB_REF_NAME#v}.tgz"
+          test "$("$RUNNER_TEMP/npm-global/bin/sandflow" --version)" = "${GITHUB_REF_NAME#v}"
       - name: Upload to the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           V="${GITHUB_REF_NAME#v}"
-          gh release upload "$GITHUB_REF_NAME" release/sandflow-cli.tgz release/sandflow-cli.tgz.sha256 "release/sandflow-cli-${V}.tgz" --clobber
+          gh release upload "$GITHUB_REF_NAME" release/sandflow-cli.tgz release/sandflow-cli.tgz.sha256 "release/sandflow-${V}.tgz" --clobber
+
+  # `npm i -g sandflow`: publishes the release's sandflow-<version>.tgz once every platform built. Needs an npm
+  # automation token in the NPM_TOKEN repo secret; skipped (with a warning) without one.
+  npm:
+    needs: [build, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish sandflow to npm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          if [ -z "$NODE_AUTH_TOKEN" ]; then echo "::warning::NPM_TOKEN is not set; sandflow $V was not published to npm"; exit 0; fi
+          if npm view "sandflow@$V" version >/dev/null 2>&1; then echo "sandflow@$V is already on npm"; exit 0; fi
+          gh release download "$GITHUB_REF_NAME" --pattern "sandflow-$V.tgz"
+          npm publish "./sandflow-$V.tgz" --access public
 
   publish:
     needs: [build, cli]

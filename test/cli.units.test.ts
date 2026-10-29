@@ -7,6 +7,7 @@ import { parseArgs, parseAt, parseEnv, parsePort, UsageError } from "../backend/
 import { exitCodeFor, changeLines, newSeen, summaryLine } from "../backend/cli/follow";
 import { homePaths, liveDaemon, readDaemonInfo, releaseLock, removeDaemonInfo, takeLock, writeDaemonInfo } from "../backend/cli/home";
 import { keyOf, pickerRow, renderPicker, step } from "../backend/cli/picker";
+import { mcpCommand, setup, type SetupDeps } from "../backend/cli/setup";
 import { appendHistory, compactHistory, createHistoryRecorder, readHistory, type HistoryEntry } from "../backend/history";
 import type { RunState } from "../shared/types";
 
@@ -215,5 +216,60 @@ describe("daemon.json and the start lock", () => {
     expect(fs.existsSync(p.daemonLock)).toBe(false);
     fs.writeFileSync(p.daemonLock, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() })); // dead holder
     expect(takeLock(p.daemonLock)).toBe(true);
+  });
+});
+
+describe("cli setup", () => {
+  const deps = (claudeJson: string, opts: { missing?: boolean; failMcp?: boolean } = {}) => {
+    const calls: string[] = [];
+    const d: SetupDeps = {
+      claude(args) {
+        if (opts.missing) return null;
+        calls.push(args.join(" "));
+        if (args.join(" ").endsWith("list --json")) return { code: 0, stdout: "[]" };
+        return { code: opts.failMcp && args[1] === "add" && args[0] === "mcp" ? 1 : 0, stdout: "" };
+      },
+      claudeJson,
+      platform: "linux",
+    };
+    return { d, calls };
+  };
+
+  it("adds the marketplace, the plugin and the MCP server", () => {
+    const { d, calls } = deps(path.join(tmp(), ".claude.json"));
+    const r = setup({ plugin: true, mcp: true }, d);
+    expect(r.ok).toBe(true);
+    expect(calls).toContain("plugin marketplace add kafuexe/sandflow");
+    expect(calls).toContain("plugin install sand@sandflow");
+    expect(calls).toContain("mcp add --scope user sandflow -- sandflow mcp");
+  });
+
+  it("replaces an older Sandflow entry, keeps someone else's and an identical one", () => {
+    const file = path.join(tmp(), ".claude.json");
+    const write = (e: object) => fs.writeFileSync(file, JSON.stringify({ mcpServers: { sandflow: e } }));
+    write({ command: "/home/me/.sandflow/bin/sandflow", args: ["mcp"] });
+    let { d, calls } = deps(file);
+    setup({ plugin: false, mcp: true }, d);
+    expect(calls).toEqual(["--version", "mcp remove --scope user sandflow", "mcp add --scope user sandflow -- sandflow mcp"]);
+
+    write({ command: "sandflow", args: ["mcp"] });
+    ({ d, calls } = deps(file));
+    expect(setup({ plugin: false, mcp: true }, d).notes[0]).toMatch(/already registered/);
+    expect(calls).toEqual(["--version"]);
+
+    write({ command: "other", args: [] });
+    ({ d, calls } = deps(file));
+    const r = setup({ plugin: false, mcp: true }, d);
+    expect(calls).toEqual(["--version"]);
+    expect(r.later.at(-1)).toBe("claude mcp add --scope user sandflow -- sandflow mcp");
+  });
+
+  it("registers through cmd on Windows and lists the commands when claude is missing or fails", () => {
+    expect(mcpCommand("win32")).toEqual(["cmd", "/c", "sandflow", "mcp"]);
+    const file = path.join(tmp(), ".claude.json");
+    const missing = setup({ plugin: true, mcp: true }, deps(file, { missing: true }).d);
+    expect(missing.ok).toBe(false);
+    expect(missing.later).toEqual(["claude plugin marketplace add kafuexe/sandflow", "claude plugin install sand@sandflow", "claude mcp add --scope user sandflow -- sandflow mcp"]);
+    expect(setup({ plugin: false, mcp: true }, deps(file, { failMcp: true }).d).ok).toBe(false);
   });
 });

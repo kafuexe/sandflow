@@ -1,6 +1,7 @@
-// npm run build:cli → dist-cli/: a self-contained `sandflow-cli` package (the bundled CLI, the built UI, packs and
-// skills); its only runtime dependency is @ai-hero/sandcastle. `--pack` (npm run pack:cli) also writes
-// release/sandflow-cli-<version>.tgz and release/sandflow-cli.tgz.
+// npm run build:cli → dist-cli/: the self-contained `sandflow` npm package (the bundled CLI, the built UI, packs and
+// skills; `npm i -g sandflow`); its only runtime dependency is @ai-hero/sandcastle. `--pack` (npm run pack:cli) also
+// writes release/sandflow-<version>.tgz and release/sandflow-cli.tgz (what the one-line installers download).
+// `--publish` (npm run publish:npm) publishes dist-cli/ to the npm registry; extra args after it go to npm publish.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -35,19 +36,25 @@ await build({
 
 run(process.execPath, [path.join(root, "node_modules", "vite", "bin", "vite.js"), "build", "--outDir", path.join(out, "web"), "--emptyOutDir"]);
 
-for (const dir of ["packs", "skills", "agent-skills"]) fs.cpSync(path.join(root, dir), path.join(out, dir), { recursive: true });
+for (const dir of ["packs", "skills", "agent-skills", "sandbox"]) fs.cpSync(path.join(root, dir), path.join(out, dir), { recursive: true });
+fs.copyFileSync(path.join(root, "scripts", "npm-readme.md"), path.join(out, "README.md"));
 
 fs.writeFileSync(
   path.join(out, "package.json"),
   `${JSON.stringify(
     {
-      name: "sandflow-cli",
+      name: "sandflow",
       version: pkg.version,
-      description: "Sandflow from the terminal: run, watch, continue and schedule flows of sandboxed coding agents",
+      description: "Visual flow builder for sandboxed coding agents: the sandflow CLI, its backend and the web UI",
+      keywords: ["sandflow", "coding-agents", "claude-code", "ai-agents", "sandbox", "workflow", "cli", "mcp"],
+      author: pkg.author,
       type: "module",
       bin: { sandflow: "sandflow.mjs" },
+      files: ["sandflow.mjs", "web", "packs", "skills", "agent-skills", "sandbox", "README.md"],
       engines: { node: ">=22" },
       license: pkg.license,
+      homepage: "https://github.com/kafuexe/sandflow#readme",
+      bugs: { url: "https://github.com/kafuexe/sandflow/issues" },
       repository: pkg.repository,
       dependencies: { "@ai-hero/sandcastle": pkg.dependencies["@ai-hero/sandcastle"] },
     },
@@ -55,7 +62,7 @@ fs.writeFileSync(
     2,
   )}\n`,
 );
-console.log(`dist-cli/ built (sandflow-cli ${pkg.version})`);
+console.log(`dist-cli/ built (sandflow ${pkg.version})`);
 
 if (process.argv.includes("--pack")) {
   const release = path.join(root, "release");
@@ -63,7 +70,13 @@ if (process.argv.includes("--pack")) {
   // npm pack leaves node_modules out by itself.
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   run(npm, ["pack", "--pack-destination", release], { cwd: out, shell: process.platform === "win32" });
-  const tgz = path.join(release, `sandflow-cli-${pkg.version}.tgz`);
+  const tgz = path.join(release, `sandflow-${pkg.version}.tgz`);
   fs.copyFileSync(tgz, path.join(release, "sandflow-cli.tgz"));
   console.log(`release/${path.basename(tgz)} and release/sandflow-cli.tgz written`);
+}
+
+if (process.argv.includes("--publish")) {
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const extra = process.argv.slice(process.argv.indexOf("--publish") + 1);
+  run(npm, ["publish", "--access", "public", ...extra], { cwd: out, shell: process.platform === "win32" });
 }
