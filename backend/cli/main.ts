@@ -11,6 +11,7 @@ import { ApiError, ensureDaemon, instanceFor, request, spawnDaemonProcess, type 
 import { EXIT, followRun, logLine, money, runEvents, newSeen, changeLines, runResult } from "./follow";
 import { cliVersion, homePaths, liveDaemon, pidAlive, readDaemonInfo, sandflowHome } from "./home";
 import { ago, pick } from "./picker";
+import { realSetupDeps, setup, type SetupDeps } from "./setup";
 import {
   appendLog,
   installTrigger,
@@ -44,7 +45,8 @@ Usage: sandflow <command> [options]
   serve [--port N] [--daemon]            Run the backend (the other commands start it when needed)
   shutdown                               Stop the backend (running flows pause and continue on the next start)
   mcp                                    Stdio MCP server for Claude Code
-  --ui [--port N]                        Open the Sandflow UI in your browser
+  setup [--no-plugin] [--no-mcp]         Add the Claude Code plugin and MCP server (after npm i -g sandflow)
+  ui, --ui [--port N]                    Open the Sandflow UI in your browser
   --version                              Print the version
 
 Exit codes: 0 done, 1 failed, 2 usage error, 3 waiting on a question, 75 paused (continue later).
@@ -430,7 +432,7 @@ Stop the background Sandflow. Running flows pause (sandboxes are closed) and con
 };
 
 const uiCmd: Command = {
-  help: `sandflow --ui [--port N]
+  help: `sandflow ui [--port N]  (or sandflow --ui)
 
 Make sure Sandflow runs (on port N when it has to start) and open its UI in your browser.`,
   flags: { port: "string", ui: "bool" },
@@ -454,6 +456,25 @@ It talks to the background Sandflow, starting it when needed. Register it with:
   async run(ctx) {
     const { mcpProxy } = await import("./mcp");
     return mcpProxy(ctx);
+  },
+};
+
+const setupFor = new WeakMap<Ctx, SetupDeps>();
+export const setSetupDeps = (ctx: Ctx, d: SetupDeps) => setupFor.set(ctx, d);
+
+const setupCmd: Command = {
+  help: `sandflow setup [--no-plugin] [--no-mcp]
+
+Set Sandflow up in Claude Code (what the one-line installers do; run it after "npm i -g sandflow"):
+add the sand plugin (/sand:flow, /sand:schedule, /sand:edit) from the sandflow marketplace, and register
+"sandflow mcp" as the user-scope sandflow MCP server. Safe to run again (it updates both).`,
+  flags: { "no-plugin": "bool", "no-mcp": "bool" },
+  async run(ctx, a) {
+    const r = setup({ plugin: !a.flags["no-plugin"], mcp: !a.flags["no-mcp"] }, setupFor.get(ctx) ?? realSetupDeps(ctx.env));
+    for (const n of r.notes) ctx.out(`- ${n}`);
+    if (r.later.length) ctx.out(["", "Run later:", ...r.later.map((l) => `  ${l}`)].join("\n"));
+    if (r.ok) ctx.out("\nRestart Claude Code, then ask it: /sand:flow <your task>");
+    return r.ok ? EXIT.ok : EXIT.failed;
   },
 };
 
@@ -606,6 +627,8 @@ const COMMANDS: Record<string, Command> = {
   serve: serveCmd,
   shutdown: shutdownCmd,
   mcp: mcpCmd,
+  setup: setupCmd,
+  ui: uiCmd,
   "--ui": uiCmd,
 };
 
