@@ -11,7 +11,7 @@
       "displayName": "Sandflow",
       "source": "./claude-plugin",
       "description": "/sand:flow picks, starts and follows Sandflow runs; /sand:schedule runs them later and keeps paused runs going; /sand:edit designs flows.",
-      "version": "0.0.3"
+      "version": "0.0.4"
     }
   ]
 }
