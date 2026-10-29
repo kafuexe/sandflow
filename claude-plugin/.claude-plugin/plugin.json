@@ -2,7 +2,7 @@
   "name": "sand",
   "displayName": "Sandflow",
   "description": "Run Sandflow flows from Claude Code: pick and start the right flow for a task, follow it to the result, continue paused runs, schedule runs for later and design flows.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "author": {
     "name": "Ofek Tal",
     "url": "https://github.com/kafuexe/sandflow"
